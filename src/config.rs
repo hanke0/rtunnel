@@ -7,17 +7,32 @@ use std::io::Read;
 pub struct ServerConfig {
     pub endpoint: String,
     pub private_key: String,
-    pub ca: String,
+    pub public_key: String,
+    pub encryption: Option<String>,
+    pub clients: Vec<ServerClient>,
     pub services: Vec<ServerService>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServerClient {
+    pub name: String,
+    pub public_key: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ClientConfig {
     pub name: String,
-    pub server_endpoint: String,
+    pub private_key: String,
     pub public_key: String,
     pub encryption: Option<String>,
+    pub servers: Vec<ClientServer>,
     pub services: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClientServer {
+    pub endpoint: String,
+    pub public_key: String,
 }
 
 #[derive(Debug, Deserialize)]

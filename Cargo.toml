@@ -7,5 +7,4 @@ edition = "2024"
 tokio = { version = "1.45.1", features = ["full"] }
 toml = "0.8.10"
 serde = { version = "1.0", features = ["derive"] }
-ed25519-dalek = "2.1.0"
 rand = "0.8.5"

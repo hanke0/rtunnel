@@ -1,6 +1,6 @@
+mod config;
 use std::process::exit;
-
-use rtunnel::config::{ServerConfig, from_file};
+use config::{ServerConfig, from_file};
 use tokio::runtime::Builder;
 
 fn main() {
