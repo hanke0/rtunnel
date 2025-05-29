@@ -1,9 +1,15 @@
 use crate::transport::Transport;
+use anyhow;
 
-pub async fn client_handshake(stream: &mut impl Transport) -> Result<(), std::io::Error> {
-    Ok(())
+pub struct Session {
+    raw: Box<dyn Transport>,
 }
 
-pub async fn server_handshake(stream: &mut impl Transport) -> Result<(), std::io::Error> {
-    Ok(())
+impl Session {
+    pub async fn client_handshake<'a>(stream: Box<dyn Transport>) -> anyhow::Result<Self> {
+        Ok(Session { raw: stream })
+    }
+    pub async fn server_handshake(stream: Box<dyn Transport>) -> anyhow::Result<Self> {
+        Ok(Session { raw: stream })
+    }
 }

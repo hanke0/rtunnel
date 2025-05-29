@@ -1,4 +1,5 @@
-pub trait Transport {
-    fn read(&mut self, buf: &mut Vec<u8>) -> Result<usize, std::io::Error>;
-    fn write(&mut self, buf: Vec<u8>) -> Result<(), std::io::Error>;
-}
+use tokio::io::{AsyncRead, AsyncWrite};
+
+pub trait Transport: AsyncRead + AsyncWrite {}
+
+impl<T: ?Sized> Transport for T where T: AsyncRead + AsyncWrite {}
