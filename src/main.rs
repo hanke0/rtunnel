@@ -1,14 +1,13 @@
 mod config;
-mod transport;
 mod encryption;
-use config;
+mod transport;
 use std::process::exit;
 use tokio::runtime::Builder;
 
 fn main() {
     let cfg = config::from_file::<config::ServerConfig>("server.toml");
     if cfg.is_err() {
-        eprintln!("Failed to load config: {}", cfg.err().unwrap());
+        eprintln!("Failed to load config: {:?}", cfg.unwrap_err());
         exit(1);
     }
     let _cfg = cfg.unwrap();
