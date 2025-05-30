@@ -7,5 +7,9 @@ edition = "2024"
 tokio = { version = "1.45.1", features = ["full"] }
 toml = "0.8.10"
 serde = { version = "1.0", features = ["derive"] }
-rand = "0.8.5"
 anyhow = "1.0.98"
+x25519-dalek = { version = "2.0.1", features = ["getrandom"] }
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+base64 = "0.22.1"
+sha2 = "0.10.9"
