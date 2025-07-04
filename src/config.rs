@@ -25,7 +25,6 @@ pub struct ClientConfig {
     pub name: String,
     pub private_key: String,
     pub public_key: String,
-    pub encryption: Option<String>,
     pub servers: Vec<ClientServer>,
     pub services: Vec<String>,
 }

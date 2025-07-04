@@ -10,6 +10,10 @@ serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0.98"
 x25519-dalek = { version = "2.0.1", features = ["getrandom"] }
 ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
-rand_core = { version = "0.6.4", features = ["getrandom"] }
+rand_core = { version = "0.6.4", features = ["getrandom", "std"] }
 base64 = "0.22.1"
 sha2 = "0.10.9"
+aes-gcm = { version = "0.10.3", features = ["std"] }
+hkdf = { version = "0.12.4", features = ["std"] }
+bytes = "1.10.1"
+aead = { version = "0.5.2", features = ["std", "bytes"] }
