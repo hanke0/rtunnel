@@ -17,3 +17,5 @@ aes-gcm = { version = "0.10.3", features = ["std"] }
 hkdf = { version = "0.12.4", features = ["std"] }
 bytes = "1.10.1"
 aead = { version = "0.5.2", features = ["std", "bytes"] }
+log = "0.4.27"
+tokio-util = "0.7.15"

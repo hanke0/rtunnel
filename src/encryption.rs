@@ -103,11 +103,7 @@ impl ClientHello {
         buf[64..128].try_into().unwrap()
     }
 
-    fn build_msg(
-        public: &PublicKey,
-        random: &RandomKey,
-        signer: &impl Signer<Signature>,
-    ) -> Result<BytesMut> {
+    fn build_msg(public: &PublicKey, random: &RandomKey, signer: &SigningKey) -> Result<BytesMut> {
         let mut buf = start_msg(HANDSHAKE, Self::SIZE);
         buf.put_slice(public);
         buf.put_slice(random);
@@ -164,11 +160,7 @@ impl ServerHello {
         assert!(buf.len() == Self::SIZE);
         buf[64..128].try_into().unwrap()
     }
-    fn build_msg(
-        public: &PublicKey,
-        random: &RandomKey,
-        signer: &impl Signer<Signature>,
-    ) -> Result<BytesMut> {
+    fn build_msg(public: &PublicKey, random: &RandomKey, signer: &SigningKey) -> Result<BytesMut> {
         let mut buf = start_msg(HANDSHAKE, Self::SIZE);
         buf.put_slice(public);
         buf.put_slice(random);
@@ -323,12 +315,7 @@ pub async fn client_handshake(
     writer: &mut Writer,
     singer: &SigningKey,
     verifier: &VerifyingKey,
-    client_name: &str,
 ) -> anyhow::Result<(SessionHalf, SessionHalf)> {
-    let name = client_name.as_bytes();
-    if name.len() > 64 {
-        return Err(anyhow::anyhow!("Client name too long"));
-    }
     let ecdh_private = ECDHPrivate::random();
     let ecdh_public = ECDHPublic::from(&ecdh_private);
     let mut client_random = [0u8; 32];
@@ -342,13 +329,13 @@ pub async fn client_handshake(
         .with_context(|| "Failed to write to stream")?;
 
     let mut hash = Sha256::new();
-    hash.update(client_hello[HEADER_SIZE..]);
+    hash.update(&client_hello[HEADER_SIZE..]);
 
     let (msg_type, buf) = read_msg(reader).await?;
     if msg_type != HANDSHAKE {
         return Err(anyhow!("Invalid message type: {}", msg_type));
     }
-    let serve_hello = ServerHello::parse(buf, verifier)?;
+    let serve_hello = &ServerHello::parse(buf, verifier)?;
     hash.update(serve_hello);
     let hello_hash = hash.finalize();
     let their_public = ECDHPublic::from(serve_hello.get_public_key().clone());
@@ -356,14 +343,14 @@ pub async fn client_handshake(
 
     let (client_secret_iv, client_secret, server_secret_iv, server_secret) = expand_secret(
         &client_random,
-        &serve_hello.get_random_key(),
-        shared_key,
+        serve_hello.get_random_key(),
+        shared_key.as_bytes(),
         &hello_hash,
     );
 
     Ok((
-        SessionHalf::new(client_secret_iv, Aes256Gcm::new(&client_app_secret.into())),
-        SessionHalf::new(server_secret_iv, Aes256Gcm::new(&server_app_secret.into())),
+        SessionHalf::new(client_secret_iv, Aes256Gcm::new(&client_secret.into())),
+        SessionHalf::new(server_secret_iv, Aes256Gcm::new(&server_secret.into())),
     ))
 }
 
@@ -372,7 +359,6 @@ pub async fn server_handshake(
     writer: &mut Writer,
     singer: &SigningKey,
     verifier: &VerifyingKey,
-    client_name: &str,
 ) -> anyhow::Result<(SessionHalf, SessionHalf)> {
     let ecdh_private = ECDHPrivate::random();
     let ecdh_public = ECDHPublic::from(&ecdh_private);
@@ -381,8 +367,11 @@ pub async fn server_handshake(
         .try_fill_bytes(server_random.as_mut())
         .with_context(|| "Failed to generate random bytes")?;
 
-    let (msg_type, msg) = read_msg(reader)?;
-    let client_hello = ClientHello::parse(msg, verifier)?;
+    let (msg_type, msg) = read_msg(reader).await?;
+    if msg_type != HANDSHAKE {
+        return Err(anyhow!("Invalid message type: {}", msg_type));
+    }
+    let client_hello = &ClientHello::parse(msg, verifier)?;
     let mut hash = Sha256::new();
     hash.update(client_hello);
 
@@ -391,26 +380,26 @@ pub async fn server_handshake(
         .write_all(&server_hello)
         .await
         .with_context(|| "Failed to write to stream")?;
-    hash.update(server_hello[HEADER_SIZE..]);
+    hash.update(&server_hello[HEADER_SIZE..]);
 
     let hello_hash = hash.finalize();
     let their_public = ECDHPublic::from(client_hello.get_public_key().clone());
     let shared_key = ecdh_private.diffie_hellman(&their_public);
 
     let (client_secret_iv, client_secret, server_secret_iv, server_secret) = expand_secret(
-        &client_random,
-        &serve_hello.get_random_key(),
-        shared_key,
+        client_hello.get_random_key(),
+        &server_random,
+        shared_key.as_bytes(),
         &hello_hash,
     );
 
     Ok((
-        SessionHalf::new(client_secret_iv, Aes256Gcm::new(&client_app_secret.into())),
-        SessionHalf::new(server_secret_iv, Aes256Gcm::new(&server_app_secret.into())),
+        SessionHalf::new(client_secret_iv, Aes256Gcm::new(&client_secret.into())),
+        SessionHalf::new(server_secret_iv, Aes256Gcm::new(&server_secret.into())),
     ))
 }
 
-async fn copy_bidirectional(
+pub async fn copy_bidirectional(
     encrypted_reader: &mut Reader,
     encrypted_writer: &mut Writer,
     raw_reader: &mut Reader,

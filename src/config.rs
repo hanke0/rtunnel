@@ -1,3 +1,4 @@
+use crate::transport;
 use anyhow::Context;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -5,50 +6,58 @@ use std::fs::{self, File};
 use std::io::Read;
 
 #[derive(Debug, Deserialize)]
-pub struct ServerConfig {
-    pub endpoint: String,
-    pub private_key: String,
-    pub public_key: String,
-    pub encryption: Option<String>,
-    pub clients: Vec<ServerClient>,
-    pub services: Vec<ServerService>,
+struct Config {
+    pub servers: ServerConfigList,
+    pub clients: ClientConfigList,
 }
 
+pub type ServerConfigList = Vec<ServerConfig>;
+pub type ClientConfigList = Vec<ClientConfig>;
+
 #[derive(Debug, Deserialize)]
-pub struct ServerClient {
-    pub name: String,
+pub struct ServerConfig {
+    pub listen: transport::Address,
+    pub private_key: String,
     pub public_key: String,
+    pub client_public_key: String,
+    pub services: Vec<Service>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ClientConfig {
-    pub name: String,
     pub private_key: String,
     pub public_key: String,
-    pub servers: Vec<ClientServer>,
-    pub services: Vec<String>,
+    pub server_public_key: String,
+    pub services: Vec<Service>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ClientServer {
-    pub endpoint: String,
-    pub public_key: String,
+pub struct Service {
+    pub listen_to: transport::Address,
+    pub connect_to: transport::Address,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ServerService {
-    pub name: String,
-    pub allowed_clients: Vec<String>,
-    pub bind: String,
+impl ServerConfig {
+    pub fn from_file(path: &str) -> anyhow::Result<ServerConfigList> {
+        let cfg = from_file::<Config>(path)?;
+        if cfg.servers.is_empty() {
+            return Err(anyhow::Error::msg("No server found"));
+        }
+        Ok(cfg.servers)
+    }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ClientService {
-    pub name: String,
-    pub connect: String,
+impl ClientConfig {
+    pub fn from_file(path: &str) -> anyhow::Result<ClientConfigList> {
+        let cfg = from_file::<Config>(path)?;
+        if cfg.clients.is_empty() {
+            return Err(anyhow::Error::msg("No client found"));
+        }
+        Ok(cfg.clients)
+    }
 }
 
-pub fn from_file<T: DeserializeOwned>(path: &str) -> anyhow::Result<T> {
+fn from_file<T: DeserializeOwned>(path: &str) -> anyhow::Result<T> {
     check_config_perm(path).with_context(|| format!("Failed to get file permissions {}", path))?;
     let mut file = File::open(path).with_context(|| format!("Failed to open {}", path))?;
     let mut contents = String::new();
