@@ -1,4 +1,4 @@
-use crate::transport::{Reader, Writer};
+use crate::transport::{Address, Controller, Stream};
 use aes_gcm::{
     Aes256Gcm,
     aead::{AeadMutInPlace, KeyInit},
@@ -9,10 +9,11 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
-use std::{
-    array,
-    result::Result::{Err, Ok},
-};
+use std::array;
+use std::cmp;
+use std::fmt;
+use std::fmt::Display;
+use std::result::Result::{Err, Ok};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
 
 type PrivateKey = [u8; 32];
@@ -38,13 +39,13 @@ fn extract_msg_header(high: u8, low: u8) -> (u8, usize) {
     )
 }
 
-async fn read_msg(stream: &mut Reader) -> Result<(u8, BytesMut)> {
+async fn read_msg(stream: &mut Stream) -> Result<(u8, BytesMut)> {
     let mut buf = bytes::BytesMut::with_capacity(256);
     let typ = read_msg_inplace(stream, &mut buf).await?;
     Ok((typ, buf))
 }
 
-async fn read_msg_inplace(stream: &mut Reader, buf: &mut BytesMut) -> Result<u8> {
+async fn read_msg_inplace(stream: &mut Stream, buf: &mut BytesMut) -> Result<u8> {
     let mut header = [0u8; HEADER_SIZE];
     stream
         .read_exact(&mut header)
@@ -220,6 +221,7 @@ impl AsRef<[u8; 12]> for Seq {
 }
 
 pub struct SessionHalf {
+    stream: Stream,
     secret_iv: NonceB,
     sequence: Seq,
     aead: Aes256Gcm,
@@ -227,9 +229,36 @@ pub struct SessionHalf {
     buf: BytesMut,
 }
 
+impl Display for SessionHalf {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Session({})", self.stream)
+    }
+}
+
+impl Ord for SessionHalf {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.stream.cmp(&other.stream)
+    }
+}
+
+impl PartialOrd for SessionHalf {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for SessionHalf {
+    fn eq(&self, other: &Self) -> bool {
+        self.stream == other.stream
+    }
+}
+
+impl Eq for SessionHalf {}
+
 impl SessionHalf {
-    pub fn new(secret_iv: NonceB, aead: Aes256Gcm) -> Self {
+    pub fn new(stream: Stream, secret_iv: NonceB, aead: Aes256Gcm) -> Self {
         Self {
+            stream,
             secret_iv,
             sequence: Seq([0; 12]),
             aead,
@@ -237,82 +266,126 @@ impl SessionHalf {
             buf: BytesMut::with_capacity(MAX_RECORD_SIZE),
         }
     }
-    pub async fn transfer_encrypt_to_raw(&mut self, src: &mut Reader, dst: &mut Writer) -> usize {
+
+    pub async fn transfer_encrypt_to_raw(
+        &mut self,
+        controller: &Controller,
+        writer: &mut Stream,
+    ) -> usize {
         let mut size: usize = 0;
         loop {
-            match self.transfer_encrypt_to_raw_once(src, dst).await {
-                Ok(n) => {
-                    size += n;
+            tokio::select! {
+                _ = async move {
+                    loop {
+                            match self.transfer_encrypt_to_raw_once(writer).await  {
+                                Ok(n) => {
+                                    size += n;
+                                }
+                                Err(_) => {
+                                    return size;
+                                }
+                            };
+                    }
+                } => {
+                    return size;
                 }
-                Err(_) => {
+                _ = controller.wait_shutdown() => {
                     return size;
                 }
             }
         }
     }
 
-    async fn transfer_encrypt_to_raw_once(
-        &mut self,
-        src: &mut Reader,
-        dst: &mut Writer,
-    ) -> Result<usize> {
-        let typ = read_msg_inplace(src, &mut self.raw_buf).await?;
-        if typ != DATA {
-            return Err(anyhow!("Invalid message type: {}", typ));
+    async fn read_msg_inner(&mut self, expect_type: u8) -> Result<()> {
+        let typ = read_msg_inplace(&mut self.stream, &mut self.raw_buf).await?;
+        if typ != expect_type {
+            return Err(anyhow!(
+                "Invalid message type: {}, expect: {}",
+                typ,
+                expect_type
+            ));
         }
         let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
         self.buf.resize(self.raw_buf.len(), 0);
         self.aead
             .decrypt_in_place(&nonce.into(), &self.raw_buf, &mut self.buf)
             .with_context(|| "Failed to decrypt message")?;
-        dst.write_all(&self.buf)
+        self.sequence.incr();
+        Ok(())
+    }
+
+    pub async fn read_connect_msg(&mut self) -> Result<Address> {
+        self.read_msg_inner(CONNECT).await?;
+        let addr = Address::from_bytes(&self.raw_buf)?;
+        Ok(addr)
+    }
+
+    async fn transfer_encrypt_to_raw_once(&mut self, writer: &mut Stream) -> Result<usize> {
+        self.read_msg_inner(DATA).await?;
+        writer
+            .write_all(&self.raw_buf)
             .await
             .with_context(|| "Failed to write to stream")?;
-        self.sequence.incr();
         Ok(self.raw_buf.len())
     }
 
-    pub async fn transfer_raw_to_encrypt(&mut self, src: &mut Reader, dst: &mut Writer) -> usize {
+    pub async fn transfer_raw_to_encrypt(
+        &mut self,
+        controller: &Controller,
+        reader: &mut Stream,
+    ) -> usize {
         let mut size: usize = 0;
         loop {
-            match self.transfer_raw_to_encrypt_once(src, dst).await {
-                Ok(n) => {
-                    size += n;
+            tokio::select! {
+                _ = async move {
+                    loop {
+                            match self.transfer_raw_to_encrypt_once(reader).await  {
+                                Ok(n) => {
+                                    size += n;
+                                }
+                                Err(_) => {
+                                    return size;
+                                }
+                            };
+                    }
+                } => {
+                    return size;
                 }
-                Err(_) => {
+                _ = controller.wait_shutdown() => {
                     return size;
                 }
             }
         }
     }
 
-    async fn transfer_raw_to_encrypt_once(
-        &mut self,
-        src: &mut Reader,
-        dst: &mut Writer,
-    ) -> Result<usize> {
-        self.raw_buf.resize(MAX_MSG_SIZE, 0);
-        let n = src
-            .read(&mut self.raw_buf)
-            .await
-            .with_context(|| "Failed to read message from stream")?;
-        self.raw_buf.resize(n, 0);
-        start_msg_inplace(DATA, n, &mut self.buf);
+    async fn write_msg_inner(&mut self) -> Result<()> {
+        start_msg_inplace(DATA, self.raw_buf.len(), &mut self.buf);
         let mut body = self.buf.split_off(HEADER_SIZE);
         let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
         self.aead
             .encrypt_in_place(&nonce.into(), &self.raw_buf, &mut body)
             .with_context(|| "Failed to encrypt message")?;
-        dst.write_all(&self.buf)
+        self.stream
+            .write_all(&self.buf)
             .await
             .with_context(|| "Failed to write to stream")?;
+        Ok(())
+    }
+
+    async fn transfer_raw_to_encrypt_once(&mut self, reader: &mut Stream) -> Result<usize> {
+        self.raw_buf.resize(MAX_MSG_SIZE, 0);
+        let n = reader
+            .read(&mut self.raw_buf)
+            .await
+            .with_context(|| "Failed to read message from stream")?;
+        self.raw_buf.resize(n, 0);
+        self.write_msg_inner().await?;
         Ok(self.raw_buf.len())
     }
 }
 
 pub async fn client_handshake(
-    reader: &mut Reader,
-    writer: &mut Writer,
+    stream: &mut Stream,
     singer: &SigningKey,
     verifier: &VerifyingKey,
 ) -> anyhow::Result<(SessionHalf, SessionHalf)> {
@@ -323,7 +396,7 @@ pub async fn client_handshake(
         .try_fill_bytes(client_random.as_mut())
         .with_context(|| "Failed to generate random bytes")?;
     let client_hello = ClientHello::build_msg(ecdh_public.as_bytes(), &client_random, singer)?;
-    writer
+    stream
         .write_all(&client_hello)
         .await
         .with_context(|| "Failed to write to stream")?;
@@ -331,7 +404,7 @@ pub async fn client_handshake(
     let mut hash = Sha256::new();
     hash.update(&client_hello[HEADER_SIZE..]);
 
-    let (msg_type, buf) = read_msg(reader).await?;
+    let (msg_type, buf) = read_msg(stream).await?;
     if msg_type != HANDSHAKE {
         return Err(anyhow!("Invalid message type: {}", msg_type));
     }
@@ -349,14 +422,21 @@ pub async fn client_handshake(
     );
 
     Ok((
-        SessionHalf::new(client_secret_iv, Aes256Gcm::new(&client_secret.into())),
-        SessionHalf::new(server_secret_iv, Aes256Gcm::new(&server_secret.into())),
+        SessionHalf::new(
+            stream.clone(),
+            client_secret_iv,
+            Aes256Gcm::new(&client_secret.into()),
+        ),
+        SessionHalf::new(
+            stream.clone(),
+            server_secret_iv,
+            Aes256Gcm::new(&server_secret.into()),
+        ),
     ))
 }
 
 pub async fn server_handshake(
-    reader: &mut Reader,
-    writer: &mut Writer,
+    stream: &mut Stream,
     singer: &SigningKey,
     verifier: &VerifyingKey,
 ) -> anyhow::Result<(SessionHalf, SessionHalf)> {
@@ -367,7 +447,7 @@ pub async fn server_handshake(
         .try_fill_bytes(server_random.as_mut())
         .with_context(|| "Failed to generate random bytes")?;
 
-    let (msg_type, msg) = read_msg(reader).await?;
+    let (msg_type, msg) = read_msg(stream).await?;
     if msg_type != HANDSHAKE {
         return Err(anyhow!("Invalid message type: {}", msg_type));
     }
@@ -376,7 +456,7 @@ pub async fn server_handshake(
     hash.update(client_hello);
 
     let server_hello = ServerHello::build_msg(ecdh_public.as_bytes(), &server_random, singer)?;
-    writer
+    stream
         .write_all(&server_hello)
         .await
         .with_context(|| "Failed to write to stream")?;
@@ -394,22 +474,29 @@ pub async fn server_handshake(
     );
 
     Ok((
-        SessionHalf::new(client_secret_iv, Aes256Gcm::new(&client_secret.into())),
-        SessionHalf::new(server_secret_iv, Aes256Gcm::new(&server_secret.into())),
+        SessionHalf::new(
+            stream.clone(),
+            client_secret_iv,
+            Aes256Gcm::new(&client_secret.into()),
+        ),
+        SessionHalf::new(
+            stream.clone(),
+            server_secret_iv,
+            Aes256Gcm::new(&server_secret.into()),
+        ),
     ))
 }
 
 pub async fn copy_bidirectional(
-    encrypted_reader: &mut Reader,
-    encrypted_writer: &mut Writer,
-    raw_reader: &mut Reader,
-    raw_writer: &mut Writer,
+    controller: &Controller,
     read_half: &mut SessionHalf,
     write_half: &mut SessionHalf,
+    raw_stream: &mut Stream,
 ) -> (usize, usize) {
+    let mut raw_reader = raw_stream.clone();
     tokio::join!(
-        read_half.transfer_encrypt_to_raw(encrypted_reader, raw_writer),
-        write_half.transfer_raw_to_encrypt(raw_reader, encrypted_writer),
+        read_half.transfer_encrypt_to_raw(controller, raw_stream),
+        write_half.transfer_raw_to_encrypt(controller, &mut raw_reader),
     )
 }
 
@@ -457,10 +544,10 @@ fn expand_secret(
     let mut client_secret = Secret::default();
     let mut server_secret = Secret::default();
     server_handshake
-        .expand_multi_info(&[CLIENT_LABEL], &mut client_app_secret)
+        .expand_multi_info(&[CLIENT_LABEL], &mut client_secret)
         .expect("Fail to expand client app secret");
     server_handshake
-        .expand_multi_info(&[SERVER_LABEL], &mut server_app_secret)
+        .expand_multi_info(&[SERVER_LABEL], &mut server_secret)
         .expect("Fail to expand server app secret");
     (
         client_secret_iv,

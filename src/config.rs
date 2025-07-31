@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 use std::fs::{self, File};
 use std::io::Read;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct Config {
     pub servers: ServerConfigList,
     pub clients: ClientConfigList,
@@ -14,7 +14,7 @@ struct Config {
 pub type ServerConfigList = Vec<ServerConfig>;
 pub type ClientConfigList = Vec<ClientConfig>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ServerConfig {
     pub listen: transport::Address,
     pub private_key: String,
@@ -23,17 +23,18 @@ pub struct ServerConfig {
     pub services: Vec<Service>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ClientConfig {
     pub private_key: String,
     pub public_key: String,
     pub server_public_key: String,
+    pub server_address: transport::Address,
     pub services: Vec<Service>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Service {
-    pub listen_to: transport::Address,
+    pub bind_to: transport::Address,
     pub connect_to: transport::Address,
 }
 
