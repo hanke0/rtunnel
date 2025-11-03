@@ -1,6 +1,9 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use log::error;
 use serde::de::{Deserialize, Deserializer, Visitor};
+use socket2;
+use socket2::TcpKeepalive;
 use std::cmp;
 use std::fmt;
 use std::fmt::Display;
@@ -9,13 +12,14 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::result::Result::Ok;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 #[derive(Clone)]
 pub struct Stream {
@@ -138,13 +142,14 @@ impl Listener {
         match self {
             Listener::TCP(s) => {
                 let (stream, addr) = s.accept().await?;
+                let stream = set_keepalive(stream)?;
                 Ok((Stream::new(StreamInner::TCP(stream)), addr))
             }
         }
     }
 }
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub enum Address {
     TCP(SocketAddr),
 }
@@ -189,6 +194,7 @@ impl Address {
         match self {
             Address::TCP(a) => {
                 let stream = TcpStream::connect(a).await?;
+                let stream = set_keepalive(stream)?;
                 Ok(Stream::new(StreamInner::TCP(stream)))
             }
         }
@@ -202,6 +208,18 @@ impl Address {
             }
         }
     }
+}
+
+fn set_keepalive(stream: TcpStream) -> io::Result<TcpStream> {
+    let stream: std::net::TcpStream = stream.into_std().unwrap();
+    let socket: socket2::Socket = socket2::Socket::from(stream);
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(10))
+        .with_interval(Duration::from_secs(1));
+    socket.set_tcp_keepalive(&keepalive)?;
+    let stream: std::net::TcpStream = socket.into();
+
+    tokio::net::TcpStream::from_std(stream)
 }
 
 struct AddressVisitor;
@@ -245,70 +263,133 @@ pub struct Controller {
     inner: Arc<ControllerInner>,
 }
 
-struct ControllerInner {
-    shutdown: CancellationToken,
-    active: AtomicI64,
-}
-
 impl Clone for Controller {
     fn clone(&self) -> Self {
-        self.inner.active.fetch_add(1, Ordering::Release);
         Self {
             inner: self.inner.clone(),
         }
     }
 }
 
-impl Drop for Controller {
+#[derive(Clone, Copy)]
+pub enum NotifyEvent {
+    Shutdown,
+    RelayStart,
+    RelayFinish,
+}
+
+pub type Receiver = UnboundedReceiver<NotifyEvent>;
+
+pub fn create_controller() -> (Controller, Receiver) {
+    let shutdown = CancellationToken::new();
+    let tracker = TaskTracker::new();
+    let (sender, receiver) = unbounded_channel();
+    let controller = Controller {
+        inner: Arc::new(ControllerInner {
+            shutdown,
+            tracker,
+            sender,
+        }),
+    };
+    (controller, receiver)
+}
+
+pub struct ControllerGuard {
+    controller: Controller,
+    event: NotifyEvent,
+}
+
+impl Drop for ControllerGuard {
     fn drop(&mut self) {
-        self.inner.active.fetch_sub(-1, Ordering::Release);
+        self.controller.notify(self.event);
     }
 }
 
 impl Controller {
-    fn new() -> Self {
-        let shutdown = CancellationToken::new();
-        let active = AtomicI64::new(0);
-        Self {
-            inner: Arc::new(ControllerInner { shutdown, active }),
-        }
+    pub fn children(&self) -> (Self, Receiver) {
+        let (inner, receiver) = self.inner.children();
+        (
+            Self {
+                inner: Arc::new(inner),
+            },
+            receiver,
+        )
     }
 
+    #[inline]
+    pub fn spawn<F>(&self, task: F) -> JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.inner.tracker.spawn(task)
+    }
+
+    #[inline]
     pub fn shutdown(&self) {
         self.inner.shutdown.cancel();
+        self.inner.tracker.close();
     }
 
+    #[inline]
     pub fn has_shutdown(&self) -> bool {
         self.inner.shutdown.is_cancelled()
     }
 
-    pub fn drop_guard(&self) -> Self {
-        self.clone()
-    }
-
-    pub async fn wait_shutdown(&self) {
-        self.inner.shutdown.cancelled().await
-    }
-
-    fn has_finish(&self) -> bool {
-        self.inner.active.load(Ordering::Acquire) == 0
-    }
-
-    pub async fn wait(&self) {
-        let mut tick = tokio::time::interval(Duration::from_millis(300));
-        loop {
-            if self.has_finish() {
-                break;
+    pub fn notify(&self, ev: NotifyEvent) {
+        match self.inner.sender.send(ev) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("send error: {}", e);
             }
-            tick.tick().await;
         }
     }
 
-    async fn run_until_shutdown<F>(&self, fut: F) -> Option<F::Output>
-    where
-        F: Future,
-    {
-        let _guard = self.drop_guard();
-        self.inner.shutdown.run_until_cancelled(fut).await
+    pub fn session_guard(&self) -> ControllerGuard {
+        ControllerGuard {
+            controller: self.clone(),
+            event: NotifyEvent::Shutdown,
+        }
+    }
+
+    pub fn relay_guard(&self) -> ControllerGuard {
+        self.notify(NotifyEvent::RelayStart);
+        ControllerGuard {
+            controller: self.clone(),
+            event: NotifyEvent::RelayFinish,
+        }
+    }
+
+    #[inline]
+    pub async fn wait(&self) {
+        self.inner.tracker.wait().await;
+    }
+
+    #[inline]
+    pub async fn wait_shutdown(&self) {
+        self.inner.shutdown.cancelled().await;
+    }
+
+    #[inline]
+    pub fn task_count(&self) -> usize {
+        self.inner.tracker.len()
+    }
+}
+
+struct ControllerInner {
+    shutdown: CancellationToken,
+    tracker: TaskTracker,
+    sender: UnboundedSender<NotifyEvent>,
+}
+
+impl ControllerInner {
+    fn children(&self) -> (Self, Receiver) {
+        let (sender, receiver) = unbounded_channel();
+        let controller = Self {
+            shutdown: self.shutdown.clone(),
+            tracker: self.tracker.clone(),
+            sender,
+        };
+        (controller, receiver)
     }
 }

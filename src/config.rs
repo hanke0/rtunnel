@@ -1,5 +1,6 @@
 use crate::transport;
 use anyhow::Context;
+use anyhow::anyhow;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::fs::{self, File};
@@ -7,8 +8,8 @@ use std::io::Read;
 
 #[derive(Deserialize)]
 struct Config {
-    pub servers: ServerConfigList,
-    pub clients: ClientConfigList,
+    pub servers: Option<ServerConfigList>,
+    pub clients: Option<ClientConfigList>,
 }
 
 pub type ServerConfigList = Vec<ServerConfig>;
@@ -30,6 +31,10 @@ pub struct ClientConfig {
     pub server_public_key: String,
     pub server_address: transport::Address,
     pub services: Vec<Service>,
+    #[serde(default)]
+    pub max_connections: i32,
+    #[serde(default)]
+    pub idle_connections: i32,
 }
 
 #[derive(Deserialize)]
@@ -41,20 +46,30 @@ pub struct Service {
 impl ServerConfig {
     pub fn from_file(path: &str) -> anyhow::Result<ServerConfigList> {
         let cfg = from_file::<Config>(path)?;
-        if cfg.servers.is_empty() {
+        let servers = cfg.servers.ok_or(anyhow!("No server config found"))?;
+        if servers.is_empty() {
             return Err(anyhow::Error::msg("No server found"));
         }
-        Ok(cfg.servers)
+        Ok(servers)
     }
 }
 
 impl ClientConfig {
     pub fn from_file(path: &str) -> anyhow::Result<ClientConfigList> {
         let cfg = from_file::<Config>(path)?;
-        if cfg.clients.is_empty() {
+        let mut clients = cfg.clients.ok_or(anyhow!("No client config found"))?;
+        if clients.is_empty() {
             return Err(anyhow::Error::msg("No client found"));
         }
-        Ok(cfg.clients)
+        for client in clients.iter_mut() {
+            if client.max_connections <= 0 {
+                client.max_connections = 2048;
+            }
+            if client.idle_connections <= 0 {
+                client.idle_connections = 8;
+            }
+        }
+        Ok(clients)
     }
 }
 

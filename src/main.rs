@@ -4,13 +4,124 @@ mod encryption;
 mod serve;
 mod transport;
 
-use config::ServerConfig;
+use std::process;
+use std::string::String;
+use std::time::Duration;
+use tokio::time::sleep;
+
+use clap::{Parser, Subcommand};
+use config::ClientConfig;
+use encryption::KeyPair;
+use env_logger;
+use log::{debug, error, info};
 use tokio::runtime::Builder;
+use tokio::signal::unix::SignalKind;
+use tokio::{select, signal};
+use transport::Controller;
 
 fn main() {
-    let _cfg = ServerConfig::from_file("server.toml").expect("Failed to load config");
-    let rt = Builder::new_multi_thread().enable_all().build().unwrap();
-    rt.block_on(async {
-        println!("hello");
-    });
+    let options = Cli::parse();
+    env_logger::Builder::new()
+        .filter_level(options.log_level)
+        .init();
+
+    match options.command {
+        Commands::GenerateKey {} => {
+            let pair = KeyPair::random();
+            pair.print();
+        }
+        Commands::Client { config } => {
+            info!("starting client, loading config from {}", config);
+            let configs = ClientConfig::from_file(&config).expect("Failed to load config");
+            let rt = Builder::new_multi_thread().enable_all().build().unwrap();
+            rt.block_on(start_client(configs));
+        }
+    }
+}
+
+async fn start_client(configs: Vec<ClientConfig>) {
+    let (controller, _) = transport::create_controller();
+    debug!("starting {} clients", configs.len());
+    for cfg in configs.iter() {
+        let err = client::start_client(controller.clone(), cfg).await;
+        if err.is_ok() {
+            info!("connected to {}", cfg.server_address);
+            continue;
+        }
+        error!(
+            "connect to {} failed: {}",
+            cfg.server_address,
+            err.unwrap_err()
+        );
+        controller.shutdown();
+        graceful_exit(controller.clone(), 1).await
+    }
+    info!("all clients started, client is ready");
+    select! {
+            _ = wait_exit_signal() => {},
+            _ = controller.wait_shutdown() => {}
+    }
+    info!("client is shutting down");
+    controller.shutdown();
+    graceful_exit(controller.clone(), 0).await
+}
+
+async fn wait_exit_signal() {
+    let mut sigint = signal::unix::signal(SignalKind::terminate()).unwrap();
+    let mut sigterm = signal::unix::signal(SignalKind::terminate()).unwrap();
+    select! {
+        _ = sigint.recv() => {
+            info!("received ctrl-c signal");
+        }
+        _ = sigterm.recv() => {
+            info!("received sigterm signal");
+        }
+    };
+}
+
+async fn graceful_exit(controller: Controller, code: i32) -> ! {
+    controller.wait_shutdown().await;
+    loop {
+        select! {
+            _ = controller.wait() => {
+                break;
+            }
+            _ = sleep(Duration::from_millis(1000)) => {
+                debug!("client is still shutting down, task count {}", controller.task_count());
+            }
+        }
+    }
+    process::exit(code);
+}
+
+#[derive(Debug, Parser)] // requires `derive` feature
+#[command(name = "rtunnel")]
+#[command(about = "A simple and reliable tunnel", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+
+    #[arg(
+        short = 'l',
+        long = "log-level",
+        help = "log level",
+        default_value = "info"
+    )]
+    log_level: log::LevelFilter,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    #[command(arg_required_else_help = false)]
+    GenerateKey {},
+    #[command(arg_required_else_help = false)]
+    Client {
+        #[arg(
+            short = 'c',
+            long = "config",
+            help = "config file path",
+            default_value = "rtunnel.toml"
+        )]
+        config: String,
+    },
 }

@@ -1,95 +1,204 @@
 use crate::config::ClientConfig;
-use crate::encryption::SessionHalf;
+use crate::encryption::Session;
 use crate::encryption::client_handshake;
-use crate::encryption::copy_bidirectional;
-use crate::transport::{Address, Controller};
+use crate::encryption::copy_encrypted_bidirectional;
+use crate::encryption::{decode_signing_key, decode_verifying_key};
+use crate::transport::{Address, Controller, NotifyEvent, Receiver};
 use anyhow::{Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use log::{error, info};
-use std::cmp;
-use std::collections::BTreeSet;
+use log::{debug, error, info};
 use std::collections::HashSet;
-use std::fmt;
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::select;
+use tokio::time::sleep;
 
-pub async fn start_client(cfg: ClientConfig, controller: &Controller) -> Result<()> {
-    let verifier = VerifyingKey::try_from(cfg.server_public_key.as_bytes())?;
-    let signer = SigningKey::try_from(cfg.private_key.as_bytes())?;
+struct ServiceOptions {
+    address: Address,
+    verifier: VerifyingKey,
+    signer: SigningKey,
+    allows: HashSet<Address>,
+    max_connections: i32,
+    idle_connections: i32,
+}
+
+type ServiceOptionsRef = Arc<ServiceOptions>;
+
+pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<()> {
+    let verifier = decode_verifying_key(&cfg.server_public_key)?;
+    let signer = decode_signing_key(&cfg.private_key)?;
     let mut allows = HashSet::new();
-
-    for service in cfg.services {
+    for service in cfg.services.iter() {
         allows.insert(service.connect_to);
     }
-    start_service(controller, &cfg.server_address, &verifier, &signer, &allows).await
-}
 
-struct ActiveStream {
-    pub read_half: SessionHalf,
-    pub write_half: SessionHalf,
-}
+    let options = Arc::new(ServiceOptions {
+        address: cfg.server_address,
+        verifier,
+        signer,
+        allows,
+        max_connections: cfg.max_connections,
+        idle_connections: cfg.idle_connections,
+    });
 
-impl fmt::Display for ActiveStream {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.read_half)
-    }
-}
+    let _ = connect_to_service(controller.clone(), options.clone()).await?;
+    let (controller_children, receiver) = controller.children();
 
-async fn connect_to_server(
-    server_address: &Address,
-    signer: &SigningKey,
-    verifier: &VerifyingKey,
-) -> Result<ActiveStream> {
-    let mut conn = server_address.connect_to().await?;
-    let (read_half, write_half) = client_handshake(&mut conn, signer, verifier).await?;
-    Ok(ActiveStream {
-        read_half,
-        write_half,
-    })
-}
-
-async fn start_service(
-    controller: &Controller,
-    server_address: &Address,
-    verifier: &VerifyingKey,
-    signer: &SigningKey,
-    allows: &HashSet<Address>,
-) -> Result<()> {
-    let mut active_stream = connect_to_server(server_address, signer, verifier).await?;
-    let _guard = controller.drop_guard();
-    handle_stream_silent(controller, &mut active_stream, allows).await;
+    controller.spawn(service_connection_sentry(
+        controller_children.clone(),
+        options,
+        receiver,
+    ));
     Ok(())
 }
 
+async fn service_connection_sentry(
+    controller: Controller,
+    options: ServiceOptionsRef,
+    mut receiver: Receiver,
+) {
+    let mut current = 0;
+    let mut busy = 0;
+    let max = options.max_connections;
+    let max_idle = options.idle_connections;
+    let controller = &controller;
+
+    for _ in 0..max_idle {
+        if controller.has_shutdown() {
+            return;
+        }
+        controller.spawn(start_service_silent(
+            controller.clone(),
+            options.clone(),
+            true,
+        ));
+        current += 1;
+    }
+
+    loop {
+        let fut = receiver.recv();
+        let result = select! {
+            r = fut => r,
+            _ = controller.wait_shutdown() => {
+                return;
+            }
+            _ = sleep(Duration::from_millis(1000)) => {
+                None
+            }
+        };
+        if controller.has_shutdown() {
+            return;
+        }
+        match result {
+            Some(NotifyEvent::Shutdown) => {
+                current -= 1;
+            }
+            Some(NotifyEvent::RelayStart) => {
+                busy += 1;
+            }
+            Some(NotifyEvent::RelayFinish) => {
+                busy -= 1;
+            }
+            None => (),
+        }
+        let pending = max_idle - (current - busy);
+        if current < max && pending > 0 {
+            debug!(
+                "spawning {} new connections to {}",
+                pending, options.address
+            );
+            for _ in 0..pending {
+                controller.spawn(start_service_silent(
+                    controller.clone(),
+                    options.clone(),
+                    false,
+                ));
+            }
+            current += pending;
+            // give the new connections a chance to start before checking
+            // wait counter to settle.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+}
+
+async fn start_service_silent(controller: Controller, options: ServiceOptionsRef, fatal: bool) {
+    if controller.has_shutdown() {
+        return;
+    }
+    match start_service(controller.clone(), options.clone()).await {
+        Ok(_) => {}
+        Err(e) => {
+            if !fatal && is_retry_able_error(&e) {
+                info!(
+                    "retry connect service {} cause by error: {}",
+                    options.address, e
+                );
+            } else {
+                error!("connect service {} fatal: {}", options.address, &e);
+                controller.shutdown();
+            }
+        }
+    }
+}
+
+fn is_retry_able_error(error: &anyhow::Error) -> bool {
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            match io_error.kind() {
+                io::ErrorKind::ConnectionRefused => return false,
+                _ => return true,
+            }
+        }
+    }
+    return true;
+}
+
+async fn start_service(controller: Controller, options: ServiceOptionsRef) -> Result<()> {
+    let _guard = controller.session_guard();
+    let (mut read_half, mut write_half) =
+        connect_to_service(controller.clone(), options.clone()).await?;
+    handle_stream_silent(controller, &mut read_half, &mut write_half, &options.allows).await;
+    Ok(())
+}
+
+async fn connect_to_service(
+    controller: Controller,
+    options: ServiceOptionsRef,
+) -> Result<(Session, Session)> {
+    let mut conn = options.address.connect_to().await?;
+    let (read_half, write_half) =
+        client_handshake(&mut conn, &options.signer, &options.verifier).await?;
+    return Ok((read_half, write_half));
+}
+
 async fn handle_stream_silent(
-    controller: &Controller,
-    stream: &mut ActiveStream,
+    controller: Controller,
+    read_half: &mut Session,
+    write_half: &mut Session,
     allows: &HashSet<Address>,
 ) {
-    match handle_stream(controller, stream, allows).await {
+    match handle_stream(controller, read_half, write_half, allows).await {
         Ok((read, write)) => {
             info!("stream has read {} bytes and wrote {}", read, write);
         }
         Err(e) => {
-            error!("stream transfer error: {}, {}", e, stream);
+            error!("stream transfer error: {}, {}", e, read_half);
         }
     };
 }
 
 async fn handle_stream(
-    controller: &Controller,
-    stream: &mut ActiveStream,
+    controller: Controller,
+    read_half: &mut Session,
+    write_half: &mut Session,
     allows: &HashSet<Address>,
 ) -> Result<(usize, usize)> {
-    let _guard = controller.drop_guard();
-    let addr = stream.read_half.read_connect_msg().await?;
-    let mut conn = addr.connect_to().await?;
+    let addr = read_half.read_connect_msg().await?;
     if !allows.contains(&addr) {
         return Err(anyhow!("Address not allowed: {}", &addr));
     }
-    Ok(copy_bidirectional(
-        controller,
-        &mut stream.read_half,
-        &mut stream.write_half,
-        &mut conn,
-    )
-    .await)
+    let mut conn = addr.connect_to().await?;
+    Ok(copy_encrypted_bidirectional(controller, read_half, write_half, &mut conn).await)
 }

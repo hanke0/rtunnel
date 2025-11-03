@@ -23,9 +23,16 @@ type SignatureB = [u8; 64];
 type Secret = [u8; 32];
 type NonceB = [u8; 12];
 
+/*
+2 byte header fields looks like:
+
+[2bit msg type ] [ 14 bit msg length ]
+[            msg data                ]
+*/
 const HANDSHAKE: u8 = 0b11000000;
 const CONNECT: u8 = 0b10000000;
 const DATA: u8 = 0b01000000;
+const PING: u8 = 0b00000000;
 const MSG_TYPE_FLAG: u8 = 0b11000000;
 const DATA_SIZE_HIGH_FLAG: u8 = 0b00111111;
 const MAX_MSG_SIZE: usize = 0b00111111_11111111;
@@ -53,6 +60,9 @@ async fn read_msg_inplace(stream: &mut Stream, buf: &mut BytesMut) -> Result<u8>
         .with_context(|| "Failed to read msg header from stream")?;
     let (msg_type, body_size) = extract_msg_header(header[0], header[1]);
     buf.resize(body_size, 0);
+    if buf.len() == 0 {
+        return Ok(msg_type);
+    }
     stream
         .read_exact(buf)
         .await
@@ -220,7 +230,7 @@ impl AsRef<[u8; 12]> for Seq {
     }
 }
 
-pub struct SessionHalf {
+pub struct Session {
     stream: Stream,
     secret_iv: NonceB,
     sequence: Seq,
@@ -229,33 +239,33 @@ pub struct SessionHalf {
     buf: BytesMut,
 }
 
-impl Display for SessionHalf {
+impl Display for Session {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Session({})", self.stream)
     }
 }
 
-impl Ord for SessionHalf {
+impl Ord for Session {
     fn cmp(&self, other: &Self) -> cmp::Ordering {
         self.stream.cmp(&other.stream)
     }
 }
 
-impl PartialOrd for SessionHalf {
+impl PartialOrd for Session {
     fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for SessionHalf {
+impl PartialEq for Session {
     fn eq(&self, other: &Self) -> bool {
         self.stream == other.stream
     }
 }
 
-impl Eq for SessionHalf {}
+impl Eq for Session {}
 
-impl SessionHalf {
+impl Session {
     pub fn new(stream: Stream, secret_iv: NonceB, aead: Aes256Gcm) -> Self {
         Self {
             stream,
@@ -267,9 +277,9 @@ impl SessionHalf {
         }
     }
 
-    pub async fn transfer_encrypt_to_raw(
+    pub async fn relay_encrypt_to_plain_forever(
         &mut self,
-        controller: &Controller,
+        controller: Controller,
         writer: &mut Stream,
     ) -> usize {
         let mut size: usize = 0;
@@ -277,7 +287,7 @@ impl SessionHalf {
             tokio::select! {
                 _ = async move {
                     loop {
-                            match self.transfer_encrypt_to_raw_once(writer).await  {
+                            match self.relay_encrypt_to_plain(writer).await  {
                                 Ok(n) => {
                                     size += n;
                                 }
@@ -296,32 +306,37 @@ impl SessionHalf {
         }
     }
 
-    async fn read_msg_inner(&mut self, expect_type: u8) -> Result<()> {
+    async fn read_msg_inner(&mut self) -> Result<u8> {
         let typ = read_msg_inplace(&mut self.stream, &mut self.raw_buf).await?;
-        if typ != expect_type {
-            return Err(anyhow!(
-                "Invalid message type: {}, expect: {}",
-                typ,
-                expect_type
-            ));
-        }
         let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
         self.buf.resize(self.raw_buf.len(), 0);
         self.aead
             .decrypt_in_place(&nonce.into(), &self.raw_buf, &mut self.buf)
             .with_context(|| "Failed to decrypt message")?;
         self.sequence.incr();
+        Ok(typ)
+    }
+
+    async fn read_specific_msg_inner(&mut self, expect_type: u8) -> Result<()> {
+        let typ = self.read_msg_inner().await?;
+        if typ != expect_type {
+            return Err(anyhow!(
+                "Unexpected message type: {} != {}",
+                typ,
+                expect_type
+            ));
+        }
         Ok(())
     }
 
     pub async fn read_connect_msg(&mut self) -> Result<Address> {
-        self.read_msg_inner(CONNECT).await?;
+        self.read_specific_msg_inner(CONNECT).await?;
         let addr = Address::from_bytes(&self.raw_buf)?;
         Ok(addr)
     }
 
-    async fn transfer_encrypt_to_raw_once(&mut self, writer: &mut Stream) -> Result<usize> {
-        self.read_msg_inner(DATA).await?;
+    async fn relay_encrypt_to_plain(&mut self, writer: &mut Stream) -> Result<usize> {
+        self.read_specific_msg_inner(DATA).await?;
         writer
             .write_all(&self.raw_buf)
             .await
@@ -329,9 +344,9 @@ impl SessionHalf {
         Ok(self.raw_buf.len())
     }
 
-    pub async fn transfer_raw_to_encrypt(
+    pub async fn relay_plain_to_encrypt_forever(
         &mut self,
-        controller: &Controller,
+        controller: Controller,
         reader: &mut Stream,
     ) -> usize {
         let mut size: usize = 0;
@@ -339,7 +354,7 @@ impl SessionHalf {
             tokio::select! {
                 _ = async move {
                     loop {
-                            match self.transfer_raw_to_encrypt_once(reader).await  {
+                            match self.replay_plain_to_encrypt(reader).await  {
                                 Ok(n) => {
                                     size += n;
                                 }
@@ -372,7 +387,7 @@ impl SessionHalf {
         Ok(())
     }
 
-    async fn transfer_raw_to_encrypt_once(&mut self, reader: &mut Stream) -> Result<usize> {
+    async fn replay_plain_to_encrypt(&mut self, reader: &mut Stream) -> Result<usize> {
         self.raw_buf.resize(MAX_MSG_SIZE, 0);
         let n = reader
             .read(&mut self.raw_buf)
@@ -388,7 +403,7 @@ pub async fn client_handshake(
     stream: &mut Stream,
     singer: &SigningKey,
     verifier: &VerifyingKey,
-) -> anyhow::Result<(SessionHalf, SessionHalf)> {
+) -> anyhow::Result<(Session, Session)> {
     let ecdh_private = ECDHPrivate::random();
     let ecdh_public = ECDHPublic::from(&ecdh_private);
     let mut client_random = [0u8; 32];
@@ -422,12 +437,12 @@ pub async fn client_handshake(
     );
 
     Ok((
-        SessionHalf::new(
+        Session::new(
             stream.clone(),
             client_secret_iv,
             Aes256Gcm::new(&client_secret.into()),
         ),
-        SessionHalf::new(
+        Session::new(
             stream.clone(),
             server_secret_iv,
             Aes256Gcm::new(&server_secret.into()),
@@ -439,7 +454,7 @@ pub async fn server_handshake(
     stream: &mut Stream,
     singer: &SigningKey,
     verifier: &VerifyingKey,
-) -> anyhow::Result<(SessionHalf, SessionHalf)> {
+) -> anyhow::Result<(Session, Session)> {
     let ecdh_private = ECDHPrivate::random();
     let ecdh_public = ECDHPublic::from(&ecdh_private);
     let mut server_random = [0u8; 32];
@@ -474,12 +489,12 @@ pub async fn server_handshake(
     );
 
     Ok((
-        SessionHalf::new(
+        Session::new(
             stream.clone(),
             client_secret_iv,
             Aes256Gcm::new(&client_secret.into()),
         ),
-        SessionHalf::new(
+        Session::new(
             stream.clone(),
             server_secret_iv,
             Aes256Gcm::new(&server_secret.into()),
@@ -487,16 +502,17 @@ pub async fn server_handshake(
     ))
 }
 
-pub async fn copy_bidirectional(
-    controller: &Controller,
-    read_half: &mut SessionHalf,
-    write_half: &mut SessionHalf,
+pub async fn copy_encrypted_bidirectional(
+    controller: Controller,
+    read_half: &mut Session,
+    write_half: &mut Session,
     raw_stream: &mut Stream,
 ) -> (usize, usize) {
+    let _guard = controller.relay_guard();
     let mut raw_reader = raw_stream.clone();
     tokio::join!(
-        read_half.transfer_encrypt_to_raw(controller, raw_stream),
-        write_half.transfer_raw_to_encrypt(controller, &mut raw_reader),
+        read_half.relay_encrypt_to_plain_forever(controller.clone(), raw_stream),
+        write_half.relay_plain_to_encrypt_forever(controller.clone(), &mut raw_reader),
     )
 }
 
@@ -563,10 +579,33 @@ pub struct KeyPair {
 }
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
+
+pub fn decode_signing_key<T: AsRef<[u8]>>(data: T) -> Result<SigningKey> {
+    let data = base64.decode(data).context("Failed to decode key")?;
+    let b = vec_to_array(data).context("Failed to decode key")?;
+    Ok(SigningKey::from_bytes(&b))
+}
+
+pub fn decode_verifying_key<T: AsRef<[u8]>>(data: T) -> Result<VerifyingKey> {
+    let data = base64.decode(data).context("Failed to decode key")?;
+    let b = vec_to_array(data).context("Failed to decode key")?;
+    VerifyingKey::from_bytes(&b).context("Failed to decode key")
+}
+
 impl KeyPair {
+    pub fn random() -> Self {
+        let mut rng = OsRng;
+        let private_key = SigningKey::generate(&mut rng);
+        let public_key = VerifyingKey::from(&private_key);
+
+        KeyPair {
+            private: private_key.to_bytes(),
+            public: public_key.to_bytes(),
+        }
+    }
     pub fn print(&self) {
         print!(
-            "PublicKey: {}\nPrivateKey: {}",
+            "private_key = \"{}\"\npublic_key = \"{}\"\n",
             self.private_key(),
             self.public_key(),
         )
@@ -599,24 +638,13 @@ fn vec_to_array<const N: usize>(v: Vec<u8>) -> anyhow::Result<[u8; N]> {
     }
 }
 
-pub fn generate_secret() -> KeyPair {
-    let mut rng = OsRng;
-    let private_key = SigningKey::generate(&mut rng);
-    let public_key = VerifyingKey::from(&private_key);
-
-    KeyPair {
-        private: private_key.to_bytes(),
-        public: public_key.to_bytes(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_secret_generate() {
-        let secret = generate_secret();
+        let secret = KeyPair::random();
         secret.print();
         assert_eq!(32, secret.private.len());
         assert_eq!(32, secret.public.len());
