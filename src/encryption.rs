@@ -1,25 +1,26 @@
-use crate::transport::{Address, Controller, Stream};
+use std::array;
+use std::fmt;
+use std::fmt::Display;
+use std::result::Result::{Err, Ok};
+
 use aes_gcm::{
     Aes256Gcm,
     aead::{AeadMutInPlace, KeyInit},
 };
 use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
 use bytes::{BufMut, BytesMut};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
-use std::array;
-use std::cmp;
-use std::fmt;
-use std::fmt::Display;
-use std::result::Result::{Err, Ok};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
+
+use crate::transport::{Address, Controller, Stream};
 
 type PrivateKey = [u8; 32];
 type PublicKey = [u8; 32];
 type RandomKey = [u8; 32];
-type SignatureB = [u8; 64];
 type Secret = [u8; 32];
 type NonceB = [u8; 12];
 
@@ -104,20 +105,27 @@ impl ClientHello {
         buf[32..64].try_into().unwrap()
     }
 
-    #[allow(dead_code)]
-    fn get_signature<'a>(&'a self) -> &'a SignatureB {
-        let buf = self.as_ref();
-        assert!(buf.len() == Self::SIZE);
-        buf[64..128].try_into().unwrap()
+    fn get_verify_part<'a>(&'a self) -> &'a [u8] {
+        &self.as_ref()[..64]
     }
 
-    fn build_msg(public: &PublicKey, random: &RandomKey, signer: &SigningKey) -> Result<BytesMut> {
+    fn get_signature<'a>(&'a self) -> Signature {
+        let buf = self.as_ref();
+        assert!(buf.len() == Self::SIZE);
+        Signature::from_slice(&buf[64..128]).unwrap()
+    }
+
+    fn build_msg(
+        ephemeral_public: &PublicKey,
+        random: &RandomKey,
+        signer: &SigningKey,
+    ) -> Result<BytesMut> {
         let mut buf = start_msg(HANDSHAKE, Self::SIZE);
-        buf.put_slice(public);
+        buf.put_slice(ephemeral_public);
         buf.put_slice(random);
         let signature = signer
-            .try_sign(buf.as_ref())
-            .with_context(|| "Failed to sign")?;
+            .try_sign(&buf[HEADER_SIZE..])
+            .with_context(|| "Failed to sign client hello")?;
         buf.put_slice(signature.r_bytes());
         buf.put_slice(signature.s_bytes());
         assert!(
@@ -133,12 +141,12 @@ impl ClientHello {
         if buf.len() != Self::SIZE {
             return Err(anyhow!("Invalid client hello msg length: {}", buf.len()));
         }
-        let signature = &buf[64..128].try_into()?;
-        let sig = Signature::from_bytes(signature);
+        let hello = Self(buf);
+        let signature = hello.get_signature();
         verifier
-            .verify_strict(&buf[..64], &sig)
-            .with_context(|| "Failed to verify signature")?;
-        Ok(buf.into())
+            .verify_strict(hello.get_verify_part(), &signature)
+            .with_context(|| "Failed to verify client hello signature")?;
+        Ok(hello)
     }
 }
 
@@ -169,11 +177,14 @@ impl ServerHello {
         buf[32..64].try_into().unwrap()
     }
 
-    #[allow(dead_code)]
-    fn get_signature<'a>(&'a self) -> &'a SignatureB {
+    fn get_verify_part<'a>(&'a self) -> &'a [u8] {
+        &self.as_ref()[..64]
+    }
+
+    fn get_signature<'a>(&'a self) -> Signature {
         let buf = self.as_ref();
         assert!(buf.len() == Self::SIZE);
-        buf[64..128].try_into().unwrap()
+        Signature::from_slice(&buf[64..128]).unwrap()
     }
 
     fn build_msg(public: &PublicKey, random: &RandomKey, signer: &SigningKey) -> Result<BytesMut> {
@@ -181,7 +192,7 @@ impl ServerHello {
         buf.put_slice(public);
         buf.put_slice(random);
         let signature = signer
-            .try_sign(buf.as_ref())
+            .try_sign(buf[HEADER_SIZE..].as_ref())
             .with_context(|| "Failed to sign")?;
         buf.put_slice(signature.r_bytes());
         buf.put_slice(signature.s_bytes());
@@ -193,10 +204,12 @@ impl ServerHello {
         if buf.len() != Self::SIZE {
             return Err(anyhow!("Invalid server hello msg length: {}", buf.len()));
         }
-        let signature = &buf[64..128];
-        let sig = Signature::from_slice(signature)?;
-        verifier.verify_strict(&buf[0..64], &sig)?;
-        Ok(buf.into())
+        let hello = Self(buf);
+        let signature = hello.get_signature();
+        verifier
+            .verify_strict(hello.get_verify_part(), &signature)
+            .with_context(|| "Failed to verify server hello signature")?;
+        Ok(hello)
     }
 }
 
@@ -210,6 +223,124 @@ impl AsRef<[u8]> for ServerHello {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
     }
+}
+
+fn generate_random() -> Result<RandomKey> {
+    let mut random = [0u8; 32];
+    OsRng
+        .try_fill_bytes(random.as_mut())
+        .with_context(|| "Failed to generate random bytes")?;
+    Ok(random)
+}
+
+pub async fn client_handshake(
+    stream: &mut Stream,
+    singer: &SigningKey,
+    verifier: &VerifyingKey,
+) -> anyhow::Result<(Session, Session)> {
+    let ephemeral_private = ECDHPrivate::random();
+    let ephemeral_public = ECDHPublic::from(&ephemeral_private);
+    let client_random = generate_random()?;
+
+    let client_hello = ClientHello::build_msg(ephemeral_public.as_bytes(), &client_random, singer)?;
+    stream
+        .write_all(&client_hello)
+        .await
+        .with_context(|| "Failed to write to stream")?;
+    let mut hash = Sha256::new();
+    hash.update(&client_hello[HEADER_SIZE..]);
+
+    let (msg_type, buf) = read_msg(stream).await?;
+    if msg_type != HANDSHAKE {
+        return Err(anyhow!("Invalid message type: {}", msg_type));
+    }
+    let serve_hello = &ServerHello::parse(buf, verifier)?;
+    hash.update(serve_hello);
+    let hello_hash = hash.finalize();
+    let their_public = ECDHPublic::from(serve_hello.get_public_key().clone());
+    let shared_key = ephemeral_private.diffie_hellman(&their_public);
+
+    let (client_secret_iv, client_secret, server_secret_iv, server_secret) = expand_secret(
+        &client_random,
+        serve_hello.get_random_key(),
+        shared_key.as_bytes(),
+        &hello_hash,
+    );
+
+    Ok((
+        Session::new(
+            stream.clone(),
+            client_secret_iv,
+            Aes256Gcm::new(&client_secret.into()),
+        ),
+        Session::new(
+            stream.clone(),
+            server_secret_iv,
+            Aes256Gcm::new(&server_secret.into()),
+        ),
+    ))
+}
+
+pub async fn server_handshake(
+    stream: &mut Stream,
+    signer: &SigningKey,
+    verifier: &VerifyingKey,
+) -> anyhow::Result<(Session, Session)> {
+    let ecdh_private = ECDHPrivate::random();
+    let ecdh_public = ECDHPublic::from(&ecdh_private);
+    let server_random = generate_random()?;
+    let (msg_type, msg) = read_msg(stream).await?;
+    if msg_type != HANDSHAKE {
+        return Err(anyhow!("Invalid message type: {}", msg_type));
+    }
+    let client_hello = &ClientHello::parse(msg, verifier)?;
+    let mut hash = Sha256::new();
+    hash.update(client_hello);
+
+    let server_hello = ServerHello::build_msg(ecdh_public.as_bytes(), &server_random, signer)?;
+    stream
+        .write_all(&server_hello)
+        .await
+        .with_context(|| "Failed to write to stream")?;
+    hash.update(&server_hello[HEADER_SIZE..]);
+
+    let hello_hash = hash.finalize();
+    let their_public = ECDHPublic::from(client_hello.get_public_key().clone());
+    let shared_key = ecdh_private.diffie_hellman(&their_public);
+
+    let (client_secret_iv, client_secret, server_secret_iv, server_secret) = expand_secret(
+        client_hello.get_random_key(),
+        &server_random,
+        shared_key.as_bytes(),
+        &hello_hash,
+    );
+
+    Ok((
+        Session::new(
+            stream.clone(),
+            client_secret_iv,
+            Aes256Gcm::new(&client_secret.into()),
+        ),
+        Session::new(
+            stream.clone(),
+            server_secret_iv,
+            Aes256Gcm::new(&server_secret.into()),
+        ),
+    ))
+}
+
+pub async fn copy_encrypted_bidirectional(
+    controller: Controller,
+    read_half: &mut Session,
+    write_half: &mut Session,
+    raw_stream: &mut Stream,
+) -> (usize, usize) {
+    let _guard = controller.relay_guard();
+    let mut raw_reader = raw_stream.clone();
+    tokio::join!(
+        read_half.relay_encrypt_to_plain_forever(controller.clone(), raw_stream),
+        write_half.relay_plain_to_encrypt_forever(controller.clone(), &mut raw_reader),
+    )
 }
 
 struct Seq([u8; 12]);
@@ -249,26 +380,6 @@ impl Display for Session {
         write!(f, "Session({})", self.stream)
     }
 }
-
-impl Ord for Session {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        self.stream.cmp(&other.stream)
-    }
-}
-
-impl PartialOrd for Session {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for Session {
-    fn eq(&self, other: &Self) -> bool {
-        self.stream == other.stream
-    }
-}
-
-impl Eq for Session {}
 
 impl Session {
     pub fn new(stream: Stream, secret_iv: NonceB, aead: Aes256Gcm) -> Self {
@@ -409,123 +520,6 @@ impl Session {
     }
 }
 
-pub async fn client_handshake(
-    stream: &mut Stream,
-    singer: &SigningKey,
-    verifier: &VerifyingKey,
-) -> anyhow::Result<(Session, Session)> {
-    let ecdh_private = ECDHPrivate::random();
-    let ecdh_public = ECDHPublic::from(&ecdh_private);
-    let mut client_random = [0u8; 32];
-    OsRng
-        .try_fill_bytes(client_random.as_mut())
-        .with_context(|| "Failed to generate random bytes")?;
-    let client_hello = ClientHello::build_msg(ecdh_public.as_bytes(), &client_random, singer)?;
-    stream
-        .write_all(&client_hello)
-        .await
-        .with_context(|| "Failed to write to stream")?;
-
-    let mut hash = Sha256::new();
-    hash.update(&client_hello[HEADER_SIZE..]);
-
-    let (msg_type, buf) = read_msg(stream).await?;
-    if msg_type != HANDSHAKE {
-        return Err(anyhow!("Invalid message type: {}", msg_type));
-    }
-    let serve_hello = &ServerHello::parse(buf, verifier)?;
-    hash.update(serve_hello);
-    let hello_hash = hash.finalize();
-    let their_public = ECDHPublic::from(serve_hello.get_public_key().clone());
-    let shared_key = ecdh_private.diffie_hellman(&their_public);
-
-    let (client_secret_iv, client_secret, server_secret_iv, server_secret) = expand_secret(
-        &client_random,
-        serve_hello.get_random_key(),
-        shared_key.as_bytes(),
-        &hello_hash,
-    );
-
-    Ok((
-        Session::new(
-            stream.clone(),
-            client_secret_iv,
-            Aes256Gcm::new(&client_secret.into()),
-        ),
-        Session::new(
-            stream.clone(),
-            server_secret_iv,
-            Aes256Gcm::new(&server_secret.into()),
-        ),
-    ))
-}
-
-pub async fn server_handshake(
-    stream: &mut Stream,
-    singer: &SigningKey,
-    verifier: &VerifyingKey,
-) -> anyhow::Result<(Session, Session)> {
-    let ecdh_private = ECDHPrivate::random();
-    let ecdh_public = ECDHPublic::from(&ecdh_private);
-    let mut server_random = [0u8; 32];
-    OsRng
-        .try_fill_bytes(server_random.as_mut())
-        .with_context(|| "Failed to generate random bytes")?;
-
-    let (msg_type, msg) = read_msg(stream).await?;
-    if msg_type != HANDSHAKE {
-        return Err(anyhow!("Invalid message type: {}", msg_type));
-    }
-    let client_hello = &ClientHello::parse(msg, verifier)?;
-    let mut hash = Sha256::new();
-    hash.update(client_hello);
-
-    let server_hello = ServerHello::build_msg(ecdh_public.as_bytes(), &server_random, singer)?;
-    stream
-        .write_all(&server_hello)
-        .await
-        .with_context(|| "Failed to write to stream")?;
-    hash.update(&server_hello[HEADER_SIZE..]);
-
-    let hello_hash = hash.finalize();
-    let their_public = ECDHPublic::from(client_hello.get_public_key().clone());
-    let shared_key = ecdh_private.diffie_hellman(&their_public);
-
-    let (client_secret_iv, client_secret, server_secret_iv, server_secret) = expand_secret(
-        client_hello.get_random_key(),
-        &server_random,
-        shared_key.as_bytes(),
-        &hello_hash,
-    );
-
-    Ok((
-        Session::new(
-            stream.clone(),
-            client_secret_iv,
-            Aes256Gcm::new(&client_secret.into()),
-        ),
-        Session::new(
-            stream.clone(),
-            server_secret_iv,
-            Aes256Gcm::new(&server_secret.into()),
-        ),
-    ))
-}
-
-pub async fn copy_encrypted_bidirectional(
-    controller: Controller,
-    read_half: &mut Session,
-    write_half: &mut Session,
-    raw_stream: &mut Stream,
-) -> (usize, usize) {
-    let _guard = controller.relay_guard();
-    let mut raw_reader = raw_stream.clone();
-    tokio::join!(
-        read_half.relay_encrypt_to_plain_forever(controller.clone(), raw_stream),
-        write_half.relay_plain_to_encrypt_forever(controller.clone(), &mut raw_reader),
-    )
-}
-
 const CLIENT_IV_LABEL: &[u8] = b"client_iv";
 const SERVER_IV_LABEL: &[u8] = b"server_iv";
 const CLIENT_HANDSHAKE_LABEL: &[u8] = b"client_handshake";
@@ -588,8 +582,6 @@ pub struct KeyPair {
     pub public: PublicKey,
 }
 
-use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
-
 pub fn decode_signing_key<T: AsRef<[u8]>>(data: T) -> Result<SigningKey> {
     let data = base64.decode(data).context("Failed to decode key")?;
     let b = vec_to_array(data).context("Failed to decode key")?;
@@ -626,6 +618,13 @@ impl KeyPair {
     pub fn public_key(&self) -> String {
         base64.encode(self.public)
     }
+
+    pub fn signer(&self) -> SigningKey {
+        SigningKey::from_bytes(&self.private)
+    }
+    pub fn verifier(&self) -> VerifyingKey {
+        VerifyingKey::from_bytes(&self.public).unwrap()
+    }
 }
 
 fn vec_to_array<const N: usize>(v: Vec<u8>) -> anyhow::Result<[u8; N]> {
@@ -650,8 +649,86 @@ mod tests {
         secret.print();
         assert_eq!(32, secret.private.len());
         assert_eq!(32, secret.public.len());
-        let parsed = KeyPair::from_string(&secret.public_key(), &secret.private_key()).unwrap();
-        assert_eq!(secret.private, parsed.private);
-        assert_eq!(secret.public, parsed.public);
+        let parsed_private = decode_signing_key(secret.private_key()).unwrap();
+        let parsed_public = decode_verifying_key(secret.public_key()).unwrap();
+        assert_eq!(&secret.private, parsed_private.as_bytes());
+        assert_eq!(&secret.public, parsed_public.as_bytes());
+    }
+
+    #[test]
+    fn test_sign_and_verify() {
+        let secret = KeyPair::random();
+        secret.print();
+        let signer = secret.signer();
+        let verifier = secret.verifier();
+        let message = b"Hello world";
+        let signature = signer.sign(message);
+        assert!(verifier.verify_strict(message, &signature).is_ok());
+    }
+
+    #[test]
+    fn test_client_hello_build_and_parse() {
+        let secret = KeyPair::random();
+        let random = generate_random().unwrap();
+        let hello = ClientHello::build_msg(&secret.public, &random, &secret.signer()).unwrap();
+        let (_, body) = hello.split_at(HEADER_SIZE);
+        let client_hello = ClientHello::parse(body.into(), &secret.verifier()).unwrap();
+        assert_eq!(&secret.public, client_hello.get_public_key());
+        assert_eq!(&random, client_hello.get_random_key());
+    }
+
+    #[test]
+    fn test_server_hello_build_and_parse() {
+        let secret = KeyPair::random();
+        let random = generate_random().unwrap();
+        let hello = ServerHello::build_msg(&secret.public, &random, &secret.signer()).unwrap();
+        let (_, body) = hello.split_at(HEADER_SIZE);
+        let client_hello = ServerHello::parse(body.into(), &secret.verifier()).unwrap();
+        assert_eq!(&secret.public, client_hello.get_public_key());
+        assert_eq!(&random, client_hello.get_random_key());
+    }
+
+    use ntest::timeout;
+    use tokio;
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn build_stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        println!("Listening on {}", listener.local_addr().unwrap());
+        let stream1 = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        println!("Connected: {}", stream1.local_addr().unwrap());
+        let stream2 = listener.accept().await.unwrap().0;
+        println!("Accepted: {}", stream2.peer_addr().unwrap());
+        (stream1, stream2)
+    }
+
+    #[tokio::test]
+    #[timeout(2000)]
+    async fn test_handshake() {
+        let client_key = KeyPair::random();
+        let server_key = KeyPair::random();
+
+        let (client, server) = build_stream_pair().await;
+        let client = &mut Stream::from_tcp_stream(client);
+        let server = &mut Stream::from_tcp_stream(server);
+
+        let client_singer = &client_key.signer();
+        let client_verifier = &server_key.verifier();
+        let server_singer = &server_key.signer();
+        let server_verifier = &client_key.verifier();
+        tokio::join!(
+            async move {
+                client_handshake(client, client_singer, client_verifier)
+                    .await
+                    .unwrap();
+            },
+            async move {
+                server_handshake(server, server_singer, server_verifier)
+                    .await
+                    .unwrap();
+            }
+        );
     }
 }

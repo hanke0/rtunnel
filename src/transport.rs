@@ -30,7 +30,8 @@ pub struct Stream {
 }
 
 impl Stream {
-    fn new(stream: StreamInner) -> Self {
+    pub fn from_tcp_stream(stream: TcpStream) -> Self {
+        let stream = StreamInner::TCP(stream);
         let local_addr = stream.local_addr();
         let peer_addr = stream.peer_addr();
         let inner = Arc::new(Mutex::new(stream));
@@ -144,7 +145,7 @@ impl Listener {
             Listener::TCP(s) => {
                 let (stream, addr) = s.accept().await?;
                 let stream = set_keepalive(stream)?;
-                Ok((Stream::new(StreamInner::TCP(stream)), addr))
+                Ok((Stream::from_tcp_stream(stream), addr))
             }
         }
     }
@@ -196,7 +197,7 @@ impl Address {
             Address::TCP(a) => {
                 let stream = TcpStream::connect(a).await?;
                 let stream = set_keepalive(stream)?;
-                Ok(Stream::new(StreamInner::TCP(stream)))
+                Ok(Stream::from_tcp_stream(stream))
             }
         }
     }
