@@ -32,6 +32,7 @@ type NonceB = [u8; 12];
 const HANDSHAKE: u8 = 0b11000000;
 const CONNECT: u8 = 0b10000000;
 const DATA: u8 = 0b01000000;
+#[allow(dead_code)]
 const PING: u8 = 0b00000000;
 const MSG_TYPE_FLAG: u8 = 0b11000000;
 const DATA_SIZE_HIGH_FLAG: u8 = 0b00111111;
@@ -79,25 +80,19 @@ fn start_msg(msg_type: u8, body_size: usize) -> BytesMut {
 fn start_msg_inplace(msg_type: u8, body_size: usize, buf: &mut BytesMut) {
     assert!(body_size <= MAX_MSG_SIZE);
     assert!(msg_type >= DATA);
-    buf.resize(body_size + HEADER_SIZE, 0);
+    buf.resize(0, 0);
     let high = (body_size >> 8) as u8;
     let low = (body_size & 0xff) as u8;
     buf.put_u8(high | msg_type);
     buf.put_u8(low);
 }
 
-fn print_safe_u8(c: u8) -> char {
-    if c.is_ascii_alphanumeric() {
-        c as char
-    } else {
-        '.'
-    }
-}
-
 pub struct ClientHello(BytesMut);
 
 impl ClientHello {
     const SIZE: usize = 128;
+    const HANDSHAKE_MSG_SIZE: usize = Self::SIZE + HEADER_SIZE;
+
     fn get_public_key<'a>(&'a self) -> &'a PublicKey {
         let buf = self.as_ref();
         assert!(buf.len() == Self::SIZE);
@@ -108,6 +103,8 @@ impl ClientHello {
         assert!(buf.len() == Self::SIZE);
         buf[32..64].try_into().unwrap()
     }
+
+    #[allow(dead_code)]
     fn get_signature<'a>(&'a self) -> &'a SignatureB {
         let buf = self.as_ref();
         assert!(buf.len() == Self::SIZE);
@@ -123,7 +120,12 @@ impl ClientHello {
             .with_context(|| "Failed to sign")?;
         buf.put_slice(signature.r_bytes());
         buf.put_slice(signature.s_bytes());
-        assert!(buf.len() == Self::SIZE + HEADER_SIZE);
+        assert!(
+            buf.len() == Self::HANDSHAKE_MSG_SIZE,
+            "{} != {}",
+            buf.len(),
+            Self::HANDSHAKE_MSG_SIZE
+        );
         Ok(buf)
     }
 
@@ -166,11 +168,14 @@ impl ServerHello {
         assert!(buf.len() == Self::SIZE);
         buf[32..64].try_into().unwrap()
     }
+
+    #[allow(dead_code)]
     fn get_signature<'a>(&'a self) -> &'a SignatureB {
         let buf = self.as_ref();
         assert!(buf.len() == Self::SIZE);
         buf[64..128].try_into().unwrap()
     }
+
     fn build_msg(public: &PublicKey, random: &RandomKey, signer: &SigningKey) -> Result<BytesMut> {
         let mut buf = start_msg(HANDSHAKE, Self::SIZE);
         buf.put_slice(public);
@@ -335,6 +340,11 @@ impl Session {
         Ok(addr)
     }
 
+    pub async fn write_connect_msg(&mut self, address: Address) -> Result<()> {
+        self.raw_buf.put_slice(address.as_string().as_bytes());
+        self.write_raw_buf(CONNECT).await
+    }
+
     async fn relay_encrypt_to_plain(&mut self, writer: &mut Stream) -> Result<usize> {
         self.read_specific_msg_inner(DATA).await?;
         writer
@@ -373,8 +383,8 @@ impl Session {
         }
     }
 
-    async fn write_msg_inner(&mut self) -> Result<()> {
-        start_msg_inplace(DATA, self.raw_buf.len(), &mut self.buf);
+    async fn write_raw_buf(&mut self, msg_type: u8) -> Result<()> {
+        start_msg_inplace(msg_type, self.raw_buf.len(), &mut self.buf);
         let mut body = self.buf.split_off(HEADER_SIZE);
         let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
         self.aead
@@ -394,7 +404,7 @@ impl Session {
             .await
             .with_context(|| "Failed to read message from stream")?;
         self.raw_buf.resize(n, 0);
-        self.write_msg_inner().await?;
+        self.write_raw_buf(DATA).await?;
         Ok(self.raw_buf.len())
     }
 }
@@ -615,14 +625,6 @@ impl KeyPair {
     }
     pub fn public_key(&self) -> String {
         base64.encode(self.public)
-    }
-
-    pub fn from_string(public_key: &str, private_key: &str) -> anyhow::Result<KeyPair> {
-        let public_vec = base64.decode(public_key)?;
-        let private_vec = base64.decode(private_key)?;
-        let public = vec_to_array(public_vec)?;
-        let private = vec_to_array(private_vec)?;
-        Ok(KeyPair { private, public })
     }
 }
 

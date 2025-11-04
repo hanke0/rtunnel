@@ -1,18 +1,20 @@
+use std::collections::HashSet;
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::{Result, anyhow};
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use log::{debug, error, info};
+use tokio::select;
+use tokio::time::sleep;
+
 use crate::config::ClientConfig;
 use crate::encryption::Session;
 use crate::encryption::client_handshake;
 use crate::encryption::copy_encrypted_bidirectional;
 use crate::encryption::{decode_signing_key, decode_verifying_key};
 use crate::transport::{Address, Controller, NotifyEvent, Receiver};
-use anyhow::{Result, anyhow};
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use log::{debug, error, info};
-use std::collections::HashSet;
-use std::io;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::select;
-use tokio::time::sleep;
 
 struct ServiceOptions {
     address: Address,
@@ -164,7 +166,7 @@ async fn start_service(controller: Controller, options: ServiceOptionsRef) -> Re
 }
 
 async fn connect_to_service(
-    controller: Controller,
+    _controller: Controller,
     options: ServiceOptionsRef,
 ) -> Result<(Session, Session)> {
     let mut conn = options.address.connect_to().await?;

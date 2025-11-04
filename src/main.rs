@@ -1,7 +1,7 @@
 mod client;
 mod config;
 mod encryption;
-mod serve;
+mod server;
 mod transport;
 
 use std::process;
@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use clap::{Parser, Subcommand};
-use config::ClientConfig;
+use config::{ClientConfig, ServerConfig};
 use encryption::KeyPair;
 use env_logger;
 use log::{debug, error, info};
@@ -33,10 +33,19 @@ fn main() {
         Commands::Client { config } => {
             info!("starting client, loading config from {}", config);
             let configs = ClientConfig::from_file(&config).expect("Failed to load config");
-            let rt = Builder::new_multi_thread().enable_all().build().unwrap();
-            rt.block_on(start_client(configs));
+            block_on(start_client(configs));
+        }
+        Commands::Server { config } => {
+            info!("starting server, loading config from {}", config);
+            let configs = ServerConfig::from_file(&config).expect("Failed to load config");
+            block_on(start_server(configs));
         }
     }
+}
+
+fn block_on<F: Future>(task: F) {
+    let rt = Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(task);
 }
 
 async fn start_client(configs: Vec<ClientConfig>) {
@@ -57,6 +66,28 @@ async fn start_client(configs: Vec<ClientConfig>) {
         graceful_exit(controller.clone(), 1).await
     }
     info!("all clients started, client is ready");
+    select! {
+            _ = wait_exit_signal() => {},
+            _ = controller.wait_shutdown() => {}
+    }
+    info!("client is shutting down");
+    controller.shutdown();
+    graceful_exit(controller.clone(), 0).await
+}
+
+async fn start_server(configs: Vec<ServerConfig>) {
+    let (controller, _) = transport::create_controller();
+    debug!("starting {} server", configs.len());
+    for cfg in configs.iter() {
+        let err = server::start_server(controller.clone(), cfg).await;
+        if err.is_ok() {
+            continue;
+        }
+        error!("listen to {} failed: {}", cfg.listen, err.unwrap_err());
+        controller.shutdown();
+        graceful_exit(controller.clone(), 1).await
+    }
+    info!("all service started, server is ready");
     select! {
             _ = wait_exit_signal() => {},
             _ = controller.wait_shutdown() => {}
@@ -116,6 +147,16 @@ enum Commands {
     GenerateKey {},
     #[command(arg_required_else_help = false)]
     Client {
+        #[arg(
+            short = 'c',
+            long = "config",
+            help = "config file path",
+            default_value = "rtunnel.toml"
+        )]
+        config: String,
+    },
+    #[command(arg_required_else_help = false)]
+    Server {
         #[arg(
             short = 'c',
             long = "config",

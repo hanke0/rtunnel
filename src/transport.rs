@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use log::error;
@@ -203,7 +204,9 @@ impl Address {
     pub async fn listen_to(&self) -> Result<Listener> {
         match self {
             Address::TCP(a) => {
-                let listener = TcpListener::bind(a).await?;
+                let listener = TcpListener::bind(a)
+                    .await
+                    .context(format!("Failed to bind {}", a))?;
                 Ok(Listener::TCP(listener))
             }
         }

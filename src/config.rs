@@ -19,7 +19,6 @@ pub type ClientConfigList = Vec<ClientConfig>;
 pub struct ServerConfig {
     pub listen: transport::Address,
     pub private_key: String,
-    pub public_key: String,
     pub client_public_key: String,
     pub services: Vec<Service>,
 }
@@ -27,7 +26,6 @@ pub struct ServerConfig {
 #[derive(Deserialize)]
 pub struct ClientConfig {
     pub private_key: String,
-    pub public_key: String,
     pub server_public_key: String,
     pub server_address: transport::Address,
     pub services: Vec<Service>,
