@@ -1,5 +1,5 @@
-use core::fmt;
 use std::array;
+use std::fmt;
 use std::result::Result::{Err, Ok};
 
 use aes_gcm::{
@@ -23,212 +23,265 @@ type RandomKey = [u8; 32];
 type Secret = [u8; 32];
 type NonceB = [u8; 12];
 
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum MessageType {
+    Handshake,
+    Connect,
+    Data,
+    Ping,
+}
+
+impl fmt::Display for MessageType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MessageType::Handshake => write!(f, "Handshake"),
+            MessageType::Connect => write!(f, "Connect"),
+            MessageType::Data => write!(f, "Data"),
+            MessageType::Ping => write!(f, "Ping"),
+        }
+    }
+}
+
+impl MessageType {
+    const HANDSHAKE: u8 = 0b11000000;
+    const CONNECT: u8 = 0b10000000;
+    const DATA: u8 = 0b01000000;
+    const PING: u8 = 0b00000000;
+
+    fn from_checked_u8(msg_type: u8) -> Self {
+        Self::from_u8(msg_type).unwrap()
+    }
+
+    fn from_u8(msg_type: u8) -> Result<Self> {
+        match msg_type {
+            Self::HANDSHAKE => Ok(MessageType::Handshake),
+            Self::CONNECT => Ok(MessageType::Connect),
+            Self::DATA => Ok(MessageType::Data),
+            Self::PING => Ok(MessageType::Ping),
+            _ => Err(anyhow!("Invalid message type: {}", msg_type)),
+        }
+    }
+
+    fn to_u8(&self) -> u8 {
+        match self {
+            MessageType::Handshake => Self::HANDSHAKE,
+            MessageType::Connect => Self::CONNECT,
+            MessageType::Data => Self::DATA,
+            MessageType::Ping => Self::PING,
+        }
+    }
+}
+
 /*
 2 byte header fields looks like:
 
 [2bit msg type ] [ 14 bit msg length ]
 [            msg data                ]
 */
-const HANDSHAKE: u8 = 0b11000000;
-const CONNECT: u8 = 0b10000000;
-const DATA: u8 = 0b01000000;
-#[allow(dead_code)]
-const PING: u8 = 0b00000000;
-const MSG_TYPE_FLAG: u8 = 0b11000000;
-const DATA_SIZE_HIGH_FLAG: u8 = 0b00111111;
-const MAX_MSG_SIZE: usize = 0b00111111_11111111;
-const HEADER_SIZE: usize = 2;
+struct Message(BytesMut);
 
-fn extract_msg_header(high: u8, low: u8) -> (u8, usize) {
-    (
-        high & MSG_TYPE_FLAG,
-        u16::from_be_bytes([high & DATA_SIZE_HIGH_FLAG, low]) as usize,
-    )
-}
-
-fn fill_msg_header(msg_type: u8, body_size: usize, buf: &mut BytesMut) {
-    let high = (body_size >> 8) as u8;
-    let low = (body_size & 0xff) as u8;
-    assert!(buf.len() > 1);
-    buf[0] = high | msg_type;
-    buf[1] = low;
-}
-
-async fn read_msg(reader: &mut Reader) -> Result<(u8, BytesMut)> {
-    let mut buf = bytes::BytesMut::with_capacity(256);
-    let typ = read_msg_inplace(reader, &mut buf).await?;
-    Ok((typ, buf))
-}
-
-async fn read_msg_inplace(stream: &mut Reader, buf: &mut BytesMut) -> Result<u8> {
-    let mut header = [0u8; HEADER_SIZE];
-    stream
-        .read_exact(&mut header)
-        .await
-        .with_context(|| "Failed to read msg header from stream")?;
-    let (msg_type, body_size) = extract_msg_header(header[0], header[1]);
-    buf.resize(body_size, 0);
-    if buf.len() == 0 {
-        return Ok(msg_type);
+impl Default for Message {
+    fn default() -> Self {
+        Message(BytesMut::with_capacity(4096))
     }
-    stream
-        .read_exact(buf)
-        .await
-        .with_context(|| "Failed to read msg body from stream")?;
-    Ok(msg_type)
 }
 
-fn start_msg(msg_type: u8, body_size: usize) -> BytesMut {
-    let mut buf = BytesMut::with_capacity(body_size + HEADER_SIZE);
-    start_msg_inplace(msg_type, body_size, &mut buf);
-    buf
+impl Message {
+    const MSG_TYPE_FLAG: u8 = 0b11000000;
+    const DATA_SIZE_HIGH_FLAG: u8 = 0b00111111;
+    const MAX_MSG_SIZE: usize = 0b00111111_11111111;
+    const HEADER_SIZE: usize = 2;
+
+    fn new(buf: BytesMut) -> Self {
+        Message(buf)
+    }
+
+    fn get_type(&self) -> MessageType {
+        MessageType::from_checked_u8(self.0[0] & Self::MSG_TYPE_FLAG)
+    }
+
+    fn get_unchecked_type(&self) -> Result<MessageType> {
+        MessageType::from_u8(self.0[0] & Self::MSG_TYPE_FLAG)
+    }
+
+    fn get_payload_size(&self) -> usize {
+        u16::from_be_bytes([self.0[0] & Self::DATA_SIZE_HIGH_FLAG, self.0[1]]) as usize
+    }
+
+    fn get_payload(&self) -> &[u8] {
+        &self.0[2..]
+    }
+
+    fn set_header(&mut self, msg_type: MessageType, body_size: usize) {
+        let high = (body_size >> 8) as u8;
+        let low = (body_size & 0xff) as u8;
+        let buf = &mut self.0;
+        assert!(buf.len() > 1);
+        buf[0] = high | msg_type.to_u8();
+        buf[1] = low;
+    }
+
+    fn fill_payload<Output, F: FnOnce(&mut BytesMut) -> Output>(
+        &mut self,
+        msg_type: MessageType,
+        f: F,
+    ) -> Output {
+        self.0.resize(Self::HEADER_SIZE, 0);
+        let mut payload = self.0.split_off(Self::HEADER_SIZE);
+        let output = f(&mut payload);
+        let payload_size = payload.len();
+        assert!(payload_size <= Self::MAX_MSG_SIZE);
+        self.0.unsplit(payload);
+        self.set_header(msg_type, payload_size);
+        output
+    }
+
+    #[allow(dead_code)]
+    async fn read_from(reader: &mut Reader) -> Result<Self> {
+        let mut msg = Self::default();
+        msg.read_from_inplace(reader).await?;
+        Ok(msg)
+    }
+
+    async fn read_from_inplace(&mut self, reader: &mut Reader) -> Result<()> {
+        self.0.resize(Self::HEADER_SIZE, 0);
+        reader
+            .read_exact(&mut self.0)
+            .await
+            .with_context(|| "Failed to read header from stream")?;
+        self.get_unchecked_type()?;
+        let mut payload = self.0.split_off(Self::HEADER_SIZE);
+        payload.resize(self.get_payload_size(), 0);
+        reader
+            .read_exact(&mut payload)
+            .await
+            .with_context(|| "Failed to read message from stream")?;
+        self.0.unsplit(payload);
+        Ok(())
+    }
 }
 
-fn start_msg_inplace(msg_type: u8, body_size: usize, buf: &mut BytesMut) {
-    assert!(body_size <= MAX_MSG_SIZE);
-    assert!(msg_type >= DATA);
-    let high = (body_size >> 8) as u8;
-    let low = (body_size & 0xff) as u8;
-    buf.put_u8(high | msg_type);
-    buf.put_u8(low);
+impl AsRef<[u8]> for Message {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
 }
 
-pub struct ClientHello(BytesMut);
+pub struct HelloMessage(Message);
 
-impl ClientHello {
+impl AsRef<[u8]> for HelloMessage {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl Default for HelloMessage {
+    fn default() -> Self {
+        HelloMessage(Message::new(BytesMut::with_capacity(
+            HelloMessage::SIZE + Message::HEADER_SIZE,
+        )))
+    }
+}
+
+impl HelloMessage {
     const SIZE: usize = 128;
-    const HANDSHAKE_MSG_SIZE: usize = Self::SIZE + HEADER_SIZE;
+
+    #[allow(dead_code)]
+    fn from_message(msg: Message, verifier: &VerifyingKey) -> Result<Self> {
+        let msg = HelloMessage(msg);
+        msg.verify(verifier)?;
+        Ok(msg)
+    }
 
     fn get_public_key<'a>(&'a self) -> &'a PublicKey {
-        let buf = self.as_ref();
+        let buf = self.0.get_payload();
         assert!(buf.len() == Self::SIZE);
         buf[0..32].try_into().unwrap()
     }
     fn get_random_key<'a>(&'a self) -> &'a RandomKey {
-        let buf = self.as_ref();
+        let buf = self.0.get_payload();
         assert!(buf.len() == Self::SIZE);
         buf[32..64].try_into().unwrap()
     }
 
     fn get_verify_part<'a>(&'a self) -> &'a [u8] {
-        &self.as_ref()[..64]
+        &self.0.get_payload()[..64]
     }
 
     fn get_signature<'a>(&'a self) -> Signature {
-        let buf = self.as_ref();
+        let buf = self.0.get_payload();
         assert!(buf.len() == Self::SIZE);
         Signature::from_slice(&buf[64..128]).unwrap()
     }
 
-    fn build_msg(
+    fn get_payload<'a>(&'a self) -> &'a [u8] {
+        self.0.get_payload()
+    }
+
+    fn build(
         ephemeral_public: &PublicKey,
         random: &RandomKey,
         signer: &SigningKey,
-    ) -> Result<BytesMut> {
-        let mut buf = start_msg(HANDSHAKE, Self::SIZE);
-        buf.put_slice(ephemeral_public);
-        buf.put_slice(random);
-        let signature = signer
-            .try_sign(&buf[HEADER_SIZE..])
-            .with_context(|| "Failed to sign client hello")?;
-        buf.put_slice(signature.r_bytes());
-        buf.put_slice(signature.s_bytes());
-        assert!(
-            buf.len() == Self::HANDSHAKE_MSG_SIZE,
-            "{} != {}",
-            buf.len(),
-            Self::HANDSHAKE_MSG_SIZE
-        );
-        Ok(buf)
+    ) -> Result<Self> {
+        let mut hello = Self::default();
+        hello.build_inplace(ephemeral_public, random, signer)?;
+        Ok(hello)
     }
 
-    fn parse(buf: BytesMut, verifier: &VerifyingKey) -> Result<Self> {
-        if buf.len() != Self::SIZE {
-            return Err(anyhow!("Invalid client hello msg length: {}", buf.len()));
+    fn build_inplace(
+        &mut self,
+        ephemeral_public: &PublicKey,
+        random: &RandomKey,
+        signer: &SigningKey,
+    ) -> Result<()> {
+        self.0
+            .fill_payload(MessageType::Handshake, move |buf| -> Result<()> {
+                buf.put_slice(ephemeral_public);
+                buf.put_slice(random);
+                let signature = signer
+                    .try_sign(&buf)
+                    .with_context(|| "Failed to sign client hello")?;
+                buf.put_slice(signature.r_bytes());
+                buf.put_slice(signature.s_bytes());
+                assert_eq!(buf.len(), Self::SIZE,);
+                Ok(())
+            })
+    }
+
+    async fn read_from(reader: &mut Reader, verifier: &VerifyingKey) -> Result<Self> {
+        let mut hello = Self::default();
+        hello.read_from_inplace(reader, verifier).await?;
+        Ok(hello)
+    }
+
+    async fn read_from_inplace(
+        &mut self,
+        reader: &mut Reader,
+        verifier: &VerifyingKey,
+    ) -> Result<()> {
+        self.0.read_from_inplace(reader).await?;
+        self.verify(verifier)?;
+        Ok(())
+    }
+
+    fn verify(&self, verifier: &VerifyingKey) -> Result<()> {
+        let payload = self.0.get_payload();
+        if payload.len() != Self::SIZE {
+            return Err(anyhow!(
+                "Invalid client hello msg length: {}",
+                payload.len()
+            ));
         }
-        let hello = Self(buf);
-        let signature = hello.get_signature();
+        let signature = self.get_signature();
         verifier
-            .verify_strict(hello.get_verify_part(), &signature)
+            .verify_strict(self.get_verify_part(), &signature)
             .with_context(|| "Failed to verify client hello signature")?;
-        Ok(hello)
+        Ok(())
     }
 }
 
-impl Into<ClientHello> for BytesMut {
-    fn into(self) -> ClientHello {
-        ClientHello(self)
-    }
-}
-
-impl AsRef<[u8]> for ClientHello {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
-    }
-}
-
-pub struct ServerHello(BytesMut);
-
-impl ServerHello {
-    const SIZE: usize = 128;
-    fn get_public_key<'a>(&'a self) -> &'a PublicKey {
-        let buf = self.as_ref();
-        assert!(buf.len() == Self::SIZE);
-        buf[0..32].try_into().unwrap()
-    }
-    fn get_random_key<'a>(&'a self) -> &'a RandomKey {
-        let buf = self.as_ref();
-        assert!(buf.len() == Self::SIZE);
-        buf[32..64].try_into().unwrap()
-    }
-
-    fn get_verify_part<'a>(&'a self) -> &'a [u8] {
-        &self.as_ref()[..64]
-    }
-
-    fn get_signature<'a>(&'a self) -> Signature {
-        let buf = self.as_ref();
-        assert!(buf.len() == Self::SIZE);
-        Signature::from_slice(&buf[64..128]).unwrap()
-    }
-
-    fn build_msg(public: &PublicKey, random: &RandomKey, signer: &SigningKey) -> Result<BytesMut> {
-        let mut buf = start_msg(HANDSHAKE, Self::SIZE);
-        buf.put_slice(public);
-        buf.put_slice(random);
-        let signature = signer
-            .try_sign(buf[HEADER_SIZE..].as_ref())
-            .with_context(|| "Failed to sign")?;
-        buf.put_slice(signature.r_bytes());
-        buf.put_slice(signature.s_bytes());
-        assert!(buf.len() == Self::SIZE + HEADER_SIZE);
-        Ok(buf)
-    }
-
-    fn parse(buf: BytesMut, verifier: &VerifyingKey) -> Result<Self> {
-        if buf.len() != Self::SIZE {
-            return Err(anyhow!("Invalid server hello msg length: {}", buf.len()));
-        }
-        let hello = Self(buf);
-        let signature = hello.get_signature();
-        verifier
-            .verify_strict(hello.get_verify_part(), &signature)
-            .with_context(|| "Failed to verify server hello signature")?;
-        Ok(hello)
-    }
-}
-
-impl Into<ServerHello> for BytesMut {
-    fn into(self) -> ServerHello {
-        ServerHello(self)
-    }
-}
-
-impl AsRef<[u8]> for ServerHello {
-    fn as_ref(&self) -> &[u8] {
-        self.0.as_ref()
-    }
-}
+type ServerHello = HelloMessage;
+type ClientHello = HelloMessage;
 
 fn generate_random() -> Result<RandomKey> {
     let mut random = [0u8; 32];
@@ -241,34 +294,30 @@ fn generate_random() -> Result<RandomKey> {
 pub async fn client_handshake(
     mut reader: Reader,
     mut writer: Writer,
-    singer: &SigningKey,
+    signer: &SigningKey,
     verifier: &VerifyingKey,
 ) -> anyhow::Result<(ReadSession, WriteSession)> {
     let ephemeral_private = ECDHPrivate::random();
     let ephemeral_public = ECDHPublic::from(&ephemeral_private);
     let client_random = generate_random()?;
+    let mut hash = Sha256::new();
 
-    let client_hello = ClientHello::build_msg(ephemeral_public.as_bytes(), &client_random, singer)?;
+    let client_hello = ClientHello::build(ephemeral_public.as_bytes(), &client_random, signer)?;
     writer
-        .write_all(&client_hello)
+        .write_all(client_hello.as_ref())
         .await
         .with_context(|| "Failed to write to stream")?;
-    let mut hash = Sha256::new();
-    hash.update(&client_hello[HEADER_SIZE..]);
+    hash.update(client_hello.get_payload());
 
-    let (msg_type, buf) = read_msg(&mut reader).await?;
-    if msg_type != HANDSHAKE {
-        return Err(anyhow!("Invalid message type: {}", msg_type));
-    }
-    let serve_hello = &ServerHello::parse(buf, verifier)?;
-    hash.update(serve_hello);
+    let server_hello = ServerHello::read_from(&mut reader, verifier).await?;
+    hash.update(server_hello.get_payload());
     let hello_hash = hash.finalize();
-    let their_public = ECDHPublic::from(serve_hello.get_public_key().clone());
+    let their_public = ECDHPublic::from(server_hello.get_public_key().clone());
     let shared_key = ephemeral_private.diffie_hellman(&their_public);
 
     let (client_secret_iv, client_secret, server_secret_iv, server_secret) = expand_secret(
         &client_random,
-        serve_hello.get_random_key(),
+        server_hello.get_random_key(),
         shared_key.as_bytes(),
         &hello_hash,
     );
@@ -296,20 +345,17 @@ pub async fn server_handshake(
     let ecdh_private = ECDHPrivate::random();
     let ecdh_public = ECDHPublic::from(&ecdh_private);
     let server_random = generate_random()?;
-    let (msg_type, msg) = read_msg(&mut reader).await?;
-    if msg_type != HANDSHAKE {
-        return Err(anyhow!("Invalid message type: {}", msg_type));
-    }
-    let client_hello = &ClientHello::parse(msg, verifier)?;
     let mut hash = Sha256::new();
-    hash.update(client_hello);
 
-    let server_hello = ServerHello::build_msg(ecdh_public.as_bytes(), &server_random, signer)?;
+    let client_hello = ClientHello::read_from(&mut reader, verifier).await?;
+    hash.update(client_hello.get_payload());
+
+    let server_hello = ServerHello::build(ecdh_public.as_bytes(), &server_random, signer)?;
     writer
-        .write_all(&server_hello)
+        .write_all(server_hello.as_ref())
         .await
         .with_context(|| "Failed to write to stream")?;
-    hash.update(&server_hello[HEADER_SIZE..]);
+    hash.update(server_hello.get_payload());
 
     let hello_hash = hash.finalize();
     let their_public = ECDHPublic::from(client_hello.get_public_key().clone());
@@ -381,7 +427,7 @@ struct Encryption {
     secret_iv: NonceB,
     sequence: Seq,
     aead: Aes256Gcm,
-    encrypted_buf: BytesMut,
+    message: Message,
 }
 
 impl Encryption {
@@ -390,37 +436,34 @@ impl Encryption {
             secret_iv,
             sequence: Seq([0; 12]),
             aead,
-            encrypted_buf: BytesMut::with_capacity(1024),
+            message: Message::default(),
         }
     }
 
-    async fn read_msg(&mut self, reader: &mut Reader, buf: &mut BytesMut) -> Result<u8> {
-        self.encrypted_buf.clear();
-        let typ = read_msg_inplace(reader, &mut self.encrypted_buf).await?;
-        self.decrypt_in_place(buf)?;
-        Ok(typ)
+    async fn read_msg(&mut self, reader: &mut Reader, buf: &mut BytesMut) -> Result<MessageType> {
+        self.message.read_from_inplace(reader).await?;
+        self.decrypt_inplace(buf)?;
+        Ok(self.message.get_type())
     }
 
-    fn decrypt_in_place(&mut self, buf: &mut BytesMut) -> Result<()> {
+    fn decrypt_inplace(&mut self, buf: &mut BytesMut) -> Result<()> {
         let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
+        let payload = self.message.get_payload();
         self.aead
-            .decrypt_in_place(&nonce.into(), &self.encrypted_buf, buf)
+            .decrypt_in_place(&nonce.into(), payload, buf)
             .with_context(|| "Failed to decrypt message")?;
         self.sequence.incr();
         Ok(())
     }
 
-    fn encrypt_message_in_place(&mut self, msg_type: u8, body: &[u8]) -> Result<()> {
-        self.encrypted_buf.resize(HEADER_SIZE, 0);
-        let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
-        let mut payload = self.encrypted_buf.split_off(self.encrypted_buf.len());
-        self.aead
-            .encrypt_in_place(&nonce.into(), body, &mut payload)
-            .with_context(|| "Failed to encrypt message")?;
-        let body_size = payload.len();
-        self.encrypted_buf.unsplit(payload);
-        fill_msg_header(msg_type, body_size, &mut self.encrypted_buf);
-        assert_eq!(extract_msg_header(self.encrypted_buf[0], self.encrypted_buf[1]), (msg_type, body_size));
+    fn encrypt_message_inplace(&mut self, msg_type: MessageType, body: &[u8]) -> Result<()> {
+        self.message.fill_payload(msg_type, |payload| {
+            let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
+            self.aead
+                .encrypt_in_place(&nonce.into(), body, payload)
+                .with_context(|| "Failed to encrypt message")
+        })?;
+        assert_eq!(self.message.get_type(), msg_type);
         self.sequence.incr();
         Ok(())
     }
@@ -428,7 +471,7 @@ impl Encryption {
     async fn read_specific_msg(
         &mut self,
         reader: &mut Reader,
-        expect_type: u8,
+        expect_type: MessageType,
         buf: &mut BytesMut,
     ) -> Result<()> {
         let typ = self.read_msg(reader, buf).await?;
@@ -445,12 +488,12 @@ impl Encryption {
     async fn write_message(
         &mut self,
         writer: &mut Writer,
-        msg_type: u8,
+        msg_type: MessageType,
         body: &[u8],
     ) -> Result<()> {
-        self.encrypt_message_in_place(msg_type, body)?;
+        self.encrypt_message_inplace(msg_type, body)?;
         writer
-            .write_all(&self.encrypted_buf)
+            .write_all(self.message.as_ref())
             .await
             .with_context(|| "Failed to write to stream")?;
         self.sequence.incr();
@@ -474,7 +517,7 @@ impl ReadSession {
     pub async fn read_connect_msg(&mut self) -> Result<Address> {
         let buf = &mut BytesMut::with_capacity(32);
         self.encryption
-            .read_specific_msg(&mut self.reader, CONNECT, buf)
+            .read_specific_msg(&mut self.reader, MessageType::Connect, buf)
             .await?;
         let addr = Address::from_bytes(buf)?;
         Ok(addr)
@@ -482,7 +525,7 @@ impl ReadSession {
 
     #[inline]
     #[allow(dead_code)]
-    pub async fn read_msg(&mut self, buf: &mut BytesMut) -> Result<u8> {
+    pub async fn read_msg(&mut self, buf: &mut BytesMut) -> Result<MessageType> {
         self.encryption.read_msg(&mut self.reader, buf).await
     }
 
@@ -526,7 +569,9 @@ impl ReadSession {
         buf: &mut BytesMut,
     ) -> Result<usize> {
         let reader = &mut self.reader;
-        self.encryption.read_specific_msg(reader, DATA, buf).await?;
+        self.encryption
+            .read_specific_msg(reader, MessageType::Data, buf)
+            .await?;
         writer
             .write_all(buf)
             .await
@@ -563,7 +608,7 @@ impl WriteSession {
         let buf = &mut BytesMut::with_capacity(32);
         buf.put_slice(address.as_string().as_bytes());
         self.encryption
-            .write_message(&mut self.writer, CONNECT, buf)
+            .write_message(&mut self.writer, MessageType::Connect, buf)
             .await
     }
 
@@ -612,13 +657,19 @@ impl WriteSession {
             .await
             .with_context(|| "Failed to read message from stream")?;
         buf.resize(n, 0);
-        self.encryption.write_message(writer, DATA, buf).await?;
+        self.encryption
+            .write_message(writer, MessageType::Data, buf)
+            .await?;
         Ok(n)
     }
 
+    #[inline]
+    #[allow(dead_code)]
     async fn write_data(&mut self, payload: &[u8]) -> Result<()> {
         let writer = &mut self.writer;
-        self.encryption.write_message(writer, DATA, payload).await
+        self.encryption
+            .write_message(writer, MessageType::Data, payload)
+            .await
     }
 }
 
@@ -789,27 +840,45 @@ mod tests {
     fn test_client_hello_build_and_parse() {
         let secret = KeyPair::random();
         let random = generate_random().unwrap();
-        let hello = ClientHello::build_msg(&secret.public, &random, &secret.signer()).unwrap();
-        let (_, body) = hello.split_at(HEADER_SIZE);
-        let client_hello = ClientHello::parse(body.into(), &secret.verifier()).unwrap();
+        let hello = ClientHello::build(&secret.public, &random, &secret.signer()).unwrap();
+
+        let buf = BytesMut::from(hello.as_ref());
+        let client_hello =
+            ClientHello::from_message(Message::new(buf), &secret.verifier()).unwrap();
         assert_eq!(&secret.public, client_hello.get_public_key());
         assert_eq!(&random, client_hello.get_random_key());
+        assert_eq!(hello.get_payload(), client_hello.get_payload());
+        assert_eq!(
+            hello.get_signature().to_bytes(),
+            client_hello.get_signature().to_bytes()
+        );
     }
 
     #[test]
     fn test_server_hello_build_and_parse() {
         let secret = KeyPair::random();
         let random = generate_random().unwrap();
-        let hello = ServerHello::build_msg(&secret.public, &random, &secret.signer()).unwrap();
-        let (_, body) = hello.split_at(HEADER_SIZE);
-        let client_hello = ServerHello::parse(body.into(), &secret.verifier()).unwrap();
-        assert_eq!(&secret.public, client_hello.get_public_key());
-        assert_eq!(&random, client_hello.get_random_key());
+        let hello = ServerHello::build(&secret.public, &random, &secret.signer()).unwrap();
+
+        let buf = BytesMut::from(hello.as_ref());
+        let server_hello =
+            ServerHello::from_message(Message::new(buf), &secret.verifier()).unwrap();
+        assert_eq!(&secret.public, server_hello.get_public_key());
+        assert_eq!(&random, server_hello.get_random_key());
+        assert_eq!(hello.get_payload(), server_hello.get_payload());
+        assert_eq!(
+            hello.get_signature().to_bytes(),
+            server_hello.get_signature().to_bytes()
+        );
     }
 
     use ntest::timeout;
     use tokio;
     use tokio::net::{TcpListener, TcpStream};
+
+    fn test_setup() {
+        let _ = env_logger::builder().is_test(true).try_init();
+    }
 
     async fn build_stream_pair() -> (Stream, Stream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -830,31 +899,29 @@ mod tests {
     #[timeout(2000)]
     async fn test_plain_message_read_write() {
         let (mut client, mut server) = build_stream_pair().await;
-        let mut buf = BytesMut::with_capacity(256);
-        buf.put_slice(b"hello world");
+        let expected = b"hello world".as_ref();
+        let mut msg = Message::default();
+        msg.fill_payload(MessageType::Data, move |buf| {
+            buf.put(expected);
+        });
+        client.writer.write_all(msg.as_ref()).await.unwrap();
 
-        let mut msg = start_msg(DATA, buf.len());
-        msg.put_slice(&buf);
-        assert_eq!(HEADER_SIZE + buf.len(), msg.len());
-        client.writer.write_all(&msg).await.unwrap();
-
-        let (typ, recv) = read_msg(&mut server.reader).await.unwrap();
-        assert_eq!(DATA, typ);
-        assert_eq!(buf.as_ref(), recv.as_ref());
+        let recv = Message::read_from(&mut server.reader).await.unwrap();
+        assert_eq!(MessageType::Data, recv.get_type());
+        assert_eq!(expected, recv.get_payload());
     }
 
     #[test]
-    fn test_encrypt_and_decrypt() {
-    }
+    fn test_encrypt_and_decrypt() {}
 
     #[tokio::test]
     #[timeout(2000)]
     async fn test_encrypted_message_read_write() {
+        test_setup();
+
         let (client, server) = build_stream_pair().await;
         let mut buf = BytesMut::with_capacity(256);
         buf.put_slice(b"hello world");
-
-        env_logger::init();
         let client_key = KeyPair::random();
         let server_key = KeyPair::random();
         let client_singer = &client_key.signer();
@@ -892,10 +959,10 @@ mod tests {
     #[tokio::test]
     #[timeout(9000)]
     async fn test_handshake_and_transfer() {
-        env_logger::init();
+        test_setup();
+
         let client_key = KeyPair::random();
         let server_key = KeyPair::random();
-
         // stream structure:
         // peer_client <-tcp-> peer_server <-copy-> server <-tcp-> client <-copy-> local_server <-tcp-> local_client
         let (client, server) = build_stream_pair().await;
