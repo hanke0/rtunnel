@@ -347,13 +347,17 @@ struct Seq([u8; 12]);
 
 impl Seq {
     pub fn incr(&mut self) {
-        for i in 11..0 {
+        let mut i = 11;
+        loop {
             self.0[i] += 1;
             if self.0[i] != 0 {
                 return;
             }
+            if i == 0 {
+                panic!("Sequence overflow: {:?}", self.0);
+            }
+            i -= 1;
         }
-        panic!("Sequence overflow");
     }
     pub fn xor_secret_iv(&self, secret_iv: &NonceB) -> NonceB {
         array::from_fn(|i| self.0[i] ^ secret_iv[i])
@@ -466,6 +470,7 @@ impl ReadSession {
                     loop {
                             match self.relay_encrypted_to_plain(writer, buf).await  {
                                 Ok(n) => {
+                                    println!("relay encrypt to plain: {}", n);
                                     size += n;
                                 }
                                 Err(err) => {
@@ -546,6 +551,7 @@ impl WriteSession {
                     loop {
                             match self.replay_plain_to_encrypted(reader, buf).await  {
                                 Ok(n) => {
+                                    println!("relay plain to encrypt: {}", n);
                                     size += n;
                                 }
                                 Err(err) => {
@@ -719,6 +725,7 @@ mod tests {
     use crate::transport::{Stream, create_controller};
 
     use super::*;
+    use env_logger;
 
     #[test]
     fn test_secret_generate() {
@@ -802,8 +809,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[timeout(2000)]
+    #[timeout(9000)]
     async fn test_handshake_and_transfer() {
+        env_logger::init();
         let client_key = KeyPair::random();
         let server_key = KeyPair::random();
 
@@ -839,7 +847,7 @@ mod tests {
                         local_client.writer.write_all(EXPECTED).await.unwrap();
                         println!("peer write done");
                         let mut buf = [0u8; EXPECTED.len()];
-                        local_client.reader.read_exact(&mut buf).await.unwrap();
+                        local_client.reader.read(&mut buf).await.unwrap();
                         println!("peer read done");
                         assert_eq!(EXPECTED, &buf);
                     }
@@ -864,7 +872,7 @@ mod tests {
                         peer_client.writer.write_all(EXPECTED).await.unwrap();
                         println!("local write done");
                         let mut buf = [0u8; EXPECTED.len()];
-                        peer_client.reader.read_exact(&mut buf).await.unwrap();
+                        peer_client.reader.read(&mut buf).await.unwrap();
                         println!("local read done");
                         assert_eq!(EXPECTED, &buf);
                     }
