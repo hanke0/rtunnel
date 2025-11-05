@@ -6,7 +6,9 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 
 use crate::config::ServerConfig;
-use crate::encryption::{Session, copy_encrypted_bidirectional, server_handshake};
+use crate::encryption::{
+    ReadSession, WriteSession, copy_encrypted_bidirectional, server_handshake,
+};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
 use crate::transport::{Address, Controller, Listener, Stream};
 
@@ -16,11 +18,11 @@ struct ServerOptions {
     receiver: SessionReceiver,
 }
 
-type SessionReceiver = async_channel::Receiver<(Session, Session)>;
-type SessionSender = async_channel::Sender<(Session, Session)>;
+type SessionReceiver = async_channel::Receiver<(ReadSession, WriteSession)>;
+type SessionSender = async_channel::Sender<(ReadSession, WriteSession)>;
 
 impl ServerOptions {
-    async fn pop_stream(&self) -> (Session, Session) {
+    async fn pop_stream(&self) -> (ReadSession, WriteSession) {
         self.receiver.recv().await.unwrap()
     }
 }
@@ -88,12 +90,12 @@ async fn start_server_listener(
 
 async fn handle_server_stream_silent(
     _controller: Controller,
-    mut stream: Stream,
+    stream: Stream,
     options: ServerOptionsRef,
     sender: SessionSender,
 ) {
-    let peer = stream.peer_addr();
-    match handle_server_stream(&mut stream, &options, &sender).await {
+    let peer = stream.reader.peer_addr();
+    match handle_server_stream(stream, &options, &sender).await {
         Ok(_) => {
             debug!("new tunnel session created: {}", peer);
         }
@@ -104,11 +106,17 @@ async fn handle_server_stream_silent(
 }
 
 async fn handle_server_stream(
-    stream: &mut Stream,
+    stream: Stream,
     options: &ServerOptionsRef,
     sender: &SessionSender,
 ) -> Result<()> {
-    let rsp = server_handshake(stream, &options.signer, &options.verifier).await?;
+    let rsp = server_handshake(
+        stream.reader,
+        stream.writer,
+        &options.signer,
+        &options.verifier,
+    )
+    .await?;
     sender.send(rsp).await?;
     Ok(())
 }
@@ -173,7 +181,8 @@ async fn handle_service_stream(
         controller,
         &mut read_half,
         &mut write_half,
-        &mut stream,
+        &mut stream.reader,
+        &mut stream.writer,
     )
     .await);
 }

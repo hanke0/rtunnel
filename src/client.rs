@@ -10,9 +10,9 @@ use tokio::select;
 use tokio::time::sleep;
 
 use crate::config::ClientConfig;
-use crate::encryption::Session;
 use crate::encryption::client_handshake;
 use crate::encryption::copy_encrypted_bidirectional;
+use crate::encryption::{ReadSession, WriteSession};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
 use crate::transport::{Address, Controller, NotifyEvent, Receiver};
 
@@ -168,17 +168,17 @@ async fn start_service(controller: Controller, options: ServiceOptionsRef) -> Re
 async fn connect_to_service(
     _controller: Controller,
     options: ServiceOptionsRef,
-) -> Result<(Session, Session)> {
-    let mut conn = options.address.connect_to().await?;
+) -> Result<(ReadSession, WriteSession)> {
+    let conn = options.address.connect_to().await?;
     let (read_half, write_half) =
-        client_handshake(&mut conn, &options.signer, &options.verifier).await?;
+        client_handshake(conn.reader, conn.writer, &options.signer, &options.verifier).await?;
     return Ok((read_half, write_half));
 }
 
 async fn handle_stream_silent(
     controller: Controller,
-    read_half: &mut Session,
-    write_half: &mut Session,
+    read_half: &mut ReadSession,
+    write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) {
     match handle_stream(controller, read_half, write_half, allows).await {
@@ -193,8 +193,8 @@ async fn handle_stream_silent(
 
 async fn handle_stream(
     controller: Controller,
-    read_half: &mut Session,
-    write_half: &mut Session,
+    read_half: &mut ReadSession,
+    write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) -> Result<(usize, usize)> {
     let addr = read_half.read_connect_msg().await?;
@@ -202,5 +202,12 @@ async fn handle_stream(
         return Err(anyhow!("Address not allowed: {}", &addr));
     }
     let mut conn = addr.connect_to().await?;
-    Ok(copy_encrypted_bidirectional(controller, read_half, write_half, &mut conn).await)
+    Ok(copy_encrypted_bidirectional(
+        controller,
+        read_half,
+        write_half,
+        &mut conn.reader,
+        &mut conn.writer,
+    )
+    .await)
 }

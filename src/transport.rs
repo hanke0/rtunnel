@@ -1,3 +1,11 @@
+use std::fmt;
+use std::io;
+use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
+use std::result::Result::Ok;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -5,122 +13,122 @@ use log::error;
 use serde::de::{Deserialize, Deserializer, Visitor};
 use socket2;
 use socket2::TcpKeepalive;
-use std::cmp;
-use std::fmt;
-use std::fmt::Display;
-use std::io;
-use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
-use std::result::Result::Ok;
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-#[derive(Clone)]
-pub struct Stream {
-    inner: Arc<Mutex<StreamInner>>,
+pub struct Reader {
+    inner: ReadInner,
     local_addr: SocketAddr,
     peer_addr: SocketAddr,
 }
 
-impl Stream {
-    pub fn from_tcp_stream(stream: TcpStream) -> Self {
-        let stream = StreamInner::TCP(stream);
-        let local_addr = stream.local_addr();
-        let peer_addr = stream.peer_addr();
-        let inner = Arc::new(Mutex::new(stream));
-        Self {
-            inner,
-            local_addr,
-            peer_addr,
-        }
-    }
-    pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        let mut guard = self.inner.lock().await;
-        guard.write_all(data).await
-    }
+impl Reader {
+    #[inline]
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut guard = self.inner.lock().await;
-        guard.read(buf).await
+        self.inner.read(buf).await
     }
+    #[inline]
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut guard = self.inner.lock().await;
-        guard.read_exact(buf).await
+        self.inner.read_exact(buf).await
     }
-    pub fn peer_addr(&self) -> SocketAddr {
-        self.peer_addr
-    }
+    #[inline]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
-}
-
-impl Display for Stream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}-{}", self.local_addr(), self.peer_addr())
-    }
-}
-
-impl Ord for Stream {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        let ord = self.peer_addr().cmp(&other.peer_addr());
-        if ord.is_eq() {
-            self.local_addr.cmp(&other.local_addr())
-        } else {
-            ord
-        }
-    }
-}
-
-impl PartialOrd for Stream {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for Stream {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other).is_eq()
-    }
-}
-
-impl Eq for Stream {}
-
-enum StreamInner {
-    TCP(TcpStream),
-}
-
-impl StreamInner {
-    pub async fn write_all(self: &mut Self, data: &[u8]) -> io::Result<()> {
-        match self {
-            StreamInner::TCP(s) => s.write_all(data).await,
-        }
-    }
-    pub async fn read(self: &mut Self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            StreamInner::TCP(s) => s.read(buf).await,
-        }
-    }
-    pub async fn read_exact(self: &mut Self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            StreamInner::TCP(s) => s.read_exact(buf).await,
-        }
-    }
+    #[inline]
     pub fn peer_addr(&self) -> SocketAddr {
+        self.peer_addr
+    }
+}
+
+pub struct Writer {
+    inner: WriteInner,
+    local_addr: SocketAddr,
+    peer_addr: SocketAddr,
+}
+
+impl Writer {
+    #[inline]
+    pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        self.inner.write_all(data).await
+    }
+    #[inline]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+    #[inline]
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.peer_addr
+    }
+}
+
+enum ReadInner {
+    TCP(OwnedReadHalf),
+}
+
+impl ReadInner {
+    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            StreamInner::TCP(s) => s.peer_addr().unwrap(),
+            ReadInner::TCP(s) => s.read(buf).await,
         }
     }
-    pub fn local_addr(&self) -> SocketAddr {
+    pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            StreamInner::TCP(s) => s.local_addr().unwrap(),
+            ReadInner::TCP(s) => s.read_exact(buf).await,
         }
+    }
+}
+
+enum WriteInner {
+    TCP(OwnedWriteHalf),
+}
+
+impl WriteInner {
+    pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        match self {
+            WriteInner::TCP(s) => s.write_all(data).await,
+        }
+    }
+}
+
+pub struct Stream {
+    pub reader: Reader,
+    pub writer: Writer,
+}
+
+impl Stream {
+    pub fn from_tcp_stream(stream: TcpStream) -> Self {
+        let local_addr = stream.local_addr().unwrap();
+        let peer_addr = stream.peer_addr().unwrap();
+        let (r, w) = stream.into_split();
+        Stream {
+            reader: Reader {
+                inner: ReadInner::TCP(r),
+                local_addr,
+                peer_addr,
+            },
+            writer: Writer {
+                inner: WriteInner::TCP(w),
+                local_addr,
+                peer_addr,
+            },
+        }
+    }
+
+    #[inline]
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.reader.peer_addr
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.reader.local_addr
     }
 }
 
@@ -128,7 +136,7 @@ pub enum Listener {
     TCP(TcpListener),
 }
 
-impl Display for Listener {
+impl fmt::Display for Listener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Listener::TCP(s) => {
@@ -156,7 +164,7 @@ pub enum Address {
     TCP(SocketAddr),
 }
 
-impl Display for Address {
+impl fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Address::TCP(a) => {
