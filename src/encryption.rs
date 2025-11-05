@@ -46,6 +46,14 @@ fn extract_msg_header(high: u8, low: u8) -> (u8, usize) {
     )
 }
 
+fn fill_msg_header(msg_type: u8, body_size: usize, buf: &mut BytesMut) {
+    let high = (body_size >> 8) as u8;
+    let low = (body_size & 0xff) as u8;
+    assert!(buf.len() > 1);
+    buf[0] = high | msg_type;
+    buf[1] = low;
+}
+
 async fn read_msg(reader: &mut Reader) -> Result<(u8, BytesMut)> {
     let mut buf = bytes::BytesMut::with_capacity(256);
     let typ = read_msg_inplace(reader, &mut buf).await?;
@@ -79,7 +87,6 @@ fn start_msg(msg_type: u8, body_size: usize) -> BytesMut {
 fn start_msg_inplace(msg_type: u8, body_size: usize, buf: &mut BytesMut) {
     assert!(body_size <= MAX_MSG_SIZE);
     assert!(msg_type >= DATA);
-    buf.resize(0, 0);
     let high = (body_size >> 8) as u8;
     let low = (body_size & 0xff) as u8;
     buf.put_u8(high | msg_type);
@@ -388,13 +395,34 @@ impl Encryption {
     }
 
     async fn read_msg(&mut self, reader: &mut Reader, buf: &mut BytesMut) -> Result<u8> {
+        self.encrypted_buf.clear();
         let typ = read_msg_inplace(reader, &mut self.encrypted_buf).await?;
+        self.decrypt_in_place(buf)?;
+        Ok(typ)
+    }
+
+    fn decrypt_in_place(&mut self, buf: &mut BytesMut) -> Result<()> {
         let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
         self.aead
             .decrypt_in_place(&nonce.into(), &self.encrypted_buf, buf)
             .with_context(|| "Failed to decrypt message")?;
         self.sequence.incr();
-        Ok(typ)
+        Ok(())
+    }
+
+    fn encrypt_message_in_place(&mut self, msg_type: u8, body: &[u8]) -> Result<()> {
+        self.encrypted_buf.resize(HEADER_SIZE, 0);
+        let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
+        let mut payload = self.encrypted_buf.split_off(self.encrypted_buf.len());
+        self.aead
+            .encrypt_in_place(&nonce.into(), body, &mut payload)
+            .with_context(|| "Failed to encrypt message")?;
+        let body_size = payload.len();
+        self.encrypted_buf.unsplit(payload);
+        fill_msg_header(msg_type, body_size, &mut self.encrypted_buf);
+        assert_eq!(extract_msg_header(self.encrypted_buf[0], self.encrypted_buf[1]), (msg_type, body_size));
+        self.sequence.incr();
+        Ok(())
     }
 
     async fn read_specific_msg(
@@ -418,13 +446,9 @@ impl Encryption {
         &mut self,
         writer: &mut Writer,
         msg_type: u8,
-        buf: &mut BytesMut,
+        body: &[u8],
     ) -> Result<()> {
-        start_msg_inplace(msg_type, buf.len(), &mut self.encrypted_buf);
-        let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
-        self.aead
-            .encrypt_in_place(&nonce.into(), buf, &mut self.encrypted_buf)
-            .with_context(|| "Failed to encrypt message")?;
+        self.encrypt_message_in_place(msg_type, body)?;
         writer
             .write_all(&self.encrypted_buf)
             .await
@@ -456,6 +480,12 @@ impl ReadSession {
         Ok(addr)
     }
 
+    #[inline]
+    #[allow(dead_code)]
+    pub async fn read_msg(&mut self, buf: &mut BytesMut) -> Result<u8> {
+        self.encryption.read_msg(&mut self.reader, buf).await
+    }
+
     pub async fn relay_encrypted_to_plain_forever(
         &mut self,
         controller: Controller,
@@ -464,7 +494,7 @@ impl ReadSession {
         let mut size: usize = 0;
         let buf = &mut BytesMut::with_capacity(1024);
         loop {
-            buf.resize(0, 0);
+            buf.clear();
             tokio::select! {
                 _ = async move {
                     loop {
@@ -584,6 +614,11 @@ impl WriteSession {
         buf.resize(n, 0);
         self.encryption.write_message(writer, DATA, buf).await?;
         Ok(n)
+    }
+
+    async fn write_data(&mut self, payload: &[u8]) -> Result<()> {
+        let writer = &mut self.writer;
+        self.encryption.write_message(writer, DATA, payload).await
     }
 }
 
@@ -793,7 +828,7 @@ mod tests {
 
     #[tokio::test]
     #[timeout(2000)]
-    async fn test_message_read_write() {
+    async fn test_plain_message_read_write() {
         let (mut client, mut server) = build_stream_pair().await;
         let mut buf = BytesMut::with_capacity(256);
         buf.put_slice(b"hello world");
@@ -808,6 +843,52 @@ mod tests {
         assert_eq!(buf.as_ref(), recv.as_ref());
     }
 
+    #[test]
+    fn test_encrypt_and_decrypt() {
+    }
+
+    #[tokio::test]
+    #[timeout(2000)]
+    async fn test_encrypted_message_read_write() {
+        let (client, server) = build_stream_pair().await;
+        let mut buf = BytesMut::with_capacity(256);
+        buf.put_slice(b"hello world");
+
+        env_logger::init();
+        let client_key = KeyPair::random();
+        let server_key = KeyPair::random();
+        let client_singer = &client_key.signer();
+        let client_verifier = &server_key.verifier();
+        let server_singer = &server_key.signer();
+        let server_verifier = &client_key.verifier();
+
+        let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
+            async move {
+                client_handshake(client.reader, client.writer, client_singer, client_verifier)
+                    .await
+                    .unwrap()
+            },
+            async move {
+                server_handshake(server.reader, server.writer, server_singer, server_verifier)
+                    .await
+                    .unwrap()
+            },
+        );
+        println!("handshake done");
+        client_write.write_data(&buf).await.unwrap();
+        println!("client write done");
+        let payload = &mut BytesMut::with_capacity(256);
+        server_read.read_msg(payload).await.unwrap();
+        println!("server read done");
+        assert_eq!(buf.as_ref(), payload.as_ref());
+        server_write.write_data(&payload).await.unwrap();
+        println!("server write done");
+        payload.clear();
+        client_read.read_msg(payload).await.unwrap();
+        println!("client read done");
+        assert_eq!(buf.as_ref(), payload.as_ref());
+    }
+
     #[tokio::test]
     #[timeout(9000)]
     async fn test_handshake_and_transfer() {
@@ -816,7 +897,7 @@ mod tests {
         let server_key = KeyPair::random();
 
         // stream structure:
-        // peer_client <-> peer_server <-> server <-> client <-> local_server <-> local_client
+        // peer_client <-tcp-> peer_server <-copy-> server <-tcp-> client <-copy-> local_server <-tcp-> local_client
         let (client, server) = build_stream_pair().await;
         let (mut peer_client, mut peer_server) = build_stream_pair().await;
         let (mut local_client, mut local_server) = build_stream_pair().await;
