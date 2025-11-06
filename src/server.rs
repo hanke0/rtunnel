@@ -176,7 +176,7 @@ async fn handle_service_stream(
     connect_to: Address,
 ) -> Result<(usize, usize)> {
     let (mut read_half, mut write_half) = options.pop_stream().await;
-    write_half.write_connect_msg(connect_to).await?;
+    write_half.write_connect_message(connect_to).await?;
     return Ok(copy_encrypted_bidirectional(
         controller,
         &mut read_half,

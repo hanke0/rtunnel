@@ -197,7 +197,7 @@ async fn handle_stream(
     write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) -> Result<(usize, usize)> {
-    let addr = read_half.read_connect_msg().await?;
+    let addr = read_half.read_connect_message().await?;
     if !allows.contains(&addr) {
         return Err(anyhow!("Address not allowed: {}", &addr));
     }
