@@ -156,6 +156,8 @@ async fn handle_service_stream_silent(
     connect_to: Address,
 ) {
     let addr = stream.peer_addr();
+    let local_addr = stream.local_addr();
+    debug!("new service stream connected: {}->{}", addr, local_addr);
     match handle_service_stream(controller, stream, options, connect_to).await {
         Ok((read, write)) => {
             info!(
@@ -164,7 +166,7 @@ async fn handle_service_stream_silent(
             );
         }
         Err(e) => {
-            error!("stream {} transfer error: {}", addr, e);
+            error!("stream {} relay error: {}", addr, e);
         }
     };
 }
@@ -176,7 +178,17 @@ async fn handle_service_stream(
     connect_to: Address,
 ) -> Result<(usize, usize)> {
     let (mut read_half, mut write_half) = options.pop_stream().await;
+    debug!(
+        "stream got a tunnel: {}->{}",
+        stream.peer_addr(),
+        stream.local_addr()
+    );
     write_half.write_connect_message(connect_to).await?;
+    debug!(
+        "tunnel connect message has sent, stream relay started: {}->{}",
+        stream.peer_addr(),
+        stream.local_addr()
+    );
     return Ok(copy_encrypted_bidirectional(
         controller,
         &mut read_half,

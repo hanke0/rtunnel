@@ -10,6 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
 use bytes::{BufMut, BytesMut};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
+use log::{debug, error};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
@@ -179,17 +180,19 @@ impl Message {
 
     async fn read_from_inplace(&mut self, reader: &mut Reader) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
+        debug!("Reading message header from stream");
         reader
             .read_exact(&mut self.0)
             .await
-            .with_context(|| "Failed to read header from stream")?;
+            .context("Failed to read header from stream")?;
         self.get_unchecked_type()?;
         let mut payload = self.0.split_off(Self::HEADER_SIZE);
         payload.resize(self.get_payload_size(), 0);
+        debug!("Reading message payload from stream");
         reader
             .read_exact(&mut payload)
             .await
-            .with_context(|| "Failed to read message from stream")?;
+            .context("Failed to read message from stream")?;
         self.0.unsplit(payload);
         Ok(())
     }
@@ -381,7 +384,7 @@ pub async fn client_handshake(
         .await
         .with_context(|| "Failed to write to stream")?;
     let server_hello = ServerHello::read_from(&mut reader, verifier).await?;
-    let (client_aead, server_aead) = handshake(
+    let (client_encryption, server_encryption) = handshake(
         &client_hello,
         &server_hello,
         ephemeral_private,
@@ -389,8 +392,8 @@ pub async fn client_handshake(
     );
 
     Ok((
-        ReadSession::new(reader, server_aead),
-        WriteSession::new(writer, client_aead),
+        ReadSession::new(reader, server_encryption),
+        WriteSession::new(writer, client_encryption),
     ))
 }
 
@@ -411,15 +414,15 @@ pub async fn server_handshake(
         .await
         .with_context(|| "Failed to write to stream")?;
 
-    let (client_aead, server_aead) = handshake(
+    let (client_encryption, server_encryption) = handshake(
         &client_hello,
         &server_hello,
         ephemeral_private,
         HandshakeSide::Server,
     );
     Ok((
-        ReadSession::new(reader, client_aead),
-        WriteSession::new(writer, server_aead),
+        ReadSession::new(reader, client_encryption),
+        WriteSession::new(writer, server_encryption),
     ))
 }
 
@@ -490,20 +493,28 @@ impl Encryption {
         Ok((self.message.get_type(), self.message.get_payload()))
     }
 
-    async fn read_and_encrypt_data<'a>(&'a mut self, reader: &mut Reader) -> Result<&'a [u8]> {
+    async fn from_reader_inplace<'a>(
+        &'a mut self,
+        reader: &mut Reader,
+    ) -> Result<(usize, &'a [u8])> {
         let message = &mut self.message;
-        message
+        let n = message
             .async_replace_payload(MessageType::Data, async move |payload| -> Result<usize> {
                 payload.resize(payload.capacity(), 0);
+                assert_ne!(payload.len(), 0);
                 let n = reader
                     .read(payload)
                     .await
-                    .with_context(|| "Failed to read from stream")?;
+                    .context("Failed to read from stream")?;
                 payload.resize(n, 0);
                 Ok(n)
             })
             .await?;
-        Ok(self.message.as_ref())
+        if n == 0 {
+            return Err(anyhow!("EOF: read return 0"));
+        }
+        self.encrypt_inplace(MessageType::Data)?;
+        Ok((n, self.message.as_ref()))
     }
 
     fn replace_payload<'a>(
@@ -603,11 +614,10 @@ impl ReadSession {
                     loop {
                             match self.relay_encrypted_to_plain(writer).await  {
                                 Ok(n) => {
-                                    println!("relay encrypt to plain: {}", n);
                                     size += n;
                                 }
                                 Err(err) => {
-                                    println!("relay encrypt to plain error: {}", err);
+                                    error!("relay encrypt to plain error: {}", err);
                                     return size;
                                 }
                             };
@@ -682,11 +692,10 @@ impl WriteSession {
                     loop {
                             match self.replay_plain_to_encrypted(reader).await  {
                                 Ok(n) => {
-                                    println!("relay plain to encrypt: {}", n);
                                     size += n;
                                 }
                                 Err(err) => {
-                                    println!("relay plain to encrypt error: {}", err);
+                                    error!("relay plain to encrypt error: {}", err);
                                     return size;
                                 }
                             };
@@ -703,12 +712,12 @@ impl WriteSession {
 
     #[inline]
     async fn replay_plain_to_encrypted(&mut self, reader: &mut Reader) -> Result<usize> {
-        let data = self.encryption.read_and_encrypt_data(reader).await?;
+        let (n, data) = self.encryption.from_reader_inplace(reader).await?;
         self.writer
             .write_all(data)
             .await
             .with_context(|| "Failed to write to stream")?;
-        Ok(data.len())
+        Ok(n)
     }
 
     #[inline]
@@ -1041,7 +1050,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[timeout(2000)]
+    #[timeout(1000)]
     async fn test_encrypted_message_read_write() {
         test_setup();
 
@@ -1084,8 +1093,78 @@ mod tests {
     }
 
     #[tokio::test]
-    #[timeout(9000)]
-    async fn test_handshake_and_transfer() {
+    #[timeout(1000)]
+    async fn test_message_relay() {
+        test_setup();
+
+        let (client, server) = build_stream_pair().await;
+        let (mut plain_client, mut plain_server) = build_stream_pair().await;
+        let mut buf = BytesMut::with_capacity(256);
+        buf.put_slice(b"hello world");
+        let client_key = KeyPair::random();
+        let server_key = KeyPair::random();
+        let client_singer = &client_key.signer();
+        let client_verifier = &server_key.verifier();
+        let server_singer = &server_key.signer();
+        let server_verifier = &client_key.verifier();
+
+        let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
+            async move {
+                client_handshake(client.reader, client.writer, client_singer, client_verifier)
+                    .await
+                    .unwrap()
+            },
+            async move {
+                server_handshake(server.reader, server.writer, server_singer, server_verifier)
+                    .await
+                    .unwrap()
+            },
+        );
+
+        // client write -> server read
+        plain_client.writer.write_all(&buf[..]).await.unwrap();
+        println!("plain write done: {}", buf.len());
+        let n = client_write
+            .replay_plain_to_encrypted(&mut plain_server.reader)
+            .await
+            .unwrap();
+        println!("relay plain_to_encrypted size: {}", n);
+        assert!(n > 0);
+        let n = server_read
+            .relay_encrypted_to_plain(&mut plain_server.writer)
+            .await
+            .unwrap();
+        println!("relay encrypted_to_plain size: {}", n);
+        assert!(n > 0);
+        let mut recv = BytesMut::with_capacity(buf.len());
+        recv.resize(buf.len(), 0);
+        plain_client.reader.read(&mut recv).await.unwrap();
+        assert_eq!(buf.as_ref(), recv.as_ref());
+
+        // server write -> client read
+        plain_server.writer.write_all(&buf[..]).await.unwrap();
+        println!("plain write done: {}", buf.len());
+        let n = server_write
+            .replay_plain_to_encrypted(&mut plain_client.reader)
+            .await
+            .unwrap();
+        println!("relay plain_to_encrypted size: {}", n);
+        assert!(n > 0);
+        let n = client_read
+            .relay_encrypted_to_plain(&mut plain_client.writer)
+            .await
+            .unwrap();
+        println!("relay encrypted_to_plain size: {}", n);
+        assert!(n > 0);
+        let mut recv = BytesMut::with_capacity(buf.len());
+        recv.resize(buf.len(), 0);
+        plain_server.reader.read(&mut recv).await.unwrap();
+        assert_eq!(buf.as_ref(), recv.as_ref());
+    }
+
+    #[tokio::test]
+    #[timeout(10000)]
+    async fn test_handshake_and_data_transfer() {
         test_setup();
 
         let client_key = KeyPair::random();
@@ -1102,6 +1181,7 @@ mod tests {
         let server_verifier = &client_key.verifier();
         let (controller, _) = create_controller();
         let controller = &controller;
+
         tokio::join!(
             async move {
                 let (mut read_half, mut write_half) =
@@ -1125,8 +1205,9 @@ mod tests {
                         local_client.reader.read(&mut buf).await.unwrap();
                         println!("peer read done");
                         assert_eq!(EXPECTED, &buf);
+                        controller.shutdown();
                     }
-                )
+                );
             },
             async move {
                 let (mut read_half, mut write_half) =
@@ -1150,8 +1231,9 @@ mod tests {
                         peer_client.reader.read(&mut buf).await.unwrap();
                         println!("local read done");
                         assert_eq!(EXPECTED, &buf);
+                        controller.shutdown();
                     }
-                )
+                );
             }
         );
     }

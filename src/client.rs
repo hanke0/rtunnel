@@ -16,7 +16,7 @@ use crate::encryption::{ReadSession, WriteSession};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
 use crate::transport::{Address, Controller, NotifyEvent, Receiver};
 
-struct ServiceOptions {
+struct ClientOptions {
     address: Address,
     verifier: VerifyingKey,
     signer: SigningKey,
@@ -25,7 +25,7 @@ struct ServiceOptions {
     idle_connections: i32,
 }
 
-type ServiceOptionsRef = Arc<ServiceOptions>;
+type ClientOptionsRef = Arc<ClientOptions>;
 
 pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.server_public_key)?;
@@ -35,7 +35,7 @@ pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<
         allows.insert(service.connect_to);
     }
 
-    let options = Arc::new(ServiceOptions {
+    let options = Arc::new(ClientOptions {
         address: cfg.server_address,
         verifier,
         signer,
@@ -44,7 +44,7 @@ pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<
         idle_connections: cfg.idle_connections,
     });
 
-    let _ = connect_to_service(controller.clone(), options.clone()).await?;
+    let _ = connect_to_server(controller.clone(), options.clone()).await?;
     let (controller_children, receiver) = controller.children();
 
     controller.spawn(service_connection_sentry(
@@ -57,7 +57,7 @@ pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<
 
 async fn service_connection_sentry(
     controller: Controller,
-    options: ServiceOptionsRef,
+    options: ClientOptionsRef,
     mut receiver: Receiver,
 ) {
     let mut current = 0;
@@ -70,7 +70,7 @@ async fn service_connection_sentry(
         if controller.has_shutdown() {
             return;
         }
-        controller.spawn(start_service_silent(
+        controller.spawn(start_new_tunnel_silent(
             controller.clone(),
             options.clone(),
             true,
@@ -111,7 +111,7 @@ async fn service_connection_sentry(
                 pending, options.address
             );
             for _ in 0..pending {
-                controller.spawn(start_service_silent(
+                controller.spawn(start_new_tunnel_silent(
                     controller.clone(),
                     options.clone(),
                     false,
@@ -125,11 +125,11 @@ async fn service_connection_sentry(
     }
 }
 
-async fn start_service_silent(controller: Controller, options: ServiceOptionsRef, fatal: bool) {
+async fn start_new_tunnel_silent(controller: Controller, options: ClientOptionsRef, fatal: bool) {
     if controller.has_shutdown() {
         return;
     }
-    match start_service(controller.clone(), options.clone()).await {
+    match start_new_tunnel(controller.clone(), options.clone()).await {
         Ok(_) => {}
         Err(e) => {
             if !fatal && is_retry_able_error(&e) {
@@ -157,21 +157,25 @@ fn is_retry_able_error(error: &anyhow::Error) -> bool {
     return true;
 }
 
-async fn start_service(controller: Controller, options: ServiceOptionsRef) -> Result<()> {
+async fn start_new_tunnel(controller: Controller, options: ClientOptionsRef) -> Result<()> {
     let _guard = controller.session_guard();
     let (mut read_half, mut write_half) =
-        connect_to_service(controller.clone(), options.clone()).await?;
+        connect_to_server(controller.clone(), options.clone()).await?;
     handle_stream_silent(controller, &mut read_half, &mut write_half, &options.allows).await;
     Ok(())
 }
 
-async fn connect_to_service(
+async fn connect_to_server(
     _controller: Controller,
-    options: ServiceOptionsRef,
+    options: ClientOptionsRef,
 ) -> Result<(ReadSession, WriteSession)> {
     let conn = options.address.connect_to().await?;
+    let peer_addr = conn.reader.peer_addr();
+    let local_addr = conn.reader.local_addr();
+    debug!("tunnel connected: {}->{}", peer_addr, local_addr);
     let (read_half, write_half) =
         client_handshake(conn.reader, conn.writer, &options.signer, &options.verifier).await?;
+    debug!("tunnel established: {}->{}", peer_addr, local_addr);
     return Ok((read_half, write_half));
 }
 
@@ -198,10 +202,12 @@ async fn handle_stream(
     allows: &HashSet<Address>,
 ) -> Result<(usize, usize)> {
     let addr = read_half.read_connect_message().await?;
+    debug!("tunnel connect message has read: {}", &addr);
     if !allows.contains(&addr) {
         return Err(anyhow!("Address not allowed: {}", &addr));
     }
     let mut conn = addr.connect_to().await?;
+    debug!("tunnel relay established: {}->{}", &read_half, addr);
     Ok(copy_encrypted_bidirectional(
         controller,
         read_half,

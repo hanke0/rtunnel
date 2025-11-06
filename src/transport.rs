@@ -30,11 +30,20 @@ pub struct Reader {
 impl Reader {
     #[inline]
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        assert_ne!(buf.len(), 0);
         self.inner.read(buf).await
     }
     #[inline]
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.read_exact(buf).await
+        assert_ne!(buf.len(), 0);
+        let res = self.inner.read_exact(buf).await;
+        match res {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                error!("read error: {}", e);
+                Err(e)
+            },
+        }
     }
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
@@ -55,7 +64,14 @@ pub struct Writer {
 impl Writer {
     #[inline]
     pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        self.inner.write_all(data).await
+        let res = self.inner.write_all(data).await;
+        match res {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                error!("write error: {}", e);
+                Err(e)
+            },
+        }
     }
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
