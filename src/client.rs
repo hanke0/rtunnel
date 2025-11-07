@@ -7,7 +7,6 @@ use anyhow::{Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 use tokio::select;
-use tokio::time::sleep;
 
 use crate::config::ClientConfig;
 use crate::encryption::client_handshake;
@@ -78,20 +77,14 @@ async fn service_connection_sentry(
         current += 1;
     }
 
-    loop {
+    while !controller.has_shutdown() {
         let fut = receiver.recv();
         let result = select! {
             r = fut => r,
             _ = controller.wait_shutdown() => {
-                return;
-            }
-            _ = sleep(Duration::from_millis(1000)) => {
-                None
+                break;
             }
         };
-        if controller.has_shutdown() {
-            return;
-        }
         match result {
             Some(NotifyEvent::Shutdown) => {
                 current -= 1;
@@ -123,6 +116,7 @@ async fn service_connection_sentry(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
+    receiver.close();
 }
 
 async fn start_new_tunnel_silent(controller: Controller, options: ClientOptionsRef, fatal: bool) {

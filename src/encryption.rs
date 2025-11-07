@@ -433,6 +433,9 @@ pub async fn copy_encrypted_bidirectional(
     raw_reader: &mut Reader,
     raw_writer: &mut Writer,
 ) -> (usize, usize) {
+    if controller.has_shutdown() {
+        return (0, 0);
+    }
     let _guard = controller.relay_guard();
     tokio::join!(
         read_half.relay_encrypted_to_plain_forever(controller.clone(), raw_writer),
@@ -584,6 +587,17 @@ pub struct ReadSession {
     encryption: Encryption,
 }
 
+impl fmt::Display for ReadSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "ReadSession({}-{})",
+            self.reader.peer_addr(),
+            self.reader.local_addr()
+        )
+    }
+}
+
 impl ReadSession {
     pub fn new(reader: Reader, encryption: Encryption) -> Self {
         Self { reader, encryption }
@@ -645,21 +659,20 @@ impl ReadSession {
         Ok(buf.len())
     }
 }
-
-impl fmt::Display for ReadSession {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ReadSession({}-{})",
-            self.reader.peer_addr(),
-            self.reader.local_addr()
-        )
-    }
-}
-
 pub struct WriteSession {
     writer: Writer,
     encryption: Encryption,
+}
+
+impl fmt::Display for WriteSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "WriteSession({}-{})",
+            self.writer.peer_addr(),
+            self.writer.local_addr()
+        )
+    }
 }
 
 impl WriteSession {
@@ -731,17 +744,6 @@ impl WriteSession {
             .await
             .with_context(|| "Failed to write to stream")?;
         Ok(())
-    }
-}
-
-impl fmt::Display for WriteSession {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "WriteSession({}-{})",
-            self.writer.peer_addr(),
-            self.writer.local_addr()
-        )
     }
 }
 
@@ -945,6 +947,7 @@ mod tests {
     use ntest::timeout;
     use tokio;
     use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc::unbounded_channel;
 
     fn test_setup() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -952,13 +955,10 @@ mod tests {
 
     async fn build_stream_pair() -> (Stream, Stream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        println!("Listening on {}", listener.local_addr().unwrap());
         let client = TcpStream::connect(listener.local_addr().unwrap())
             .await
             .unwrap();
-        println!("Connected: {}", client.local_addr().unwrap());
         let server = listener.accept().await.unwrap().0;
-        println!("Accepted: {}", server.peer_addr().unwrap());
         (
             Stream::from_tcp_stream(client),
             Stream::from_tcp_stream(server),
@@ -1163,7 +1163,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[timeout(10000)]
     async fn test_handshake_and_data_transfer() {
         test_setup();
 
@@ -1174,13 +1173,21 @@ mod tests {
         let (client, server) = build_stream_pair().await;
         let (mut peer_client, mut peer_server) = build_stream_pair().await;
         let (mut local_client, mut local_server) = build_stream_pair().await;
+        println!("client: {}", client);
+        println!("peer_client: {}", peer_client);
+        println!("local_client: {}", local_client);
+        println!("server: {}", server);
+        println!("peer_server: {}", peer_server);
+        println!("local_server: {}", local_server);
 
         let client_singer = &client_key.signer();
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let (controller, _) = create_controller();
+        let (controller, mut recv) = create_controller();
         let controller = &controller;
+        let (sender, mut receiver) = unbounded_channel();
+        let sender = &sender;
 
         tokio::join!(
             async move {
@@ -1198,14 +1205,19 @@ mod tests {
                         &mut local_server.writer,
                     ),
                     async move {
-                        const EXPECTED: &[u8] = b"Hello world";
-                        local_client.writer.write_all(EXPECTED).await.unwrap();
-                        println!("peer write done");
-                        let mut buf = [0u8; EXPECTED.len()];
-                        local_client.reader.read(&mut buf).await.unwrap();
-                        println!("peer read done");
-                        assert_eq!(EXPECTED, &buf);
-                        controller.shutdown();
+                        let mut do_once = async move || {
+                            const EXPECTED: &[u8] = b"Hello world";
+                            local_client.writer.write_all(EXPECTED).await.unwrap();
+                            println!("peer write done");
+                            let mut buf = [0u8; EXPECTED.len()];
+                            peer_client.reader.read_exact(&mut buf).await.unwrap();
+                            println!("peer read done");
+                            assert_eq!(EXPECTED, &buf);
+                        };
+                        for _ in 0..100 {
+                            do_once().await;
+                        }
+                        sender.send(()).unwrap();
                     }
                 );
             },
@@ -1224,17 +1236,30 @@ mod tests {
                         &mut peer_server.writer,
                     ),
                     async move {
-                        const EXPECTED: &[u8] = b"Hello world";
-                        peer_client.writer.write_all(EXPECTED).await.unwrap();
-                        println!("local write done");
-                        let mut buf = [0u8; EXPECTED.len()];
-                        peer_client.reader.read(&mut buf).await.unwrap();
-                        println!("local read done");
-                        assert_eq!(EXPECTED, &buf);
-                        controller.shutdown();
+                        let mut do_once = async move || {
+                            const EXPECTED: &[u8] = b"Hello world";
+                            peer_client.writer.write_all(EXPECTED).await.unwrap();
+                            println!("local write done");
+                            let mut buf = [0u8; EXPECTED.len()];
+                            local_client.reader.read_exact(&mut buf).await.unwrap();
+                            println!("local read done");
+                            assert_eq!(EXPECTED, &buf);
+                        };
+                        for _ in 0..100 {
+                            do_once().await;
+                        }
+                        sender.send(()).unwrap();
                     }
                 );
-            }
+            },
+            async move {
+                for _ in 0..2 {
+                    receiver.recv().await.unwrap();
+                }
+                controller.shutdown();
+            },
         );
+        controller.wait().await;
+        recv.close();
     }
 }

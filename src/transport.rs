@@ -9,7 +9,6 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use log::error;
 use serde::de::{Deserialize, Deserializer, Visitor};
 use socket2;
 use socket2::TcpKeepalive;
@@ -18,6 +17,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -27,16 +27,38 @@ pub struct Reader {
     peer_addr: SocketAddr,
 }
 
+impl fmt::Display for Reader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Reader({}-{})", self.peer_addr(), self.local_addr())
+    }
+}
+
 impl Reader {
     #[inline]
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
-        self.inner.read(buf).await
+        match timeout(Duration::from_secs(1), self.inner.read(buf)).await {
+            Ok(n) => n,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "read timeout after 1 second",
+                ));
+            }
+        }
     }
     #[inline]
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
-        self.inner.read_exact(buf).await
+        match timeout(Duration::from_secs(1), self.inner.read_exact(buf)).await {
+            Ok(n) => n,
+            Err(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "read timeout after 1 second",
+                ));
+            }
+        }
     }
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
@@ -54,10 +76,22 @@ pub struct Writer {
     peer_addr: SocketAddr,
 }
 
+impl fmt::Display for Writer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Writer({}-{})", self.peer_addr(), self.local_addr())
+    }
+}
+
 impl Writer {
     #[inline]
     pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        self.inner.write_all(data).await
+        match timeout(Duration::from_secs(1), self.inner.write_all(data)).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "write timeout after 1 second",
+            )),
+        }
     }
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
@@ -101,6 +135,17 @@ impl WriteInner {
 pub struct Stream {
     pub reader: Reader,
     pub writer: Writer,
+}
+
+impl fmt::Display for Stream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Stream({}-{})",
+            self.reader.peer_addr(),
+            self.reader.local_addr()
+        )
+    }
 }
 
 impl Stream {
@@ -292,6 +337,16 @@ pub enum NotifyEvent {
     RelayFinish,
 }
 
+impl fmt::Display for NotifyEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NotifyEvent::Shutdown => write!(f, "Shutdown"),
+            NotifyEvent::RelayStart => write!(f, "RelayStart"),
+            NotifyEvent::RelayFinish => write!(f, "RelayFinish"),
+        }
+    }
+}
+
 pub type Receiver = UnboundedReceiver<NotifyEvent>;
 
 pub fn create_controller() -> (Controller, Receiver) {
@@ -351,12 +406,11 @@ impl Controller {
     }
 
     pub fn notify(&self, ev: NotifyEvent) {
-        match self.inner.sender.send(ev) {
-            Ok(_) => (),
-            Err(e) => {
-                error!("send error: {}", e);
-            }
-        }
+        self.inner
+            .sender
+            .send(ev)
+            .with_context(|| format!("controller notify error: {}", ev))
+            .unwrap();
     }
 
     pub fn session_guard(&self) -> ControllerGuard {
