@@ -49,7 +49,7 @@ fn block_on<F: Future>(task: F) {
 }
 
 async fn start_client(configs: Vec<ClientConfig>) {
-    let (controller, _) = transport::create_controller();
+    let controller = Controller::default();
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
         let err = client::start_client(controller.clone(), cfg).await;
@@ -58,7 +58,7 @@ async fn start_client(configs: Vec<ClientConfig>) {
             continue;
         }
         error!(
-            "connect to {} failed: {}",
+            "connect to {} failed, exiting: {}",
             cfg.server_address,
             err.unwrap_err()
         );
@@ -76,16 +76,20 @@ async fn start_client(configs: Vec<ClientConfig>) {
 }
 
 async fn start_server(configs: Vec<ServerConfig>) {
-    let (controller, _) = transport::create_controller();
+    let controller = Controller::default();
     debug!("starting {} server", configs.len());
     for cfg in configs.iter() {
         let err = server::start_server(controller.clone(), cfg).await;
         if err.is_ok() {
             continue;
         }
-        error!("listen to {} failed: {}", cfg.listen, err.unwrap_err());
+        error!(
+            "start server {} failed, exiting: {}",
+            cfg.listen,
+            err.unwrap_err()
+        );
         controller.shutdown();
-        graceful_exit(controller.clone(), 1).await
+        graceful_exit(controller.clone(), 1).await;
     }
     info!("all service started, server is ready");
     select! {
@@ -94,7 +98,7 @@ async fn start_server(configs: Vec<ServerConfig>) {
     }
     info!("client is shutting down");
     controller.shutdown();
-    graceful_exit(controller.clone(), 0).await
+    graceful_exit(controller.clone(), 0).await;
 }
 
 async fn wait_exit_signal() {

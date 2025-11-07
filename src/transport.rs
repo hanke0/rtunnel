@@ -15,9 +15,7 @@ use socket2::TcpKeepalive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -37,28 +35,12 @@ impl Reader {
     #[inline]
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
-        match timeout(Duration::from_secs(1), self.inner.read(buf)).await {
-            Ok(n) => n,
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "read timeout after 1 second",
-                ));
-            }
-        }
+        self.inner.read(buf).await
     }
     #[inline]
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
-        match timeout(Duration::from_secs(1), self.inner.read_exact(buf)).await {
-            Ok(n) => n,
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "read timeout after 1 second",
-                ));
-            }
-        }
+        self.inner.read_exact(buf).await
     }
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
@@ -85,13 +67,7 @@ impl fmt::Display for Writer {
 impl Writer {
     #[inline]
     pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        match timeout(Duration::from_secs(1), self.inner.write_all(data)).await {
-            Ok(_) => Ok(()),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "write timeout after 1 second",
-            )),
-        }
+        self.inner.write_all(data).await
     }
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
@@ -330,61 +306,15 @@ impl Clone for Controller {
     }
 }
 
-#[derive(Clone, Copy)]
-pub enum NotifyEvent {
-    Shutdown,
-    RelayStart,
-    RelayFinish,
-}
-
-impl fmt::Display for NotifyEvent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            NotifyEvent::Shutdown => write!(f, "Shutdown"),
-            NotifyEvent::RelayStart => write!(f, "RelayStart"),
-            NotifyEvent::RelayFinish => write!(f, "RelayFinish"),
+impl Default for Controller {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(ControllerInner::default()),
         }
     }
 }
 
-pub type Receiver = UnboundedReceiver<NotifyEvent>;
-
-pub fn create_controller() -> (Controller, Receiver) {
-    let shutdown = CancellationToken::new();
-    let tracker = TaskTracker::new();
-    let (sender, receiver) = unbounded_channel();
-    let controller = Controller {
-        inner: Arc::new(ControllerInner {
-            shutdown,
-            tracker,
-            sender,
-        }),
-    };
-    (controller, receiver)
-}
-
-pub struct ControllerGuard {
-    controller: Controller,
-    event: NotifyEvent,
-}
-
-impl Drop for ControllerGuard {
-    fn drop(&mut self) {
-        self.controller.notify(self.event);
-    }
-}
-
 impl Controller {
-    pub fn children(&self) -> (Self, Receiver) {
-        let (inner, receiver) = self.inner.children();
-        (
-            Self {
-                inner: Arc::new(inner),
-            },
-            receiver,
-        )
-    }
-
     #[inline]
     pub fn spawn<F>(&self, task: F) -> JoinHandle<F::Output>
     where
@@ -403,29 +333,6 @@ impl Controller {
     #[inline]
     pub fn has_shutdown(&self) -> bool {
         self.inner.shutdown.is_cancelled()
-    }
-
-    pub fn notify(&self, ev: NotifyEvent) {
-        self.inner
-            .sender
-            .send(ev)
-            .with_context(|| format!("controller notify error: {}", ev))
-            .unwrap();
-    }
-
-    pub fn session_guard(&self) -> ControllerGuard {
-        ControllerGuard {
-            controller: self.clone(),
-            event: NotifyEvent::Shutdown,
-        }
-    }
-
-    pub fn relay_guard(&self) -> ControllerGuard {
-        self.notify(NotifyEvent::RelayStart);
-        ControllerGuard {
-            controller: self.clone(),
-            event: NotifyEvent::RelayFinish,
-        }
     }
 
     #[inline]
@@ -447,17 +354,22 @@ impl Controller {
 struct ControllerInner {
     shutdown: CancellationToken,
     tracker: TaskTracker,
-    sender: UnboundedSender<NotifyEvent>,
 }
 
-impl ControllerInner {
-    fn children(&self) -> (Self, Receiver) {
-        let (sender, receiver) = unbounded_channel();
-        let controller = Self {
+impl Default for ControllerInner {
+    fn default() -> Self {
+        Self {
+            shutdown: CancellationToken::new(),
+            tracker: TaskTracker::new(),
+        }
+    }
+}
+
+impl Clone for ControllerInner {
+    fn clone(&self) -> Self {
+        Self {
             shutdown: self.shutdown.clone(),
             tracker: self.tracker.clone(),
-            sender,
-        };
-        (controller, receiver)
+        }
     }
 }

@@ -436,7 +436,6 @@ pub async fn copy_encrypted_bidirectional(
     if controller.has_shutdown() {
         return (0, 0);
     }
-    let _guard = controller.relay_guard();
     tokio::join!(
         read_half.relay_encrypted_to_plain_forever(controller.clone(), raw_writer),
         write_half.relay_plain_to_encrypted_forever(controller.clone(), raw_reader),
@@ -871,7 +870,7 @@ fn vec_to_array<const N: usize>(v: Vec<u8>) -> anyhow::Result<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
-    use crate::transport::{Stream, create_controller};
+    use crate::transport::Stream;
 
     use super::*;
     use env_logger;
@@ -1184,8 +1183,7 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let (controller, mut recv) = create_controller();
-        let controller = &controller;
+        let controller = &Controller::default();
         let (sender, mut receiver) = unbounded_channel();
         let sender = &sender;
 
@@ -1260,6 +1258,5 @@ mod tests {
             },
         );
         controller.wait().await;
-        recv.close();
     }
 }

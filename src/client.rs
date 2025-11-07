@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,13 +8,31 @@ use anyhow::{Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 use tokio::select;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::config::ClientConfig;
 use crate::encryption::client_handshake;
 use crate::encryption::copy_encrypted_bidirectional;
 use crate::encryption::{ReadSession, WriteSession};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
-use crate::transport::{Address, Controller, NotifyEvent, Receiver};
+use crate::transport::{Address, Controller};
+
+#[derive(Clone, Copy)]
+pub enum NotifyEvent {
+    Shutdown,
+    RelayStart,
+    RelayFinish,
+}
+
+impl fmt::Display for NotifyEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NotifyEvent::Shutdown => write!(f, "Shutdown"),
+            NotifyEvent::RelayStart => write!(f, "RelayStart"),
+            NotifyEvent::RelayFinish => write!(f, "RelayFinish"),
+        }
+    }
+}
 
 struct ClientOptions {
     address: Address,
@@ -25,6 +44,52 @@ struct ClientOptions {
 }
 
 type ClientOptionsRef = Arc<ClientOptions>;
+
+type Sender = UnboundedSender<NotifyEvent>;
+
+struct StreamGuarder {
+    sender: Sender,
+}
+
+impl Clone for StreamGuarder {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl StreamGuarder {
+    fn new(sender: Sender) -> Self {
+        Self { sender }
+    }
+
+    fn relay_guard(&self) -> StreamGuard {
+        self.sender.send(NotifyEvent::RelayStart).unwrap();
+        StreamGuard {
+            sender: self.sender.clone(),
+            event: NotifyEvent::RelayFinish,
+        }
+    }
+
+    fn stream_guard(&self) -> StreamGuard {
+        StreamGuard {
+            sender: self.sender.clone(),
+            event: NotifyEvent::Shutdown,
+        }
+    }
+}
+
+struct StreamGuard {
+    sender: Sender,
+    event: NotifyEvent,
+}
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        self.sender.send(self.event).unwrap();
+    }
+}
 
 pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.server_public_key)?;
@@ -44,26 +109,19 @@ pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<
     });
 
     let _ = connect_to_server(controller.clone(), options.clone()).await?;
-    let (controller_children, receiver) = controller.children();
 
-    controller.spawn(service_connection_sentry(
-        controller_children.clone(),
-        options,
-        receiver,
-    ));
+    controller.spawn(service_connection_sentry(controller.clone(), options));
     Ok(())
 }
 
-async fn service_connection_sentry(
-    controller: Controller,
-    options: ClientOptionsRef,
-    mut receiver: Receiver,
-) {
+async fn service_connection_sentry(controller: Controller, options: ClientOptionsRef) {
     let mut current = 0;
     let mut busy = 0;
     let max = options.max_connections;
     let max_idle = options.idle_connections;
     let controller = &controller;
+    let (sender, mut receiver) = unbounded_channel();
+    let guard = StreamGuarder::new(sender);
 
     for _ in 0..max_idle {
         if controller.has_shutdown() {
@@ -71,6 +129,7 @@ async fn service_connection_sentry(
         }
         controller.spawn(start_new_tunnel_silent(
             controller.clone(),
+            guard.clone(),
             options.clone(),
             true,
         ));
@@ -106,6 +165,7 @@ async fn service_connection_sentry(
             for _ in 0..pending {
                 controller.spawn(start_new_tunnel_silent(
                     controller.clone(),
+                    guard.clone(),
                     options.clone(),
                     false,
                 ));
@@ -120,11 +180,16 @@ async fn service_connection_sentry(
     receiver.close();
 }
 
-async fn start_new_tunnel_silent(controller: Controller, options: ClientOptionsRef, fatal: bool) {
+async fn start_new_tunnel_silent(
+    controller: Controller,
+    guard: StreamGuarder,
+    options: ClientOptionsRef,
+    fatal: bool,
+) {
     if controller.has_shutdown() {
         return;
     }
-    match start_new_tunnel(controller.clone(), options.clone()).await {
+    match start_new_tunnel(controller.clone(), &guard, options.clone()).await {
         Ok(_) => {}
         Err(e) => {
             if !fatal && is_retry_able_error(&e) {
@@ -152,11 +217,22 @@ fn is_retry_able_error(error: &anyhow::Error) -> bool {
     return true;
 }
 
-async fn start_new_tunnel(controller: Controller, options: ClientOptionsRef) -> Result<()> {
-    let _guard = controller.session_guard();
+async fn start_new_tunnel(
+    controller: Controller,
+    guard: &StreamGuarder,
+    options: ClientOptionsRef,
+) -> Result<()> {
+    let _guard = guard.stream_guard();
     let (mut read_half, mut write_half) =
         connect_to_server(controller.clone(), options.clone()).await?;
-    handle_stream_silent(controller, &mut read_half, &mut write_half, &options.allows).await;
+    handle_stream_silent(
+        controller,
+        guard,
+        &mut read_half,
+        &mut write_half,
+        &options.allows,
+    )
+    .await;
     Ok(())
 }
 
@@ -176,11 +252,12 @@ async fn connect_to_server(
 
 async fn handle_stream_silent(
     controller: Controller,
+    guard: &StreamGuarder,
     read_half: &mut ReadSession,
     write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) {
-    match handle_stream(controller, read_half, write_half, allows).await {
+    match handle_stream(controller, guard, read_half, write_half, allows).await {
         Ok((read, write)) => {
             info!("stream has read {} bytes and wrote {}", read, write);
         }
@@ -192,6 +269,7 @@ async fn handle_stream_silent(
 
 async fn handle_stream(
     controller: Controller,
+    guard: &StreamGuarder,
     read_half: &mut ReadSession,
     write_half: &mut WriteSession,
     allows: &HashSet<Address>,
@@ -203,6 +281,7 @@ async fn handle_stream(
     }
     let mut conn = addr.connect_to().await?;
     debug!("tunnel relay established: {}->{}", &read_half, addr);
+    let _guard = guard.relay_guard();
     Ok(copy_encrypted_bidirectional(
         controller,
         read_half,
