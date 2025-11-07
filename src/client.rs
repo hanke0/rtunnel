@@ -116,6 +116,7 @@ async fn service_connection_sentry(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
+    controller.wait().await;
     receiver.close();
 }
 
