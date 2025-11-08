@@ -25,8 +25,13 @@ type SessionReceiver = async_channel::Receiver<(ReadSession, WriteSession)>;
 type SessionSender = async_channel::Sender<(ReadSession, WriteSession)>;
 
 impl ServerOptions {
-    async fn pop_stream(&self) -> (ReadSession, WriteSession) {
-        self.receiver.recv().await.unwrap()
+    async fn pop_stream(&self, controller: &Controller) -> (ReadSession, WriteSession) {
+        loop {
+            let (mut reader, writer) = self.receiver.recv().await.unwrap();
+            if reader.is_alive(controller).await {
+                return (reader, writer);
+            }
+        }
     }
 }
 
@@ -72,7 +77,7 @@ async fn start_tunnel(
     let controller = &controller;
     loop {
         match listener.accept(controller).await {
-            Ok((stream, _)) => {
+            Ok(stream) => {
                 controller.spawn(handle_tunnel(
                     controller.clone(),
                     stream,
@@ -141,7 +146,7 @@ async fn start_service(
     let controller = &controller;
     loop {
         match listener.accept(controller).await {
-            Ok((stream, _)) => {
+            Ok(stream) => {
                 controller.spawn(handle_service_stream(
                     controller.clone(),
                     stream,
@@ -202,25 +207,20 @@ async fn handle_service_stream_impl(
     connect_to: Address,
 ) -> Result<(usize, usize)> {
     let (mut read_half, mut write_half) =
-        match timeout(Duration::from_secs(1), options.pop_stream()).await {
+        match timeout(Duration::from_secs(1), options.pop_stream(controller)).await {
             Ok(rsp) => rsp,
             Err(_) => {
                 return Err(anyhow!("timeout to get a relay session after 1 second"));
             }
         };
 
-    debug!(
-        "stream got a tunnel: {}->{}",
-        stream.peer_addr(),
-        stream.local_addr()
-    );
+    debug!("stream got a tunnel: {}->{}", stream, read_half);
     write_half
         .write_connect_message(controller, connect_to)
         .await?;
     debug!(
         "tunnel connect message has sent, stream relay started: {}->{}",
-        stream.peer_addr(),
-        stream.local_addr()
+        stream, read_half,
     );
     return Ok(copy_encrypted_bidirectional(
         controller,

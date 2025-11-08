@@ -10,6 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
 use bytes::{BufMut, BytesMut};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
+use log::debug;
 use log::error;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -443,13 +444,25 @@ pub async fn copy_encrypted_bidirectional(
     raw_writer: &mut Writer,
 ) -> (usize, usize) {
     if controller.has_cancel() {
+        debug!("copy_encrypted_bidirectional cancelled");
         return (0, 0);
     }
-    let read_controller = controller.clone();
-    let write_controller = controller.clone();
+    let children = &controller.children();
     tokio::join!(
-        read_half.relay_encrypted_to_plain_forever(&read_controller, raw_writer),
-        write_half.relay_plain_to_encrypted_forever(&write_controller, raw_reader),
+        async move {
+            let size = read_half
+                .relay_encrypted_to_plain_forever(children, raw_writer)
+                .await;
+            children.cancel();
+            size
+        },
+        async move {
+            let size = write_half
+                .relay_plain_to_encrypted_forever(children, raw_reader)
+                .await;
+            children.cancel();
+            size
+        },
     )
 }
 
@@ -568,12 +581,13 @@ impl Encryption {
         let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
         let cipher = &mut self.cipher;
         let associated_data = self.sequence.as_ref();
+        let typ = message.get_type();
         message.rewrite_payload(message.get_type(), move |buf| {
             cipher
                 .decrypt_in_place(&nonce.into(), associated_data, buf)
                 .context("Failed to decrypt message")
         })?;
-        assert_eq!(self.message.get_type(), MessageType::Data);
+        assert_eq!(self.message.get_type(), typ);
         self.sequence.incr();
         Ok(())
     }
@@ -602,18 +616,18 @@ pub struct ReadSession {
 
 impl fmt::Display for ReadSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ReadSession({}-{})",
-            self.reader.peer_addr(),
-            self.reader.local_addr()
-        )
+        write!(f, "{}", self.reader)
     }
 }
 
 impl ReadSession {
     pub fn new(reader: Reader, encryption: Encryption) -> Self {
         Self { reader, encryption }
+    }
+
+    #[inline]
+    pub async fn is_alive(&mut self, controller: &Controller) -> bool {
+        self.reader.is_alive(controller).await
     }
 
     pub async fn read_connect_message(&mut self, controller: &Controller) -> Result<Address> {
@@ -643,6 +657,7 @@ impl ReadSession {
         writer: &mut Writer,
     ) -> usize {
         let mut size: usize = 0;
+        let repr = &format!("{self}");
         loop {
             tokio::select! {
                 _ = async move {
@@ -650,17 +665,22 @@ impl ReadSession {
                             match self.relay_encrypted_to_plain(controller, writer).await  {
                                 Ok(n) => {
                                     size += n;
+                                    if n == 0 {
+                                        return size;
+                                    }
                                 }
                                 Err(err) => {
-                                    error!("relay encrypt to plain error: {:#}", err);
+                                    error!("{repr} relay encrypt to plain error: {:#}", err);
                                     return size;
                                 }
                             };
                     }
-                } => {
+                }  => {
+                    debug!("relay encrypted_to_plain finish, transfer {} bytes", size);
                     return size;
-                }
+                } ,
                 _ = controller.wait_cancel() => {
+                    debug!("relay encrypted_to_plain cancelled, transfer {} bytes", size);
                     return size;
                 }
             }
@@ -691,12 +711,7 @@ pub struct WriteSession {
 
 impl fmt::Display for WriteSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "WriteSession({}-{})",
-            self.writer.peer_addr(),
-            self.writer.local_addr()
-        )
+        write!(f, "{}", self.writer)
     }
 }
 
@@ -728,6 +743,7 @@ impl WriteSession {
         reader: &mut Reader,
     ) -> usize {
         let mut size: usize = 0;
+        let repr = &format!("{self}");
         loop {
             tokio::select! {
                 _ = async move {
@@ -740,15 +756,17 @@ impl WriteSession {
                                     }
                                 }
                                 Err(err) => {
-                                    error!("relay plain to encrypt error: {:#}", err);
+                                    error!("{repr} relay plain to encrypt error: {:#}", err);
                                     return size;
                                 }
                             };
                     }
                 } => {
+                    debug!("{repr} relay plain to encrypted finish, transfer {} bytes", size);
                     return size;
                 }
                 _ = controller.wait_cancel() => {
+                    debug!("{repr} relay plain to encrypted cancelled, transfer {} bytes", size);
                     return size;
                 }
             }
@@ -1156,6 +1174,63 @@ mod tests {
 
     #[tokio::test]
     #[timeout(1000)]
+    async fn test_connect_message() {
+        test_setup();
+
+        let (client, server) = build_stream_pair().await;
+        let mut buf = BytesMut::with_capacity(256);
+        buf.put_slice(b"hello world");
+        let client_key = KeyPair::random();
+        let server_key = KeyPair::random();
+        let client_singer = &client_key.signer();
+        let client_verifier = &server_key.verifier();
+        let server_singer = &server_key.signer();
+        let server_verifier = &client_key.verifier();
+        let controller = &Controller::default();
+
+        let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
+            async move {
+                client_handshake(
+                    controller,
+                    client.reader,
+                    client.writer,
+                    client_singer,
+                    client_verifier,
+                )
+                .await
+                .unwrap()
+            },
+            async move {
+                server_handshake(
+                    controller,
+                    server.reader,
+                    server.writer,
+                    server_singer,
+                    server_verifier,
+                )
+                .await
+                .unwrap()
+            },
+        );
+
+        let address = Address::from_string("tcp://127.0.0.1:8080").unwrap();
+        server_write
+            .write_connect_message(controller, address)
+            .await
+            .unwrap();
+        let recv = client_read.read_connect_message(controller).await.unwrap();
+        assert_eq!(address, recv);
+
+        client_write
+            .write_connect_message(controller, address)
+            .await
+            .unwrap();
+        let recv = server_read.read_connect_message(controller).await.unwrap();
+        assert_eq!(address, recv);
+    }
+
+    #[tokio::test]
+    #[timeout(1000)]
     async fn test_message_relay() {
         test_setup();
 
@@ -1278,6 +1353,7 @@ mod tests {
         let controller = &Controller::default();
         let (sender, mut receiver) = unbounded_channel();
         let sender = &sender;
+        let address = Address::from_string("tcp://127.0.0.1:8080").unwrap();
 
         tokio::join!(
             async move {
@@ -1291,6 +1367,8 @@ mod tests {
                 .await
                 .unwrap();
                 println!("Client handshake done");
+                read_half.read_connect_message(controller).await.unwrap();
+                println!("Client read connect message done");
                 tokio::join!(
                     copy_encrypted_bidirectional(
                         &controller,
@@ -1335,6 +1413,11 @@ mod tests {
                 .await
                 .unwrap();
                 println!("Server handshake done");
+                write_half
+                    .write_connect_message(controller, address)
+                    .await
+                    .unwrap();
+                println!("Server write connect message done");
                 tokio::join!(
                     copy_encrypted_bidirectional(
                         &controller,

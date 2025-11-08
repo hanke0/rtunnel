@@ -327,7 +327,7 @@ fn is_critical_relay_error(error: &anyhow::Error) -> bool {
             }
         }
     }
-    return true;
+    return false;
 }
 
 async fn handle_tunnel_impl(

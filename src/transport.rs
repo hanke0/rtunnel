@@ -25,11 +25,23 @@ pub struct Reader {
 
 impl fmt::Display for Reader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Reader({}-{})", self.peer_addr(), self.local_addr())
+        write!(f, "{}-{}", self.peer_addr(), self.local_addr())
     }
 }
 
 impl Reader {
+    #[inline]
+    pub async fn is_alive(&mut self, controller: &Controller) -> bool {
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return false;
+            }
+            r = self.inner.is_alive() => {
+                return r;
+            }
+        }
+    }
+
     #[inline]
     pub async fn read(&mut self, controller: &Controller, buf: &mut [u8]) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
@@ -76,12 +88,12 @@ pub struct Writer {
 
 impl fmt::Display for Writer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Writer({}-{})", self.peer_addr(), self.local_addr())
+        write!(f, "{}-{}", self.peer_addr(), self.local_addr())
     }
 }
 
 #[inline]
-fn cancel_error() -> io::Error {
+pub fn cancel_error() -> io::Error {
     io::Error::new(io::ErrorKind::Other, "controller cancelled")
 }
 
@@ -122,6 +134,15 @@ impl ReadInner {
             ReadInner::TCP(s) => s.read_exact(buf).await,
         }
     }
+
+    pub async fn is_alive(&mut self) -> bool {
+        match self {
+            ReadInner::TCP(s) => {
+                let buf = &mut [0; 0];
+                s.read(buf).await.is_ok()
+            }
+        }
+    }
 }
 
 enum WriteInner {
@@ -145,7 +166,7 @@ impl fmt::Display for Stream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Stream({}-{})",
+            "{}-{}",
             self.reader.peer_addr(),
             self.reader.local_addr()
         )
@@ -172,6 +193,7 @@ impl Stream {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn peer_addr(&self) -> SocketAddr {
         self.reader.peer_addr
     }
@@ -199,7 +221,7 @@ impl fmt::Display for Listener {
 }
 
 impl Listener {
-    pub async fn accept(&mut self, controller: &Controller) -> io::Result<(Stream, SocketAddr)> {
+    pub async fn accept(&mut self, controller: &Controller) -> io::Result<Stream> {
         tokio::select! {
             _ = controller.wait_cancel() => {
                 return Err(cancel_error());
@@ -210,18 +232,18 @@ impl Listener {
         }
     }
 
-    async fn accept_impl(self: &mut Self) -> io::Result<(Stream, SocketAddr)> {
+    async fn accept_impl(self: &mut Self) -> io::Result<Stream> {
         match self {
             Listener::TCP(s) => {
-                let (stream, addr) = s.accept().await?;
+                let (stream, _) = s.accept().await?;
                 let stream = set_keepalive(stream)?;
-                Ok((Stream::from_tcp_stream(stream), addr))
+                Ok(Stream::from_tcp_stream(stream))
             }
         }
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub enum Address {
     TCP(SocketAddr),
 }
