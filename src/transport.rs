@@ -31,18 +31,6 @@ impl fmt::Display for Reader {
 
 impl Reader {
     #[inline]
-    pub async fn is_alive(&mut self, controller: &Controller) -> bool {
-        tokio::select! {
-            _ = controller.wait_cancel() => {
-                return false;
-            }
-            r = self.inner.is_alive() => {
-                return r;
-            }
-        }
-    }
-
-    #[inline]
     pub async fn read(&mut self, controller: &Controller, buf: &mut [u8]) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
@@ -100,6 +88,7 @@ pub fn cancel_error() -> io::Error {
 impl Writer {
     #[inline]
     pub async fn write_all(&mut self, controller: &Controller, data: &[u8]) -> io::Result<()> {
+        assert_ne!(data.len(), 0);
         tokio::select! {
             _ = controller.wait_cancel() => {
                 return Err(cancel_error());
@@ -132,15 +121,6 @@ impl ReadInner {
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             ReadInner::TCP(s) => s.read_exact(buf).await,
-        }
-    }
-
-    pub async fn is_alive(&mut self) -> bool {
-        match self {
-            ReadInner::TCP(s) => {
-                let buf = &mut [0; 0];
-                s.read(buf).await.is_ok()
-            }
         }
     }
 }

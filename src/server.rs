@@ -25,13 +25,8 @@ type SessionReceiver = async_channel::Receiver<(ReadSession, WriteSession)>;
 type SessionSender = async_channel::Sender<(ReadSession, WriteSession)>;
 
 impl ServerOptions {
-    async fn pop_stream(&self, controller: &Controller) -> (ReadSession, WriteSession) {
-        loop {
-            let (mut reader, writer) = self.receiver.recv().await.unwrap();
-            if reader.is_alive(controller).await {
-                return (reader, writer);
-            }
-        }
+    async fn pop_stream(&self) -> (ReadSession, WriteSession) {
+        self.receiver.recv().await.unwrap()
     }
 }
 
@@ -187,7 +182,7 @@ async fn handle_service_stream(
 ) {
     let repr = format!("{}", stream);
     debug!("new service stream connected: {}", repr);
-    match handle_service_stream_impl(&controller, stream, &options, connect_to).await {
+    match handle_service_stream_impl(&controller, stream, &options, &connect_to).await {
         Ok((read, write)) => {
             info!(
                 "stream {} closed and has read {} bytes and wrote {} bytes",
@@ -204,10 +199,48 @@ async fn handle_service_stream_impl(
     controller: &Controller,
     mut stream: Stream,
     options: &ServerOptionsRef,
-    connect_to: Address,
+    connect_to: &Address,
 ) -> Result<(usize, usize)> {
     let (mut read_half, mut write_half) =
-        match timeout(Duration::from_secs(1), options.pop_stream(controller)).await {
+        get_a_useable_connection(controller, options, &mut stream, connect_to).await?;
+
+    copy_encrypted_bidirectional(
+        controller,
+        &mut read_half,
+        &mut write_half,
+        &mut stream.reader,
+        &mut stream.writer,
+    )
+    .await
+}
+
+async fn get_a_useable_connection(
+    controller: &Controller,
+    options: &ServerOptionsRef,
+    stream: &mut Stream,
+    connect_to: &Address,
+) -> Result<(ReadSession, WriteSession)> {
+    for _ in 0..3 {
+        match get_a_useable_connection_impl(controller, options, stream, connect_to).await {
+            Ok((read_half, write_half)) => {
+                return Ok((read_half, write_half));
+            }
+            Err(e) => {
+                info!("get a useable connection error: {:#}", e);
+            }
+        }
+    }
+    Err(anyhow!("failed to get a useable connection"))
+}
+
+async fn get_a_useable_connection_impl(
+    controller: &Controller,
+    options: &ServerOptionsRef,
+    stream: &mut Stream,
+    connect_to: &Address,
+) -> Result<(ReadSession, WriteSession)> {
+    let (mut read_half, mut write_half) =
+        match timeout(Duration::from_secs(1), options.pop_stream()).await {
             Ok(rsp) => rsp,
             Err(_) => {
                 return Err(anyhow!("timeout to get a relay session after 1 second"));
@@ -219,15 +252,13 @@ async fn handle_service_stream_impl(
         .write_connect_message(controller, connect_to)
         .await?;
     debug!(
-        "tunnel connect message has sent, stream relay started: {}->{}",
+        "tunnel connect message has sent, wait connect message reply: {}->{}",
         stream, read_half,
     );
-    return Ok(copy_encrypted_bidirectional(
-        controller,
-        &mut read_half,
-        &mut write_half,
-        &mut stream.reader,
-        &mut stream.writer,
-    )
-    .await);
+    read_half.read_connect_message(controller).await?;
+    debug!(
+        "tunnel connect message has received, relay started: {}->{}",
+        stream, read_half,
+    );
+    Ok((read_half, write_half))
 }

@@ -1,5 +1,6 @@
 use std::array;
 use std::fmt;
+use std::io;
 
 use aes_gcm::{
     Aes256Gcm,
@@ -10,8 +11,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
 use bytes::{BufMut, BytesMut};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
-use log::debug;
-use log::error;
+use log::{debug, info};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
@@ -442,13 +442,16 @@ pub async fn copy_encrypted_bidirectional(
     write_half: &mut WriteSession,
     raw_reader: &mut Reader,
     raw_writer: &mut Writer,
-) -> (usize, usize) {
+) -> Result<(usize, usize)> {
     if controller.has_cancel() {
-        debug!("copy_encrypted_bidirectional cancelled");
-        return (0, 0);
+        debug!(
+            "{}->{} copy_encrypted_bidirectional cancelled",
+            read_half, raw_reader
+        );
+        return Ok((0, 0));
     }
     let children = &controller.children();
-    tokio::join!(
+    let (read_size, write_size) = tokio::join!(
         async move {
             let size = read_half
                 .relay_encrypted_to_plain_forever(children, raw_writer)
@@ -463,7 +466,8 @@ pub async fn copy_encrypted_bidirectional(
             children.cancel();
             size
         },
-    )
+    );
+    Ok((read_size?, write_size?))
 }
 
 struct Seq([u8; 12]);
@@ -625,11 +629,6 @@ impl ReadSession {
         Self { reader, encryption }
     }
 
-    #[inline]
-    pub async fn is_alive(&mut self, controller: &Controller) -> bool {
-        self.reader.is_alive(controller).await
-    }
-
     pub async fn read_connect_message(&mut self, controller: &Controller) -> Result<Address> {
         self.encryption
             .handle_specific_message(
@@ -655,40 +654,41 @@ impl ReadSession {
         &mut self,
         controller: &Controller,
         writer: &mut Writer,
-    ) -> usize {
+    ) -> Result<usize> {
         let mut size: usize = 0;
-        let repr = &format!("{self}");
         loop {
-            tokio::select! {
-                _ = async move {
-                    loop {
-                            match self.relay_encrypted_to_plain(controller, writer).await  {
-                                Ok(n) => {
-                                    size += n;
-                                    if n == 0 {
-                                        return size;
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("{repr} relay encrypt to plain error: {:#}", err);
-                                    return size;
-                                }
-                            };
+            let n = self.relay_encrypted_to_plain(controller, writer).await;
+            match n {
+                Ok(n) => {
+                    if n == 0 {
+                        return Ok(size);
                     }
-                }  => {
-                    debug!("relay encrypted_to_plain finish, transfer {} bytes", size);
-                    return size;
-                } ,
-                _ = controller.wait_cancel() => {
-                    debug!("relay encrypted_to_plain cancelled, transfer {} bytes", size);
-                    return size;
+                    size += n;
+                }
+                Err(err) => {
+                    if is_relay_critical_error(&err) {
+                        return Err(err);
+                    }
+                    info!("{self} relay encrypted to plain error: {:#}", err);
+                    return Ok(size);
                 }
             }
         }
     }
 
-    #[inline]
     async fn relay_encrypted_to_plain(
+        &mut self,
+        controller: &Controller,
+        writer: &mut Writer,
+    ) -> Result<usize> {
+        tokio::select! {
+            n = self.relay_encrypted_to_plain_impl(controller, writer) => n,
+            _ = controller.wait_cancel() => Ok(0),
+        }
+    }
+
+    #[inline]
+    async fn relay_encrypted_to_plain_impl(
         &mut self,
         controller: &Controller,
         writer: &mut Writer,
@@ -704,6 +704,20 @@ impl ReadSession {
         Ok(buf.len())
     }
 }
+
+fn is_relay_critical_error(error: &anyhow::Error) -> bool {
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            match io_error.kind() {
+                io::ErrorKind::UnexpectedEof => return false,
+                io::ErrorKind::Other => return false,
+                _ => return true,
+            }
+        }
+    }
+    return true;
+}
+
 pub struct WriteSession {
     writer: Writer,
     encryption: Encryption,
@@ -726,7 +740,7 @@ impl WriteSession {
     pub async fn write_connect_message(
         &mut self,
         controller: &Controller,
-        address: Address,
+        address: &Address,
     ) -> Result<()> {
         let data = self
             .encryption
@@ -741,40 +755,40 @@ impl WriteSession {
         &mut self,
         controller: &Controller,
         reader: &mut Reader,
-    ) -> usize {
+    ) -> Result<usize> {
         let mut size: usize = 0;
-        let repr = &format!("{self}");
         loop {
-            tokio::select! {
-                _ = async move {
-                    loop {
-                            match self.replay_plain_to_encrypted(controller, reader).await  {
-                                Ok(n) => {
-                                    size += n;
-                                    if n == 0 {
-                                        return size;
-                                    }
-                                }
-                                Err(err) => {
-                                    error!("{repr} relay plain to encrypt error: {:#}", err);
-                                    return size;
-                                }
-                            };
+            match self.relay_plain_to_encrypted(controller, reader).await {
+                Ok(n) => {
+                    if n == 0 {
+                        return Ok(size);
                     }
-                } => {
-                    debug!("{repr} relay plain to encrypted finish, transfer {} bytes", size);
-                    return size;
+                    size += n;
                 }
-                _ = controller.wait_cancel() => {
-                    debug!("{repr} relay plain to encrypted cancelled, transfer {} bytes", size);
-                    return size;
+                Err(err) => {
+                    if is_relay_critical_error(&err) {
+                        return Err(err);
+                    }
+                    debug!("{self} relay plain to encrypted error: {:#}", err);
+                    return Ok(size);
                 }
             }
         }
     }
 
+    async fn relay_plain_to_encrypted(
+        &mut self,
+        controller: &Controller,
+        reader: &mut Reader,
+    ) -> Result<usize> {
+        tokio::select! {
+            n = self.replay_plain_to_encrypted_impl(controller, reader) => n,
+            _ = controller.wait_cancel() => Ok(0),
+        }
+    }
+
     #[inline]
-    async fn replay_plain_to_encrypted(
+    async fn replay_plain_to_encrypted_impl(
         &mut self,
         controller: &Controller,
         reader: &mut Reader,
@@ -1215,14 +1229,14 @@ mod tests {
 
         let address = Address::from_string("tcp://127.0.0.1:8080").unwrap();
         server_write
-            .write_connect_message(controller, address)
+            .write_connect_message(controller, &address)
             .await
             .unwrap();
         let recv = client_read.read_connect_message(controller).await.unwrap();
         assert_eq!(address, recv);
 
         client_write
-            .write_connect_message(controller, address)
+            .write_connect_message(controller, &address)
             .await
             .unwrap();
         let recv = server_read.read_connect_message(controller).await.unwrap();
@@ -1279,7 +1293,7 @@ mod tests {
             .unwrap();
         println!("plain write done: {}", buf.len());
         let n = client_write
-            .replay_plain_to_encrypted(controller, &mut plain_server.reader)
+            .relay_plain_to_encrypted(controller, &mut plain_server.reader)
             .await
             .unwrap();
         println!("relay plain_to_encrypted size: {}", n);
@@ -1307,7 +1321,7 @@ mod tests {
             .unwrap();
         println!("plain write done: {}", buf.len());
         let n = server_write
-            .replay_plain_to_encrypted(controller, &mut plain_client.reader)
+            .relay_plain_to_encrypted(controller, &mut plain_client.reader)
             .await
             .unwrap();
         println!("relay plain_to_encrypted size: {}", n);
@@ -1370,13 +1384,17 @@ mod tests {
                 read_half.read_connect_message(controller).await.unwrap();
                 println!("Client read connect message done");
                 tokio::join!(
-                    copy_encrypted_bidirectional(
-                        &controller,
-                        &mut read_half,
-                        &mut write_half,
-                        &mut local_server.reader,
-                        &mut local_server.writer,
-                    ),
+                    async move {
+                        copy_encrypted_bidirectional(
+                            &controller,
+                            &mut read_half,
+                            &mut write_half,
+                            &mut local_server.reader,
+                            &mut local_server.writer,
+                        )
+                        .await
+                        .unwrap();
+                    },
                     async move {
                         let mut do_once = async move || {
                             const EXPECTED: &[u8] = b"Hello world";
@@ -1414,18 +1432,22 @@ mod tests {
                 .unwrap();
                 println!("Server handshake done");
                 write_half
-                    .write_connect_message(controller, address)
+                    .write_connect_message(controller, &address)
                     .await
                     .unwrap();
                 println!("Server write connect message done");
                 tokio::join!(
-                    copy_encrypted_bidirectional(
-                        &controller,
-                        &mut read_half,
-                        &mut write_half,
-                        &mut peer_server.reader,
-                        &mut peer_server.writer,
-                    ),
+                    async move {
+                        copy_encrypted_bidirectional(
+                            &controller,
+                            &mut read_half,
+                            &mut write_half,
+                            &mut peer_server.reader,
+                            &mut peer_server.writer,
+                        )
+                        .await
+                        .unwrap();
+                    },
                     async move {
                         let mut do_once = async move || {
                             const EXPECTED: &[u8] = b"Hello world";

@@ -249,7 +249,7 @@ async fn start_new_tunnel_impl(
     options: &ClientOptionsRef,
 ) -> Result<()> {
     let (mut read_half, mut write_half) = connect_to_server(controller, options).await?;
-    handle_tunnel(
+    handle_relay(
         controller,
         guard,
         &mut read_half,
@@ -284,14 +284,14 @@ async fn connect_to_server(
     return Ok((read_half, write_half));
 }
 
-async fn handle_tunnel(
+async fn handle_relay(
     controller: &Controller,
     guard: &StreamGuarder,
     read_half: &mut ReadSession,
     write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) {
-    match handle_tunnel_impl(&controller, guard, read_half, write_half, allows).await {
+    match handle_relay_impl(&controller, guard, read_half, write_half, allows).await {
         Ok((read, write)) => {
             info!(
                 "stream {} disconnected and has read {} bytes and wrote {}",
@@ -299,38 +299,12 @@ async fn handle_tunnel(
             );
         }
         Err(e) => {
-            if is_critical_relay_error(&e) {
-                if controller.has_cancel() {
-                    return;
-                }
-                error!(
-                    "stream {} disconnected with critical error:  {:#}",
-                    read_half, e
-                );
-                controller.cancel_all();
-            } else {
-                info!(
-                    "stream {} disconnected with non-critical error:  {:#}",
-                    read_half, e
-                );
-            }
+            error!("stream {} relay failed:  {:#}", read_half, e);
         }
     };
 }
 
-fn is_critical_relay_error(error: &anyhow::Error) -> bool {
-    for cause in error.chain() {
-        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
-            match io_error.kind() {
-                io::ErrorKind::UnexpectedEof => return false,
-                _ => return true,
-            }
-        }
-    }
-    return false;
-}
-
-async fn handle_tunnel_impl(
+async fn handle_relay_impl(
     controller: &Controller,
     guard: &StreamGuarder,
     read_half: &mut ReadSession,
@@ -347,13 +321,14 @@ async fn handle_tunnel_impl(
         .await
         .context("Failed to connect to local service")?;
     debug!("tunnel relay established: {}->{}", &read_half, addr);
+    write_half.write_connect_message(controller, &addr).await?;
     let _guard = guard.relay_guard();
-    Ok(copy_encrypted_bidirectional(
+    copy_encrypted_bidirectional(
         controller,
         read_half,
         write_half,
         &mut conn.reader,
         &mut conn.writer,
     )
-    .await)
+    .await
 }
