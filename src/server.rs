@@ -12,7 +12,7 @@ use crate::config::ServerConfig;
 use crate::encryption::{
     ReadSession, WriteSession, copy_encrypted_bidirectional, server_handshake,
 };
-use crate::encryption::{decode_signing_key, decode_verifying_key};
+use crate::encryption::{decode_signing_key, decode_verifying_key, is_relay_critical_error};
 use crate::transport::{Address, Controller, Listener, Stream};
 
 struct ServerOptions {
@@ -190,7 +190,11 @@ async fn handle_service_stream(
             );
         }
         Err(e) => {
-            error!("stream {} relay error: {:#}", repr, e);
+            if is_relay_critical_error(&e) {
+                error!("stream {} relay critical error: {:#}", repr, e);
+            } else {
+                info!("stream {} relay non-critical error: {:#}", repr, e);
+            }
         }
     };
 }

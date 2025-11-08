@@ -705,7 +705,7 @@ impl ReadSession {
     }
 }
 
-fn is_relay_critical_error(error: &anyhow::Error) -> bool {
+pub fn is_relay_critical_error(error: &anyhow::Error) -> bool {
     for cause in error.chain() {
         if let Some(io_error) = cause.downcast_ref::<io::Error>() {
             match io_error.kind() {

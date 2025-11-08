@@ -13,6 +13,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::config::ClientConfig;
 use crate::encryption::client_handshake;
 use crate::encryption::copy_encrypted_bidirectional;
+use crate::encryption::is_relay_critical_error;
 use crate::encryption::{ReadSession, WriteSession};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
 use crate::transport::{Address, Controller};
@@ -299,7 +300,11 @@ async fn handle_relay(
             );
         }
         Err(e) => {
-            error!("stream {} relay failed:  {:#}", read_half, e);
+            if is_relay_critical_error(&e) {
+                error!("stream {} relay critical error:  {:#}", read_half, e);
+            } else {
+                info!("stream {} relay non-critical error:  {:#}", read_half, e);
+            }
         }
     };
 }
