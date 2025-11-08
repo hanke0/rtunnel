@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,7 +36,7 @@ pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result
     let verifier = decode_verifying_key(&cfg.client_public_key)?;
     let signer = decode_signing_key(&cfg.private_key)?;
 
-    let listener = cfg.listen.listen_to().await?;
+    let listener = cfg.listen.listen_to(controller).await?;
     info!("server listening on {}", cfg.listen);
     let (sender, receiver) = async_channel::unbounded();
     let options = &Arc::new(ServerOptions {
@@ -50,7 +51,7 @@ pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result
         sender,
     ));
     for s in cfg.services.iter() {
-        let listener = s.bind_to.listen_to().await?;
+        let listener = s.bind_to.listen_to(controller).await?;
         info!("service starting, listening on {}", s.bind_to);
         controller.spawn(start_service(
             controller.children(),
@@ -70,7 +71,7 @@ async fn start_tunnel(
 ) {
     let controller = &controller;
     loop {
-        match listener.accept().await {
+        match listener.accept(controller).await {
             Ok((stream, _)) => {
                 controller.spawn(handle_tunnel(
                     controller.clone(),
@@ -80,7 +81,10 @@ async fn start_tunnel(
                 ));
             }
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::WouldBlock {
+                if is_critical_listener_error(&e) {
+                    if controller.has_cancel() {
+                        return;
+                    }
                     error!("listener accept error: {:#}", e);
                     controller.cancel_all();
                     break;
@@ -94,13 +98,13 @@ async fn start_tunnel(
 }
 
 async fn handle_tunnel(
-    _controller: Controller,
+    controller: Controller,
     stream: Stream,
     options: ServerOptionsRef,
     sender: SessionSender,
 ) {
     let peer = stream.reader.peer_addr();
-    match handle_tunnel_impl(stream, &options, &sender).await {
+    match handle_tunnel_impl(&controller, stream, &options, &sender).await {
         Ok(_) => {
             debug!("new tunnel session created: {}", peer);
         }
@@ -111,11 +115,13 @@ async fn handle_tunnel(
 }
 
 async fn handle_tunnel_impl(
+    controller: &Controller,
     stream: Stream,
     options: &ServerOptionsRef,
     sender: &SessionSender,
 ) -> Result<()> {
     let rsp = server_handshake(
+        controller,
         stream.reader,
         stream.writer,
         &options.signer,
@@ -134,7 +140,7 @@ async fn start_service(
 ) {
     let controller = &controller;
     loop {
-        match listener.accept().await {
+        match listener.accept(controller).await {
             Ok((stream, _)) => {
                 controller.spawn(handle_service_stream(
                     controller.clone(),
@@ -144,8 +150,12 @@ async fn start_service(
                 ));
             }
             Err(e) => {
-                if e.kind() != std::io::ErrorKind::WouldBlock {
+                if is_critical_listener_error(&e) {
+                    if controller.has_cancel() {
+                        return;
+                    }
                     error!("listener accept error: {:#}", e);
+                    controller.cancel_all();
                     break;
                 }
                 info!("listener accept error, retrying: {:#}", e);
@@ -154,6 +164,14 @@ async fn start_service(
     }
     controller.cancel_all();
     controller.wait().await;
+}
+
+fn is_critical_listener_error(io_error: &io::Error) -> bool {
+    match io_error.kind() {
+        io::ErrorKind::WouldBlock => return false,
+        io::ErrorKind::Interrupted => return false,
+        _ => return true,
+    }
 }
 
 async fn handle_service_stream(
@@ -196,7 +214,9 @@ async fn handle_service_stream_impl(
         stream.peer_addr(),
         stream.local_addr()
     );
-    write_half.write_connect_message(connect_to).await?;
+    write_half
+        .write_connect_message(controller, connect_to)
+        .await?;
     debug!(
         "tunnel connect message has sent, stream relay started: {}->{}",
         stream.peer_addr(),

@@ -5,7 +5,6 @@ use std::net::ToSocketAddrs;
 use std::result::Result::Ok;
 use std::time::Duration;
 
-use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use serde::de::{Deserialize, Deserializer, Visitor};
@@ -32,14 +31,32 @@ impl fmt::Display for Reader {
 
 impl Reader {
     #[inline]
-    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    pub async fn read(&mut self, controller: &Controller, buf: &mut [u8]) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
-        self.inner.read(buf).await
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return Err(cancel_error());
+            }
+            r = self.inner.read(buf) => {
+                return r;
+            }
+        }
     }
     #[inline]
-    pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+    pub async fn read_exact(
+        &mut self,
+        controller: &Controller,
+        buf: &mut [u8],
+    ) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
-        self.inner.read_exact(buf).await
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return Err(cancel_error());
+            }
+            r = self.inner.read_exact(buf) => {
+                return r;
+            }
+        }
     }
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
@@ -63,10 +80,22 @@ impl fmt::Display for Writer {
     }
 }
 
+#[inline]
+fn cancel_error() -> io::Error {
+    io::Error::new(io::ErrorKind::Other, "controller cancelled")
+}
+
 impl Writer {
     #[inline]
-    pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        self.inner.write_all(data).await
+    pub async fn write_all(&mut self, controller: &Controller, data: &[u8]) -> io::Result<()> {
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return Err(cancel_error());
+            }
+            r = self.inner.write_all(data) => {
+                return r;
+            }
+        }
     }
     #[inline]
     pub fn local_addr(&self) -> SocketAddr {
@@ -170,7 +199,18 @@ impl fmt::Display for Listener {
 }
 
 impl Listener {
-    pub async fn accept(self: &mut Self) -> io::Result<(Stream, SocketAddr)> {
+    pub async fn accept(&mut self, controller: &Controller) -> io::Result<(Stream, SocketAddr)> {
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return Err(cancel_error());
+            }
+            r = self.accept_impl() => {
+                return r;
+            }
+        }
+    }
+
+    async fn accept_impl(self: &mut Self) -> io::Result<(Stream, SocketAddr)> {
         match self {
             Listener::TCP(s) => {
                 let (stream, addr) = s.accept().await?;
@@ -222,7 +262,18 @@ impl Address {
         Ok(Address::TCP(addr))
     }
 
-    pub async fn connect_to(&self) -> Result<Stream> {
+    pub async fn connect_to(&self, controller: &Controller) -> io::Result<Stream> {
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return Err(cancel_error());
+            }
+            r = self.connect_to_impl() => {
+                return r;
+            }
+        }
+    }
+
+    async fn connect_to_impl(self: &Self) -> io::Result<Stream> {
         match self {
             Address::TCP(a) => {
                 let stream = TcpStream::connect(a).await?;
@@ -232,12 +283,21 @@ impl Address {
         }
     }
 
-    pub async fn listen_to(&self) -> Result<Listener> {
+    pub async fn listen_to(&self, controller: &Controller) -> io::Result<Listener> {
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return Err(cancel_error());
+            }
+            r = self.listen_to_impl() => {
+                return r;
+            }
+        }
+    }
+
+    async fn listen_to_impl(self: &Self) -> io::Result<Listener> {
         match self {
             Address::TCP(a) => {
-                let listener = TcpListener::bind(a)
-                    .await
-                    .context(format!("Failed to bind {}", a))?;
+                let listener = TcpListener::bind(a).await?;
                 Ok(Listener::TCP(listener))
             }
         }

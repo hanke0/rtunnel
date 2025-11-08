@@ -63,7 +63,7 @@ async fn start_client(configs: Vec<ClientConfig>) {
             cfg.server_address,
             err.unwrap_err()
         );
-        graceful_exit(&controller, 1).await
+        graceful_exit(&controller, 1, "client").await
     }
     info!("all clients started, client is ready");
     select! {
@@ -71,7 +71,7 @@ async fn start_client(configs: Vec<ClientConfig>) {
             _ = controller.wait_cancel() => {}
     }
     info!("client is shutting down");
-    graceful_exit(&controller, 0).await
+    graceful_exit(&controller, 0, "client").await
 }
 
 async fn start_server(configs: Vec<ServerConfig>) {
@@ -87,7 +87,7 @@ async fn start_server(configs: Vec<ServerConfig>) {
             cfg.listen,
             err.unwrap_err()
         );
-        graceful_exit(&controller, 1).await;
+        graceful_exit(&controller, 1, "server").await;
     }
     info!("all service started, server is ready");
     select! {
@@ -95,7 +95,7 @@ async fn start_server(configs: Vec<ServerConfig>) {
             _ = controller.wait_cancel() => {}
     }
     info!("server is shutting down");
-    graceful_exit(&controller, 0).await;
+    graceful_exit(&controller, 0, "server").await;
 }
 
 async fn wait_exit_signal() {
@@ -111,7 +111,7 @@ async fn wait_exit_signal() {
     };
 }
 
-async fn graceful_exit(controller: &Controller, code: i32) -> ! {
+async fn graceful_exit(controller: &Controller, code: i32, side: &str) -> ! {
     controller.cancel_all();
     loop {
         select! {
@@ -119,7 +119,7 @@ async fn graceful_exit(controller: &Controller, code: i32) -> ! {
                 break;
             }
             _ = sleep(Duration::from_millis(1000)) => {
-                debug!("client is still shutting down, task count {}", controller.task_count());
+                debug!("{side} is still shutting down, task count {}", controller.task_count());
             }
         }
     }

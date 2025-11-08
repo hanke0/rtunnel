@@ -4,7 +4,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 use tokio::select;
@@ -125,9 +125,10 @@ async fn start_client_sentry(controller: Controller, options: ClientOptionsRef) 
     let guard = StreamGuarder::new(sender);
     keep_client_connections(&controller, &options, guard, &mut receiver).await;
     controller.cancel_all();
+    debug!("client sentry exiting, {}", options.address);
     controller.wait().await;
     receiver.close();
-    debug!("client sentry exited, {}", options.address)
+    debug!("client sentry exited, {}", options.address);
 }
 
 async fn keep_client_connections(
@@ -215,8 +216,11 @@ async fn start_new_tunnel(
                     options.address, e
                 );
             } else {
+                if controller.has_cancel() {
+                    return;
+                }
                 error!("connect service {} fatal: {:#}", options.address, e);
-                controller.cancel();
+                controller.cancel_all();
             }
         }
     }
@@ -227,6 +231,11 @@ fn can_retry_connect(error: &anyhow::Error) -> bool {
         if let Some(io_error) = cause.downcast_ref::<io::Error>() {
             match io_error.kind() {
                 io::ErrorKind::ConnectionRefused => return false,
+                io::ErrorKind::Other => return false,
+                io::ErrorKind::HostUnreachable => return false,
+                io::ErrorKind::NetworkUnreachable => return false,
+                io::ErrorKind::PermissionDenied => return false,
+                io::ErrorKind::Unsupported => return false,
                 _ => return true,
             }
         }
@@ -252,15 +261,25 @@ async fn start_new_tunnel_impl(
 }
 
 async fn connect_to_server(
-    _controller: &Controller,
+    controller: &Controller,
     options: &ClientOptionsRef,
 ) -> Result<(ReadSession, WriteSession)> {
-    let conn = options.address.connect_to().await?;
+    let conn = options
+        .address
+        .connect_to(controller)
+        .await
+        .context("Failed to connect to tunnel server")?;
     let peer_addr = conn.reader.peer_addr();
     let local_addr = conn.reader.local_addr();
     debug!("tunnel connected: {}->{}", peer_addr, local_addr);
-    let (read_half, write_half) =
-        client_handshake(conn.reader, conn.writer, &options.signer, &options.verifier).await?;
+    let (read_half, write_half) = client_handshake(
+        controller,
+        conn.reader,
+        conn.writer,
+        &options.signer,
+        &options.verifier,
+    )
+    .await?;
     debug!("tunnel established: {}->{}", peer_addr, local_addr);
     return Ok((read_half, write_half));
 }
@@ -274,13 +293,26 @@ async fn handle_tunnel(
 ) {
     match handle_tunnel_impl(&controller, guard, read_half, write_half, allows).await {
         Ok((read, write)) => {
-            info!("stream has read {} bytes and wrote {}", read, write);
+            info!(
+                "stream {} disconnected and has read {} bytes and wrote {}",
+                read_half, read, write
+            );
         }
         Err(e) => {
             if is_critical_relay_error(&e) {
-                error!("stream {} transfer error:  {:#}", read_half, e);
+                if controller.has_cancel() {
+                    return;
+                }
+                error!(
+                    "stream {} disconnected with critical error:  {:#}",
+                    read_half, e
+                );
+                controller.cancel_all();
             } else {
-                info!("stream {} transfer error:  {:#}", read_half, e);
+                info!(
+                    "stream {} disconnected with non-critical error:  {:#}",
+                    read_half, e
+                );
             }
         }
     };
@@ -305,12 +337,15 @@ async fn handle_tunnel_impl(
     write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) -> Result<(usize, usize)> {
-    let addr = read_half.read_connect_message().await?;
+    let addr: Address = read_half.read_connect_message(controller).await?;
     debug!("tunnel connect message has read: {}", &addr);
     if !allows.contains(&addr) {
         return Err(anyhow!("Address not allowed: {}", &addr));
     }
-    let mut conn = addr.connect_to().await?;
+    let mut conn = addr
+        .connect_to(controller)
+        .await
+        .context("Failed to connect to local service")?;
     debug!("tunnel relay established: {}->{}", &read_half, addr);
     let _guard = guard.relay_guard();
     Ok(copy_encrypted_bidirectional(
