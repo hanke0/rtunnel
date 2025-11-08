@@ -347,7 +347,7 @@ impl Controller {
     }
 
     #[inline]
-    pub fn hash_cancel(&self) -> bool {
+    pub fn has_cancel(&self) -> bool {
         self.cancel_token.is_cancelled()
     }
 
@@ -360,6 +360,7 @@ impl Controller {
     #[inline]
     pub async fn wait_cancel(&self) {
         self.cancel_token.cancelled().await;
+        self.cancel();
     }
 
     #[inline]
@@ -380,5 +381,107 @@ impl Controller {
             child.wait().await;
         });
         children
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    use tokio::sync::oneshot;
+    use tokio::time::{sleep, timeout};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_controller_children_wait() {
+        let father = Controller::default();
+        let children = father.children();
+        let grandson = children.children();
+        let father1 = father.clone();
+        let children1 = children.clone();
+        let grandson1 = grandson.clone();
+
+        let (sender, receiver) = oneshot::channel();
+        assert_eq!(father.task_count(), 1);
+        assert_eq!(children.task_count(), 1);
+        assert_eq!(grandson.task_count(), 0);
+
+        let fn_spend = Duration::from_millis(300);
+
+        father1.spawn(async move {
+            assert_eq!(father.task_count(), 2);
+            let children1 = children.clone();
+            children1.spawn(async move {
+                assert_eq!(children.task_count(), 2);
+                let grandson1 = grandson.clone();
+                grandson1.spawn(async move {
+                    assert_eq!(grandson.task_count(), 1);
+                    println!("grandson sleep");
+                    sleep(fn_spend).await;
+                    println!("grandson wait");
+                    grandson.cancel_all();
+                    println!("grandson cancel");
+                });
+                assert_eq!(children.task_count(), 2);
+                println!("children sleep");
+                sleep(fn_spend).await;
+                println!("children wait");
+                grandson1.wait().await;
+                println!("children wait done");
+            });
+            assert_eq!(father.task_count(), 2);
+            println!("father sleep");
+            sender.send(()).unwrap();
+            sleep(fn_spend).await;
+            println!("father wait");
+            children1.wait().await;
+            println!("father wait done");
+        });
+
+        receiver.await.unwrap();
+        assert_eq!(father1.task_count(), 2);
+        assert_eq!(children1.task_count(), 2);
+        assert_eq!(grandson1.task_count(), 1);
+
+        timeout(Duration::from_millis(400), grandson1.wait())
+            .await
+            .unwrap();
+
+        assert!(grandson1.has_cancel());
+        assert!(children1.has_cancel());
+        assert!(father1.has_cancel());
+
+        assert_eq!(grandson1.task_count(), 0);
+        assert_eq!(children1.task_count(), 0);
+        assert_eq!(father1.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_controller_cancel() {
+        let controller = Controller::default();
+        let children = controller.children();
+
+        children.cancel();
+        assert!(!controller.has_cancel());
+        assert!(children.has_cancel());
+        assert_eq!(children.task_count(), 0);
+        children.wait().await;
+
+        controller.cancel();
+        assert!(controller.has_cancel());
+        controller.wait().await;
+        assert_eq!(controller.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_controller_cancel_children() {
+        let controller = Controller::default();
+        let children = controller.children();
+
+        controller.cancel();
+        assert!(controller.has_cancel());
+        assert!(children.has_cancel());
+        children.wait().await;
+        controller.wait().await;
     }
 }

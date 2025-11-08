@@ -429,7 +429,7 @@ pub async fn copy_encrypted_bidirectional(
     raw_reader: &mut Reader,
     raw_writer: &mut Writer,
 ) -> (usize, usize) {
-    if controller.hash_cancel() {
+    if controller.has_cancel() {
         return (0, 0);
     }
     let read_controller = controller.clone();

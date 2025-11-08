@@ -141,7 +141,7 @@ async fn keep_client_connections(
     let max_idle = options.idle_connections;
 
     for _ in 0..max_idle {
-        if controller.hash_cancel() {
+        if controller.has_cancel() {
             return;
         }
         controller.spawn(start_new_tunnel(
@@ -153,7 +153,7 @@ async fn keep_client_connections(
         current += 1;
     }
 
-    while !controller.hash_cancel() {
+    while !controller.has_cancel() {
         let fut = receiver.recv();
         let result = select! {
             r = fut => r,
@@ -202,7 +202,7 @@ async fn start_new_tunnel(
     fatal: bool,
 ) {
     let _guard = guard.stream_guard();
-    if controller.hash_cancel() {
+    if controller.has_cancel() {
         return;
     }
     match start_new_tunnel_impl(&controller, &guard, options.clone()).await {
