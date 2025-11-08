@@ -164,7 +164,7 @@ async fn handle_service_stream(
 ) {
     let repr = format!("{}", stream);
     debug!("new service stream connected: {}", repr);
-    match handle_service_stream_impl(&controller, stream, options, connect_to).await {
+    match handle_service_stream_impl(&controller, stream, &options, connect_to).await {
         Ok((read, write)) => {
             info!(
                 "stream {} closed and has read {} bytes and wrote {} bytes",
@@ -180,7 +180,7 @@ async fn handle_service_stream(
 async fn handle_service_stream_impl(
     controller: &Controller,
     mut stream: Stream,
-    options: ServerOptionsRef,
+    options: &ServerOptionsRef,
     connect_to: Address,
 ) -> Result<(usize, usize)> {
     let (mut read_half, mut write_half) =

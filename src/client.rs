@@ -114,7 +114,7 @@ pub async fn start_client(controller: &Controller, cfg: &ClientConfig) -> Result
         idle_connections: cfg.idle_connections,
     });
 
-    let _ = connect_to_server(controller, options.clone()).await?;
+    let _ = connect_to_server(controller, &options).await?;
 
     controller.spawn(start_client_sentry(controller.children(), options));
     Ok(())
@@ -123,15 +123,16 @@ pub async fn start_client(controller: &Controller, cfg: &ClientConfig) -> Result
 async fn start_client_sentry(controller: Controller, options: ClientOptionsRef) {
     let (sender, mut receiver) = unbounded_channel();
     let guard = StreamGuarder::new(sender);
-    keep_client_connections(&controller, options, guard, &mut receiver).await;
+    keep_client_connections(&controller, &options, guard, &mut receiver).await;
     controller.cancel_all();
     controller.wait().await;
     receiver.close();
+    debug!("client sentry exited, {}", options.address)
 }
 
 async fn keep_client_connections(
     controller: &Controller,
-    options: ClientOptionsRef,
+    options: &ClientOptionsRef,
     guard: StreamGuarder,
     receiver: &mut Receiver,
 ) {
@@ -205,7 +206,7 @@ async fn start_new_tunnel(
     if controller.has_cancel() {
         return;
     }
-    match start_new_tunnel_impl(&controller, &guard, options.clone()).await {
+    match start_new_tunnel_impl(&controller, &guard, &options).await {
         Ok(_) => {}
         Err(e) => {
             if !fatal && can_retry_connect(&e) {
@@ -236,9 +237,9 @@ fn can_retry_connect(error: &anyhow::Error) -> bool {
 async fn start_new_tunnel_impl(
     controller: &Controller,
     guard: &StreamGuarder,
-    options: ClientOptionsRef,
+    options: &ClientOptionsRef,
 ) -> Result<()> {
-    let (mut read_half, mut write_half) = connect_to_server(controller, options.clone()).await?;
+    let (mut read_half, mut write_half) = connect_to_server(controller, options).await?;
     handle_tunnel(
         controller,
         guard,
@@ -252,7 +253,7 @@ async fn start_new_tunnel_impl(
 
 async fn connect_to_server(
     _controller: &Controller,
-    options: ClientOptionsRef,
+    options: &ClientOptionsRef,
 ) -> Result<(ReadSession, WriteSession)> {
     let conn = options.address.connect_to().await?;
     let peer_addr = conn.reader.peer_addr();
