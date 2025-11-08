@@ -2,6 +2,8 @@
 
 set -e
 
+runmode="$1"
+
 server_pid=
 client_pid=
 file=$(mktemp)
@@ -13,7 +15,7 @@ cleanup() {
 
 unused_port() {
 	for ((port = ${1}; port <= ${2}; port++)); do
-		(echo >/dev/tcp/127.0.0.1/$port) >/dev/null && {
+		(echo >/dev/tcp/127.0.0.1/$port) >/dev/null 2>&1 && {
 			continue
 		} || {
 			echo $port
@@ -56,24 +58,64 @@ EOF
 
 trap cleanup EXIT
 
-cargo run --bin rtunnel -- -l debug server --config "${file}" &
-server_pid=$!
-sleep 1
-cargo run --bin rtunnel -- -l debug client --config "${file}" &
-client_pid=$!
-sleep 1
+run_server() {
+	cargo run --bin rtunnel -- -l debug server --config "${file}" &
+	server_pid=$!
+}
 
+run_client() {
+	cargo run --bin rtunnel -- -l debug client --config "${file}" &
+	client_pid=$!
+}
+
+case "$runmode" in
+s|server|serve)
+	run_server
+	;;
+c|client)
+	run_client
+	;;
+*)
+	run_server
+	sleep 1
+	run_client
+	sleep 1
+	;;
+esac
+
+sleep 1
 echo "curl http://127.0.0.1:${client_port}"
 
 echo "server pid: $server_pid"
 echo "client pid: $client_pid"
+
+server_alive() {
+	if [ -z "$server_pid" ]; then
+		return 0
+	fi
+	if ! kill -0 $server_pid; then
+		return 1
+	fi
+	return 0
+}
+
+client_alive() {
+	if [ -z "$client_pid" ]; then
+		return 0
+	fi
+	if ! kill -0 $client_pid; then
+		return 1
+	fi
+	return 0
+}
+
 while :; do
 	sleep 5
-	if ! kill -0 $server_pid; then
+	if ! server_alive; then
 		echo "server process died"
 		break
 	fi
-	if ! kill -0 $client_pid; then
+	if ! client_alive; then
 		echo "client process died"
 		break
 	fi

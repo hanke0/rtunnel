@@ -10,7 +10,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
 use bytes::{BufMut, BytesMut};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
-use log::{debug, error};
+use log::error;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
@@ -180,15 +180,13 @@ impl Message {
 
     async fn read_from_inplace(&mut self, reader: &mut Reader) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
-        debug!("Reading message header from stream");
         reader
             .read_exact(&mut self.0)
             .await
-            .context("Failed to read header from stream")?;
+            .context("Failed to read message header from stream")?;
         self.get_unchecked_type()?;
         let mut payload = self.0.split_off(Self::HEADER_SIZE);
         payload.resize(self.get_payload_size(), 0);
-        debug!("Reading message payload from stream");
         reader
             .read_exact(&mut payload)
             .await
@@ -281,7 +279,7 @@ impl HelloMessage {
                 buf.put_slice(random);
                 let signature = signer
                     .try_sign(&buf)
-                    .with_context(|| "Failed to sign client hello")?;
+                    .context("Failed to sign client hello")?;
                 buf.put_slice(signature.r_bytes());
                 buf.put_slice(signature.s_bytes());
                 assert_eq!(buf.len(), Self::SIZE,);
@@ -301,22 +299,20 @@ impl HelloMessage {
         verifier: &VerifyingKey,
     ) -> Result<()> {
         self.0.read_from_inplace(reader).await?;
-        self.verify(verifier)?;
+        self.verify(verifier)
+            .context("Failed to verify hello message")?;
         Ok(())
     }
 
     fn verify(&self, verifier: &VerifyingKey) -> Result<()> {
         let payload = self.0.get_payload();
         if payload.len() != Self::SIZE {
-            return Err(anyhow!(
-                "Invalid client hello msg length: {}",
-                payload.len()
-            ));
+            return Err(anyhow!("Invalid hello msg length: {}", payload.len()));
         }
         let signature = self.get_signature();
         verifier
             .verify_strict(self.get_verify_part(), &signature)
-            .with_context(|| "Failed to verify client hello signature")?;
+            .context("Failed to verify hello message signature")?;
         Ok(())
     }
 }
@@ -332,7 +328,7 @@ fn generate_random_array<const N: usize>() -> Result<[u8; N]> {
     let mut random = [0u8; N];
     OsRng
         .try_fill_bytes(random.as_mut())
-        .with_context(|| "Failed to generate random bytes")?;
+        .context("Failed to generate random bytes")?;
     Ok(random)
 }
 
@@ -382,7 +378,7 @@ pub async fn client_handshake(
     writer
         .write_all(client_hello.as_ref())
         .await
-        .with_context(|| "Failed to write to stream")?;
+        .context("Failed to write to stream when client handshake")?;
     let server_hello = ServerHello::read_from(&mut reader, verifier).await?;
     let (client_encryption, server_encryption) = handshake(
         &client_hello,
@@ -412,7 +408,7 @@ pub async fn server_handshake(
     writer
         .write_all(server_hello.as_ref())
         .await
-        .with_context(|| "Failed to write to stream")?;
+        .context("Failed to write to stream when server handshake")?;
 
     let (client_encryption, server_encryption) = handshake(
         &client_hello,
@@ -427,18 +423,20 @@ pub async fn server_handshake(
 }
 
 pub async fn copy_encrypted_bidirectional(
-    controller: Controller,
+    controller: &Controller,
     read_half: &mut ReadSession,
     write_half: &mut WriteSession,
     raw_reader: &mut Reader,
     raw_writer: &mut Writer,
 ) -> (usize, usize) {
-    if controller.has_shutdown() {
+    if controller.hash_cancel() {
         return (0, 0);
     }
+    let read_controller = controller.clone();
+    let write_controller = controller.clone();
     tokio::join!(
-        read_half.relay_encrypted_to_plain_forever(controller.clone(), raw_writer),
-        write_half.relay_plain_to_encrypted_forever(controller.clone(), raw_reader),
+        read_half.relay_encrypted_to_plain_forever(&read_controller, raw_writer),
+        write_half.relay_plain_to_encrypted_forever(&write_controller, raw_reader),
     )
 }
 
@@ -557,7 +555,7 @@ impl Encryption {
         message.rewrite_payload(message.get_type(), move |buf| {
             cipher
                 .decrypt_in_place(&nonce.into(), associated_data, buf)
-                .with_context(|| "Failed to decrypt message")
+                .context("Failed to decrypt message")
         })?;
         assert_eq!(self.message.get_type(), MessageType::Data);
         self.sequence.incr();
@@ -573,7 +571,7 @@ impl Encryption {
         message.rewrite_payload(msg_type, |payload| {
             cipher
                 .encrypt_in_place(&nonce.into(), associated_data, payload)
-                .with_context(|| "Failed to encrypt message")
+                .context("Failed to encrypt message")
         })?;
         assert_eq!(self.message.get_type(), msg_type);
         self.sequence.incr();
@@ -617,7 +615,7 @@ impl ReadSession {
 
     pub async fn relay_encrypted_to_plain_forever(
         &mut self,
-        controller: Controller,
+        controller: &Controller,
         writer: &mut Writer,
     ) -> usize {
         let mut size: usize = 0;
@@ -630,7 +628,7 @@ impl ReadSession {
                                     size += n;
                                 }
                                 Err(err) => {
-                                    error!("relay encrypt to plain error: {}", err);
+                                    error!("relay encrypt to plain error: {:#}", err);
                                     return size;
                                 }
                             };
@@ -638,7 +636,7 @@ impl ReadSession {
                 } => {
                     return size;
                 }
-                _ = controller.wait_shutdown() => {
+                _ = controller.wait_cancel() => {
                     return size;
                 }
             }
@@ -654,7 +652,7 @@ impl ReadSession {
         writer
             .write_all(buf)
             .await
-            .with_context(|| "Failed to write to stream")?;
+            .context("Failed to write to stream")?;
         Ok(buf.len())
     }
 }
@@ -689,12 +687,12 @@ impl WriteSession {
         self.writer
             .write_all(data)
             .await
-            .with_context(|| "Failed to write connect message to stream")
+            .context("Failed to write connect message to stream")
     }
 
     pub async fn relay_plain_to_encrypted_forever(
         &mut self,
-        controller: Controller,
+        controller: &Controller,
         reader: &mut Reader,
     ) -> usize {
         let mut size: usize = 0;
@@ -707,7 +705,7 @@ impl WriteSession {
                                     size += n;
                                 }
                                 Err(err) => {
-                                    error!("relay plain to encrypt error: {}", err);
+                                    error!("relay plain to encrypt error: {:#}", err);
                                     return size;
                                 }
                             };
@@ -715,7 +713,7 @@ impl WriteSession {
                 } => {
                     return size;
                 }
-                _ = controller.wait_shutdown() => {
+                _ = controller.wait_cancel() => {
                     return size;
                 }
             }
@@ -728,7 +726,7 @@ impl WriteSession {
         self.writer
             .write_all(data)
             .await
-            .with_context(|| "Failed to write to stream")?;
+            .context("Failed to write to stream")?;
         Ok(n)
     }
 
@@ -741,7 +739,7 @@ impl WriteSession {
         self.writer
             .write_all(data)
             .await
-            .with_context(|| "Failed to write to stream")?;
+            .context("Failed to write to stream")?;
         Ok(())
     }
 }
@@ -1183,7 +1181,7 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Controller::default();
+        let controller = &&Controller::default();
         let (sender, mut receiver) = unbounded_channel();
         let sender = &sender;
 
@@ -1196,7 +1194,7 @@ mod tests {
                 println!("Client handshake done");
                 tokio::join!(
                     copy_encrypted_bidirectional(
-                        controller.clone(),
+                        &controller,
                         &mut read_half,
                         &mut write_half,
                         &mut local_server.reader,
@@ -1227,7 +1225,7 @@ mod tests {
                 println!("Server handshake done");
                 tokio::join!(
                     copy_encrypted_bidirectional(
-                        controller.clone(),
+                        &controller,
                         &mut read_half,
                         &mut write_half,
                         &mut peer_server.reader,
@@ -1254,7 +1252,7 @@ mod tests {
                 for _ in 0..2 {
                     receiver.recv().await.unwrap();
                 }
-                controller.shutdown();
+                controller.cancel();
             },
         );
         controller.wait().await;

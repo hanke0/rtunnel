@@ -23,6 +23,7 @@ fn main() {
     let options = Cli::parse();
     env_logger::Builder::new()
         .filter_level(options.log_level)
+        .format_indent(Some(4))
         .init();
 
     match options.command {
@@ -52,53 +53,49 @@ async fn start_client(configs: Vec<ClientConfig>) {
     let controller = Controller::default();
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
-        let err = client::start_client(controller.clone(), cfg).await;
+        let err = client::start_client(&controller, cfg).await;
         if err.is_ok() {
             info!("connected to {}", cfg.server_address);
             continue;
         }
         error!(
-            "connect to {} failed, exiting: {}",
+            "connect to {} failed, exiting: {:#}",
             cfg.server_address,
             err.unwrap_err()
         );
-        controller.shutdown();
-        graceful_exit(controller.clone(), 1).await
+        graceful_exit(&controller, 1).await
     }
     info!("all clients started, client is ready");
     select! {
             _ = wait_exit_signal() => {},
-            _ = controller.wait_shutdown() => {}
+            _ = controller.wait_cancel() => {}
     }
     info!("client is shutting down");
-    controller.shutdown();
-    graceful_exit(controller.clone(), 0).await
+    graceful_exit(&controller, 0).await
 }
 
 async fn start_server(configs: Vec<ServerConfig>) {
     let controller = Controller::default();
     debug!("starting {} server", configs.len());
     for cfg in configs.iter() {
-        let err = server::start_server(controller.clone(), cfg).await;
+        let err = server::start_server(&controller, cfg).await;
         if err.is_ok() {
             continue;
         }
         error!(
-            "start server {} failed, exiting: {}",
+            "start server {} failed, exiting: {:#}",
             cfg.listen,
             err.unwrap_err()
         );
-        controller.shutdown();
-        graceful_exit(controller.clone(), 1).await;
+        graceful_exit(&controller, 1).await;
     }
     info!("all service started, server is ready");
     select! {
             _ = wait_exit_signal() => {},
-            _ = controller.wait_shutdown() => {}
+            _ = controller.wait_cancel() => {}
     }
-    info!("client is shutting down");
-    controller.shutdown();
-    graceful_exit(controller.clone(), 0).await;
+    info!("server is shutting down");
+    graceful_exit(&controller, 0).await;
 }
 
 async fn wait_exit_signal() {
@@ -114,8 +111,8 @@ async fn wait_exit_signal() {
     };
 }
 
-async fn graceful_exit(controller: Controller, code: i32) -> ! {
-    controller.wait_shutdown().await;
+async fn graceful_exit(controller: &Controller, code: i32) -> ! {
+    controller.cancel_all();
     loop {
         select! {
             _ = controller.wait() => {

@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 use tokio::select;
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::config::ClientConfig;
 use crate::encryption::client_handshake;
@@ -46,6 +46,7 @@ struct ClientOptions {
 type ClientOptionsRef = Arc<ClientOptions>;
 
 type Sender = UnboundedSender<NotifyEvent>;
+type Receiver = UnboundedReceiver<NotifyEvent>;
 
 struct StreamGuarder {
     sender: Sender,
@@ -87,11 +88,16 @@ struct StreamGuard {
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        self.sender.send(self.event).unwrap();
+        match self.sender.send(self.event) {
+            Ok(_) => {}
+            Err(e) => {
+                panic!("send event {} error: {:#}", self.event, e);
+            }
+        };
     }
 }
 
-pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<()> {
+pub async fn start_client(controller: &Controller, cfg: &ClientConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.server_public_key)?;
     let signer = decode_signing_key(&cfg.private_key)?;
     let mut allows = HashSet::new();
@@ -108,26 +114,37 @@ pub async fn start_client(controller: Controller, cfg: &ClientConfig) -> Result<
         idle_connections: cfg.idle_connections,
     });
 
-    let _ = connect_to_server(controller.clone(), options.clone()).await?;
+    let _ = connect_to_server(controller, options.clone()).await?;
 
-    controller.spawn(service_connection_sentry(controller.clone(), options));
+    controller.spawn(start_client_sentry(controller.children(), options));
     Ok(())
 }
 
-async fn service_connection_sentry(controller: Controller, options: ClientOptionsRef) {
+async fn start_client_sentry(controller: Controller, options: ClientOptionsRef) {
+    let (sender, mut receiver) = unbounded_channel();
+    let guard = StreamGuarder::new(sender);
+    keep_client_connections(&controller, options, guard, &mut receiver).await;
+    controller.cancel_all();
+    controller.wait().await;
+    receiver.close();
+}
+
+async fn keep_client_connections(
+    controller: &Controller,
+    options: ClientOptionsRef,
+    guard: StreamGuarder,
+    receiver: &mut Receiver,
+) {
     let mut current = 0;
     let mut busy = 0;
     let max = options.max_connections;
     let max_idle = options.idle_connections;
-    let controller = &controller;
-    let (sender, mut receiver) = unbounded_channel();
-    let guard = StreamGuarder::new(sender);
 
     for _ in 0..max_idle {
-        if controller.has_shutdown() {
+        if controller.hash_cancel() {
             return;
         }
-        controller.spawn(start_new_tunnel_silent(
+        controller.spawn(start_new_tunnel(
             controller.clone(),
             guard.clone(),
             options.clone(),
@@ -136,11 +153,11 @@ async fn service_connection_sentry(controller: Controller, options: ClientOption
         current += 1;
     }
 
-    while !controller.has_shutdown() {
+    while !controller.hash_cancel() {
         let fut = receiver.recv();
         let result = select! {
             r = fut => r,
-            _ = controller.wait_shutdown() => {
+            _ = controller.wait_cancel() => {
                 break;
             }
         };
@@ -163,7 +180,7 @@ async fn service_connection_sentry(controller: Controller, options: ClientOption
                 pending, options.address
             );
             for _ in 0..pending {
-                controller.spawn(start_new_tunnel_silent(
+                controller.spawn(start_new_tunnel(
                     controller.clone(),
                     guard.clone(),
                     options.clone(),
@@ -176,36 +193,35 @@ async fn service_connection_sentry(controller: Controller, options: ClientOption
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    controller.wait().await;
-    receiver.close();
 }
 
-async fn start_new_tunnel_silent(
+async fn start_new_tunnel(
     controller: Controller,
     guard: StreamGuarder,
     options: ClientOptionsRef,
     fatal: bool,
 ) {
-    if controller.has_shutdown() {
+    let _guard = guard.stream_guard();
+    if controller.hash_cancel() {
         return;
     }
-    match start_new_tunnel(controller.clone(), &guard, options.clone()).await {
+    match start_new_tunnel_impl(&controller, &guard, options.clone()).await {
         Ok(_) => {}
         Err(e) => {
-            if !fatal && is_retry_able_error(&e) {
+            if !fatal && can_retry_connect(&e) {
                 info!(
-                    "retry connect service {} cause by error: {}",
+                    "retry connect service {} cause by error: {:#}",
                     options.address, e
                 );
             } else {
-                error!("connect service {} fatal: {}", options.address, &e);
-                controller.shutdown();
+                error!("connect service {} fatal: {:#}", options.address, e);
+                controller.cancel();
             }
         }
     }
 }
 
-fn is_retry_able_error(error: &anyhow::Error) -> bool {
+fn can_retry_connect(error: &anyhow::Error) -> bool {
     for cause in error.chain() {
         if let Some(io_error) = cause.downcast_ref::<io::Error>() {
             match io_error.kind() {
@@ -217,15 +233,13 @@ fn is_retry_able_error(error: &anyhow::Error) -> bool {
     return true;
 }
 
-async fn start_new_tunnel(
-    controller: Controller,
+async fn start_new_tunnel_impl(
+    controller: &Controller,
     guard: &StreamGuarder,
     options: ClientOptionsRef,
 ) -> Result<()> {
-    let _guard = guard.stream_guard();
-    let (mut read_half, mut write_half) =
-        connect_to_server(controller.clone(), options.clone()).await?;
-    handle_stream_silent(
+    let (mut read_half, mut write_half) = connect_to_server(controller, options.clone()).await?;
+    handle_tunnel(
         controller,
         guard,
         &mut read_half,
@@ -237,7 +251,7 @@ async fn start_new_tunnel(
 }
 
 async fn connect_to_server(
-    _controller: Controller,
+    _controller: &Controller,
     options: ClientOptionsRef,
 ) -> Result<(ReadSession, WriteSession)> {
     let conn = options.address.connect_to().await?;
@@ -250,25 +264,41 @@ async fn connect_to_server(
     return Ok((read_half, write_half));
 }
 
-async fn handle_stream_silent(
-    controller: Controller,
+async fn handle_tunnel(
+    controller: &Controller,
     guard: &StreamGuarder,
     read_half: &mut ReadSession,
     write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) {
-    match handle_stream(controller, guard, read_half, write_half, allows).await {
+    match handle_tunnel_impl(&controller, guard, read_half, write_half, allows).await {
         Ok((read, write)) => {
             info!("stream has read {} bytes and wrote {}", read, write);
         }
         Err(e) => {
-            error!("stream transfer error: {}, {}", e, read_half);
+            if is_critical_relay_error(&e) {
+                error!("stream {} transfer error:  {:#}", read_half, e);
+            } else {
+                info!("stream {} transfer error:  {:#}", read_half, e);
+            }
         }
     };
 }
 
-async fn handle_stream(
-    controller: Controller,
+fn is_critical_relay_error(error: &anyhow::Error) -> bool {
+    for cause in error.chain() {
+        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
+            match io_error.kind() {
+                io::ErrorKind::UnexpectedEof => return false,
+                _ => return true,
+            }
+        }
+    }
+    return true;
+}
+
+async fn handle_tunnel_impl(
+    controller: &Controller,
     guard: &StreamGuarder,
     read_half: &mut ReadSession,
     write_half: &mut WriteSession,

@@ -3,7 +3,6 @@ use std::io;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::result::Result::Ok;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -295,13 +294,17 @@ impl<'de> Deserialize<'de> for Address {
 }
 
 pub struct Controller {
-    inner: Arc<ControllerInner>,
+    cancel_token: CancellationToken,
+    tracker: TaskTracker,
+    father: Option<Box<Self>>,
 }
 
 impl Clone for Controller {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            cancel_token: self.cancel_token.clone(),
+            tracker: self.tracker.clone(),
+            father: self.father.clone(),
         }
     }
 }
@@ -309,7 +312,9 @@ impl Clone for Controller {
 impl Default for Controller {
     fn default() -> Self {
         Self {
-            inner: Arc::new(ControllerInner::default()),
+            cancel_token: CancellationToken::new(),
+            tracker: TaskTracker::new(),
+            father: None,
         }
     }
 }
@@ -321,55 +326,59 @@ impl Controller {
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        self.inner.tracker.spawn(task)
+        self.tracker.spawn(task)
     }
 
     #[inline]
-    pub fn shutdown(&self) {
-        self.inner.shutdown.cancel();
-        self.inner.tracker.close();
+    pub fn cancel(&self) {
+        self.cancel_token.cancel();
+        self.tracker.close();
+    }
+
+    pub fn cancel_all(&self) {
+        self.cancel();
+        let father = self.father.clone();
+        match father {
+            Some(father) => {
+                father.cancel_all();
+            }
+            None => {}
+        }
     }
 
     #[inline]
-    pub fn has_shutdown(&self) -> bool {
-        self.inner.shutdown.is_cancelled()
+    pub fn hash_cancel(&self) -> bool {
+        self.cancel_token.is_cancelled()
     }
 
     #[inline]
     pub async fn wait(&self) {
-        self.inner.tracker.wait().await;
+        self.wait_cancel().await;
+        self.tracker.wait().await;
     }
 
     #[inline]
-    pub async fn wait_shutdown(&self) {
-        self.inner.shutdown.cancelled().await;
+    pub async fn wait_cancel(&self) {
+        self.cancel_token.cancelled().await;
     }
 
     #[inline]
     pub fn task_count(&self) -> usize {
-        self.inner.tracker.len()
+        self.tracker.len()
     }
-}
 
-struct ControllerInner {
-    shutdown: CancellationToken,
-    tracker: TaskTracker,
-}
-
-impl Default for ControllerInner {
-    fn default() -> Self {
-        Self {
-            shutdown: CancellationToken::new(),
+    pub fn children(&self) -> Self {
+        let me = self.clone();
+        let children = Self {
+            cancel_token: self.cancel_token.child_token(),
             tracker: TaskTracker::new(),
-        }
-    }
-}
-
-impl Clone for ControllerInner {
-    fn clone(&self) -> Self {
-        Self {
-            shutdown: self.shutdown.clone(),
-            tracker: self.tracker.clone(),
-        }
+            father: Some(Box::new(me)),
+        };
+        let child = children.clone();
+        self.spawn(async move {
+            child.wait_cancel().await;
+            child.wait().await;
+        });
+        children
     }
 }
