@@ -99,7 +99,7 @@ async fn start_server(configs: Vec<ServerConfig>) {
 }
 
 async fn wait_exit_signal() {
-    let mut sigint = signal::unix::signal(SignalKind::terminate()).unwrap();
+    let mut sigint = signal::unix::signal(SignalKind::interrupt()).unwrap();
     let mut sigterm = signal::unix::signal(SignalKind::terminate()).unwrap();
     select! {
         _ = sigint.recv() => {
