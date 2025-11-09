@@ -532,7 +532,11 @@ impl Encryption {
         let message = &mut self.message;
         let n = message
             .async_replace_payload(MessageType::Data, async move |payload| -> Result<usize> {
-                payload.resize(payload.capacity(), 0);
+                if payload.capacity() > Message::MAX_MSG_SIZE {
+                    payload.resize(Message::MAX_MSG_SIZE, 0);
+                } else {
+                    payload.resize(payload.capacity(), 0);
+                }
                 assert_ne!(payload.len(), 0);
                 let n = reader
                     .read(controller, payload)
