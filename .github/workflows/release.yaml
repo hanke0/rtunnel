@@ -54,3 +54,5 @@ jobs:
         with:
           executable-name: rtunnel
           target: ${{ matrix.platform.target }}
+          changes-file: ""
+          extra-files: ""
