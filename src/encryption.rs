@@ -532,8 +532,11 @@ impl Encryption {
         let message = &mut self.message;
         let n = message
             .async_replace_payload(MessageType::Data, async move |payload| -> Result<usize> {
-                if payload.capacity() > Message::MAX_MSG_SIZE {
-                    payload.resize(Message::MAX_MSG_SIZE, 0);
+                // https://stackoverflow.com/questions/67028762/why-aes-256-with-gcm-adds-16-bytes-to-the-ciphertext-size
+                // nonce(12) + ciphertext + tag(16)
+                const ALLOWED_SIZE: usize = Message::MAX_MSG_SIZE - 12 - 16;
+                if payload.capacity() > ALLOWED_SIZE {
+                    payload.resize(ALLOWED_SIZE, 0);
                 } else {
                     payload.resize(payload.capacity(), 0);
                 }
