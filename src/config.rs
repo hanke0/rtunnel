@@ -102,23 +102,7 @@ fn check_config_perm(path: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
-    // On Windows, we check if the file is readable and writable only by the owner
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::PermissionsExt;
-        // On Windows, we check if the file is readable and writable
-        // and not executable (which is closest to 0600)
-        let mode = permissions.mode();
-        let ok = (mode & 0o600) == 0o600 && (mode & 0o177) == 0;
-        if !ok {
-            return Err(anyhow::Error::msg(
-                "Config file permission should be not executed, and can only read/write by owner.",
-            ));
-        }
-        return Ok(());
-    }
-
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(any(unix)))]
     {
         OK(());
     }
