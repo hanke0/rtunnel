@@ -241,7 +241,7 @@ fn can_retry_connect(error: &anyhow::Error) -> bool {
             }
         }
     }
-    return true;
+    true
 }
 
 async fn start_new_tunnel_impl(
@@ -282,7 +282,7 @@ async fn connect_to_server(
     )
     .await?;
     debug!("tunnel established: {}->{}", peer_addr, local_addr);
-    return Ok((read_half, write_half));
+    Ok((read_half, write_half))
 }
 
 async fn handle_relay(
@@ -292,7 +292,7 @@ async fn handle_relay(
     write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) {
-    match handle_relay_impl(&controller, guard, read_half, write_half, allows).await {
+    match handle_relay_impl(controller, guard, read_half, write_half, allows).await {
         Ok((read, write)) => {
             info!(
                 "stream {} disconnected and has read {} bytes and wrote {}",

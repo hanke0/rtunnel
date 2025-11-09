@@ -12,7 +12,6 @@ use tokio::time::sleep;
 use clap::{Parser, Subcommand};
 use config::{ClientConfig, ServerConfig};
 use encryption::KeyPair;
-use env_logger;
 use log::{debug, error, info};
 use tokio::runtime::Builder;
 use tokio::signal::unix::SignalKind;

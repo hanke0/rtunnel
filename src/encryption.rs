@@ -63,7 +63,7 @@ impl MessageType {
         }
     }
 
-    fn to_u8(&self) -> u8 {
+    fn as_u8(&self) -> u8 {
         match self {
             MessageType::Handshake => Self::HANDSHAKE,
             MessageType::Connect => Self::CONNECT,
@@ -116,7 +116,7 @@ impl Message {
         let low = (body_size & 0xff) as u8;
         let buf = &mut self.0;
         assert!(buf.len() > 1);
-        buf[0] = high | msg_type.to_u8();
+        buf[0] = high | msg_type.as_u8();
         buf[1] = low;
     }
 
@@ -237,28 +237,28 @@ impl HelloMessage {
         Ok(msg)
     }
 
-    fn get_public_key<'a>(&'a self) -> &'a PublicKey {
+    fn get_public_key(&self) -> &PublicKey {
         let buf = self.0.get_payload();
         assert!(buf.len() == Self::SIZE);
         buf[0..32].try_into().unwrap()
     }
-    fn get_random_key<'a>(&'a self) -> &'a RandomKey {
+    fn get_random_key(&self) -> &RandomKey {
         let buf = self.0.get_payload();
         assert!(buf.len() == Self::SIZE);
         buf[32..64].try_into().unwrap()
     }
 
-    fn get_verify_part<'a>(&'a self) -> &'a [u8] {
+    fn get_verify_part(&self) -> &[u8] {
         &self.0.get_payload()[..64]
     }
 
-    fn get_signature<'a>(&'a self) -> Signature {
+    fn get_signature(&self) -> Signature {
         let buf = self.0.get_payload();
         assert!(buf.len() == Self::SIZE);
         Signature::from_slice(&buf[64..128]).unwrap()
     }
 
-    fn get_payload<'a>(&'a self) -> &'a [u8] {
+    fn get_payload(&self) -> &[u8] {
         self.0.get_payload()
     }
 
@@ -283,7 +283,7 @@ impl HelloMessage {
                 buf.put_slice(ephemeral_public);
                 buf.put_slice(random);
                 let signature = signer
-                    .try_sign(&buf)
+                    .try_sign(buf)
                     .context("Failed to sign client hello")?;
                 buf.put_slice(signature.r_bytes());
                 buf.put_slice(signature.s_bytes());
@@ -360,8 +360,8 @@ fn handshake(
     hash.update(server_hello.get_payload());
     let hello_hash = hash.finalize();
     let their_public = match side {
-        HandshakeSide::Client => ECDHPublic::from(server_hello.get_public_key().clone()),
-        HandshakeSide::Server => ECDHPublic::from(client_hello.get_public_key().clone()),
+        HandshakeSide::Client => ECDHPublic::from(*server_hello.get_public_key()),
+        HandshakeSide::Server => ECDHPublic::from(*client_hello.get_public_key()),
     };
     let shared_key = ephemeral_private.diffie_hellman(&their_public);
     let (client_secret_iv, client_secret, server_secret_iv, server_secret) = expand_secret(
@@ -524,7 +524,7 @@ impl Encryption {
         Ok((self.message.get_type(), self.message.get_payload()))
     }
 
-    async fn from_reader_inplace<'a>(
+    async fn inplace_from_reader<'a>(
         &'a mut self,
         controller: &Controller,
         reader: &mut Reader,
@@ -635,7 +635,7 @@ impl ReadSession {
                 controller,
                 &mut self.reader,
                 MessageType::Connect,
-                move |buf| Ok(Address::from_bytes(buf)?),
+                Address::from_bytes,
             )
             .await
     }
@@ -715,7 +715,7 @@ pub fn is_relay_critical_error(error: &anyhow::Error) -> bool {
             }
         }
     }
-    return true;
+    true
 }
 
 pub struct WriteSession {
@@ -731,10 +731,7 @@ impl fmt::Display for WriteSession {
 
 impl WriteSession {
     pub fn new(writer: Writer, encryption: Encryption) -> Self {
-        Self {
-            writer,
-            encryption: encryption,
-        }
+        Self { writer, encryption }
     }
 
     pub async fn write_connect_message(
@@ -795,7 +792,7 @@ impl WriteSession {
     ) -> Result<usize> {
         let (n, data) = self
             .encryption
-            .from_reader_inplace(controller, reader)
+            .inplace_from_reader(controller, reader)
             .await?;
         if n == 0 {
             return Ok(0);
@@ -948,7 +945,6 @@ mod tests {
     use crate::transport::Stream;
 
     use super::*;
-    use env_logger;
 
     #[test]
     fn test_split_off() {
@@ -1019,7 +1015,7 @@ mod tests {
     }
 
     use ntest::timeout;
-    use tokio;
+
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -1171,16 +1167,16 @@ mod tests {
             },
         );
         println!("handshake done");
-        client_write.write_data(&controller, &buf).await.unwrap();
+        client_write.write_data(controller, &buf).await.unwrap();
         println!("client write done");
-        let (message_type, payload) = server_read.read_message(&controller).await.unwrap();
+        let (message_type, payload) = server_read.read_message(controller).await.unwrap();
         println!("server read done");
         assert_eq!(MessageType::Data, message_type);
         assert_eq!(buf.as_ref(), payload);
 
-        server_write.write_data(&controller, payload).await.unwrap();
+        server_write.write_data(controller, payload).await.unwrap();
         println!("server write done");
-        let (message_type, payload) = client_read.read_message(&controller).await.unwrap();
+        let (message_type, payload) = client_read.read_message(controller).await.unwrap();
         println!("client read done");
         assert_eq!(MessageType::Data, message_type);
         assert_eq!(buf.as_ref(), payload);
@@ -1372,7 +1368,7 @@ mod tests {
         tokio::join!(
             async move {
                 let (mut read_half, mut write_half) = client_handshake(
-                    &controller,
+                    controller,
                     client.reader,
                     client.writer,
                     client_singer,
@@ -1386,7 +1382,7 @@ mod tests {
                 tokio::join!(
                     async move {
                         copy_encrypted_bidirectional(
-                            &controller,
+                            controller,
                             &mut read_half,
                             &mut write_half,
                             &mut local_server.reader,
@@ -1400,14 +1396,14 @@ mod tests {
                             const EXPECTED: &[u8] = b"Hello world";
                             local_client
                                 .writer
-                                .write_all(&controller, EXPECTED)
+                                .write_all(controller, EXPECTED)
                                 .await
                                 .unwrap();
                             println!("peer write done");
                             let mut buf = [0u8; EXPECTED.len()];
                             peer_client
                                 .reader
-                                .read_exact(&controller, &mut buf)
+                                .read_exact(controller, &mut buf)
                                 .await
                                 .unwrap();
                             println!("peer read done");
@@ -1422,7 +1418,7 @@ mod tests {
             },
             async move {
                 let (mut read_half, mut write_half) = server_handshake(
-                    &controller,
+                    controller,
                     server.reader,
                     server.writer,
                     server_singer,
@@ -1439,7 +1435,7 @@ mod tests {
                 tokio::join!(
                     async move {
                         copy_encrypted_bidirectional(
-                            &controller,
+                            controller,
                             &mut read_half,
                             &mut write_half,
                             &mut peer_server.reader,
@@ -1453,14 +1449,14 @@ mod tests {
                             const EXPECTED: &[u8] = b"Hello world";
                             peer_client
                                 .writer
-                                .write_all(&controller, EXPECTED)
+                                .write_all(controller, EXPECTED)
                                 .await
                                 .unwrap();
                             println!("local write done");
                             let mut buf = [0u8; EXPECTED.len()];
                             local_client
                                 .reader
-                                .read_exact(&controller, &mut buf)
+                                .read_exact(controller, &mut buf)
                                 .await
                                 .unwrap();
                             println!("local read done");

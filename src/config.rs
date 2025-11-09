@@ -99,7 +99,7 @@ fn check_config_perm(path: &str) -> anyhow::Result<()> {
                 perm,
             )));
         }
-        return Ok(());
+        Ok(())
     }
 
     // On Windows, we check if the file is readable and writable only by the owner

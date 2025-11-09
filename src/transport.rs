@@ -8,7 +8,6 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use serde::de::{Deserialize, Deserializer, Visitor};
-use socket2;
 use socket2::TcpKeepalive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -34,12 +33,8 @@ impl Reader {
     pub async fn read(&mut self, controller: &Controller, buf: &mut [u8]) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
-            _ = controller.wait_cancel() => {
-                return Err(cancel_error());
-            }
-            r = self.inner.read(buf) => {
-                return r;
-            }
+            _ = controller.wait_cancel() => Err(cancel_error()),
+            r = self.inner.read(buf) => r,
         }
     }
     #[inline]
@@ -50,12 +45,8 @@ impl Reader {
     ) -> io::Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
-            _ = controller.wait_cancel() => {
-                return Err(cancel_error());
-            }
-            r = self.inner.read_exact(buf) => {
-                return r;
-            }
+            _ = controller.wait_cancel() => Err(cancel_error()),
+            r = self.inner.read_exact(buf) => r,
         }
     }
     #[inline]
@@ -82,7 +73,7 @@ impl fmt::Display for Writer {
 
 #[inline]
 pub fn cancel_error() -> io::Error {
-    io::Error::new(io::ErrorKind::Other, "controller cancelled")
+    io::Error::other("controller cancelled")
 }
 
 impl Writer {
@@ -90,12 +81,8 @@ impl Writer {
     pub async fn write_all(&mut self, controller: &Controller, data: &[u8]) -> io::Result<()> {
         assert_ne!(data.len(), 0);
         tokio::select! {
-            _ = controller.wait_cancel() => {
-                return Err(cancel_error());
-            }
-            r = self.inner.write_all(data) => {
-                return r;
-            }
+            _ = controller.wait_cancel() => Err(cancel_error()),
+            r = self.inner.write_all(data) => r,
         }
     }
     #[inline]
@@ -109,30 +96,30 @@ impl Writer {
 }
 
 enum ReadInner {
-    TCP(OwnedReadHalf),
+    Tcp(OwnedReadHalf),
 }
 
 impl ReadInner {
     pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            ReadInner::TCP(s) => s.read(buf).await,
+            ReadInner::Tcp(s) => s.read(buf).await,
         }
     }
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
-            ReadInner::TCP(s) => s.read_exact(buf).await,
+            ReadInner::Tcp(s) => s.read_exact(buf).await,
         }
     }
 }
 
 enum WriteInner {
-    TCP(OwnedWriteHalf),
+    Tcp(OwnedWriteHalf),
 }
 
 impl WriteInner {
     pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
         match self {
-            WriteInner::TCP(s) => s.write_all(data).await,
+            WriteInner::Tcp(s) => s.write_all(data).await,
         }
     }
 }
@@ -160,12 +147,12 @@ impl Stream {
         let (r, w) = stream.into_split();
         Stream {
             reader: Reader {
-                inner: ReadInner::TCP(r),
+                inner: ReadInner::Tcp(r),
                 local_addr,
                 peer_addr,
             },
             writer: Writer {
-                inner: WriteInner::TCP(w),
+                inner: WriteInner::Tcp(w),
                 local_addr,
                 peer_addr,
             },
@@ -186,13 +173,13 @@ impl Stream {
 }
 
 pub enum Listener {
-    TCP(TcpListener),
+    Tcp(TcpListener),
 }
 
 impl fmt::Display for Listener {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Listener::TCP(s) => {
+            Listener::Tcp(s) => {
                 let addr = s.local_addr().unwrap();
                 write!(f, "{}", addr)
             }
@@ -203,18 +190,14 @@ impl fmt::Display for Listener {
 impl Listener {
     pub async fn accept(&mut self, controller: &Controller) -> io::Result<Stream> {
         tokio::select! {
-            _ = controller.wait_cancel() => {
-                return Err(cancel_error());
-            }
-            r = self.accept_impl() => {
-                return r;
-            }
+            _ = controller.wait_cancel() => Err(cancel_error()),
+            r = self.accept_impl() => r,
         }
     }
 
-    async fn accept_impl(self: &mut Self) -> io::Result<Stream> {
+    async fn accept_impl(&mut self) -> io::Result<Stream> {
         match self {
-            Listener::TCP(s) => {
+            Listener::Tcp(s) => {
                 let (stream, _) = s.accept().await?;
                 let stream = set_keepalive(stream)?;
                 Ok(Stream::from_tcp_stream(stream))
@@ -225,13 +208,13 @@ impl Listener {
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub enum Address {
-    TCP(SocketAddr),
+    Tcp(SocketAddr),
 }
 
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Address::TCP(a) => {
+            Address::Tcp(a) => {
                 write!(f, "tcp://{}", a)
             }
         }
@@ -241,7 +224,7 @@ impl fmt::Display for Address {
 impl Address {
     pub fn as_string(&self) -> String {
         match self {
-            Address::TCP(a) => {
+            Address::Tcp(a) => {
                 format!("tcp://{}", a)
             }
         }
@@ -261,23 +244,19 @@ impl Address {
         .to_socket_addrs()?;
         let addr = iter.next().ok_or(anyhow!("Invalid address"))?;
 
-        Ok(Address::TCP(addr))
+        Ok(Address::Tcp(addr))
     }
 
     pub async fn connect_to(&self, controller: &Controller) -> io::Result<Stream> {
         tokio::select! {
-            _ = controller.wait_cancel() => {
-                return Err(cancel_error());
-            }
-            r = self.connect_to_impl() => {
-                return r;
-            }
+            _ = controller.wait_cancel() => Err(cancel_error()),
+            r = self.connect_to_impl() => r,
         }
     }
 
-    async fn connect_to_impl(self: &Self) -> io::Result<Stream> {
+    async fn connect_to_impl(&self) -> io::Result<Stream> {
         match self {
-            Address::TCP(a) => {
+            Address::Tcp(a) => {
                 let stream = TcpStream::connect(a).await?;
                 let stream = set_keepalive(stream)?;
                 Ok(Stream::from_tcp_stream(stream))
@@ -288,19 +267,17 @@ impl Address {
     pub async fn listen_to(&self, controller: &Controller) -> io::Result<Listener> {
         tokio::select! {
             _ = controller.wait_cancel() => {
-                return Err(cancel_error());
+                Err(cancel_error())
             }
-            r = self.listen_to_impl() => {
-                return r;
-            }
+            r = self.listen_to_impl() => r
         }
     }
 
-    async fn listen_to_impl(self: &Self) -> io::Result<Listener> {
+    async fn listen_to_impl(&self) -> io::Result<Listener> {
         match self {
-            Address::TCP(a) => {
+            Address::Tcp(a) => {
                 let listener = TcpListener::bind(a).await?;
-                Ok(Listener::TCP(listener))
+                Ok(Listener::Tcp(listener))
             }
         }
     }
@@ -351,7 +328,7 @@ impl<'de> Deserialize<'de> for Address {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_str(AddressVisitor::default())
+        deserializer.deserialize_str(AddressVisitor)
     }
 }
 
@@ -400,11 +377,8 @@ impl Controller {
     pub fn cancel_all(&self) {
         self.cancel();
         let father = self.father.clone();
-        match father {
-            Some(father) => {
-                father.cancel_all();
-            }
-            None => {}
+        if let Some(father) = father {
+            father.cancel_all();
         }
     }
 

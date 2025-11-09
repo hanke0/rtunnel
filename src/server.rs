@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use async_channel;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 use tokio::time::timeout;
@@ -167,11 +166,10 @@ async fn start_service(
 }
 
 fn is_critical_listener_error(io_error: &io::Error) -> bool {
-    match io_error.kind() {
-        io::ErrorKind::WouldBlock => return false,
-        io::ErrorKind::Interrupted => return false,
-        _ => return true,
-    }
+    !matches!(
+        io_error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
 }
 
 async fn handle_service_stream(
