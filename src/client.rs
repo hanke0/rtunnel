@@ -191,9 +191,6 @@ async fn keep_client_connections(
                 ));
             }
             current += pending;
-            // give the new connections a chance to start before checking
-            // wait counter to settle.
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 }
