@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -313,7 +312,9 @@ async fn handle_relay_impl(
     write_half: &mut WriteSession,
     allows: &HashSet<Address>,
 ) -> Result<(usize, usize)> {
-    let addr: Address = read_half.read_connect_message(controller).await?;
+    let addr: Address = read_half
+        .wait_connect_message(controller, write_half)
+        .await?;
     debug!("tunnel connect message has read: {}", &addr);
     if !allows.contains(&addr) {
         return Err(anyhow!("Address not allowed: {}", &addr));

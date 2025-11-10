@@ -1,31 +1,175 @@
+use std::collections::BTreeMap;
+use std::fmt;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
-use tokio::time::timeout;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc::{self, Receiver};
+use tokio::time::{self, Duration};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::ServerConfig;
 use crate::encryption::{
     ReadSession, WriteSession, copy_encrypted_bidirectional, server_handshake,
 };
 use crate::encryption::{decode_signing_key, decode_verifying_key, is_relay_critical_error};
-use crate::transport::{Address, Controller, Listener, Stream};
+use crate::transport::{Address, Controller, Listener, Stream, cancel_error};
 
 struct ServerOptions {
     verifier: VerifyingKey,
     signer: SigningKey,
-    receiver: SessionReceiver,
+    pool: TunnelPool,
 }
 
-type SessionReceiver = async_channel::Receiver<(ReadSession, WriteSession)>;
-type SessionSender = async_channel::Sender<(ReadSession, WriteSession)>;
-
 impl ServerOptions {
-    async fn pop_stream(&self) -> (ReadSession, WriteSession) {
+    #[inline]
+    async fn pop_stream(&self) -> Result<(ReadSession, WriteSession)> {
+        self.pool.pop().await
+    }
+
+    #[inline]
+    async fn push_stream(&self, controller: Controller, reader: ReadSession, writer: WriteSession) {
+        self.pool.clone().add(controller, reader, writer).await
+    }
+}
+
+struct Session {
+    id: String,
+    cancel_token: CancellationToken,
+    receiver: Receiver<Result<(ReadSession, WriteSession)>>,
+}
+
+impl Ord for Session {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.id.cmp(&other.id)
+    }
+}
+
+impl PartialEq for Session {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for Session {}
+
+impl PartialOrd for Session {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        self.receiver.close();
+    }
+}
+
+impl fmt::Display for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.id)
+    }
+}
+
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.id)
+    }
+}
+
+impl Session {
+    async fn join(mut self) -> Result<(ReadSession, WriteSession)> {
+        self.cancel_token.cancel();
         self.receiver.recv().await.unwrap()
+    }
+}
+
+async fn keep_alive(
+    controller: Controller,
+    stopped: CancellationToken,
+    mut reader: ReadSession,
+    mut writer: WriteSession,
+) -> Result<(ReadSession, WriteSession)> {
+    let interval = &mut time::interval(Duration::from_secs(5));
+    while !stopped.is_cancelled() {
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return Err(anyhow!(cancel_error()));
+            },
+            _ = stopped.cancelled() => {
+                break;
+            }
+            _ = interval.tick() => {
+                writer.write_ping(&controller).await?;
+                reader.read_ping(&controller).await?;
+                interval.reset();
+            }
+        }
+    }
+    Ok((reader, writer))
+}
+
+struct TunnelPool(Arc<TunnelPoolInner>);
+
+struct TunnelPoolInner {
+    sessions: Mutex<BTreeMap<String, Session>>,
+}
+
+impl Clone for TunnelPool {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl TunnelPool {
+    fn new() -> Self {
+        Self(Arc::new(TunnelPoolInner {
+            sessions: Mutex::new(BTreeMap::new()),
+        }))
+    }
+
+    async fn add(self, controller: Controller, reader: ReadSession, writer: WriteSession) {
+        let cancel_token = CancellationToken::new();
+        let id = format!("{}", reader);
+        let (sender, receiver) = mpsc::channel(1);
+        let sender_token = cancel_token.clone();
+        let session = Session {
+            id: id.clone(),
+            cancel_token,
+            receiver,
+        };
+        self.0.sessions.lock().await.insert(id.clone(), session);
+        tokio::spawn(async move {
+            let r = keep_alive(controller, sender_token, reader, writer).await;
+            match r {
+                Ok(_) => {
+                    sender.send(r).await.unwrap();
+                }
+                Err(e) => {
+                    if is_relay_critical_error(&e) {
+                        error!("{} keep alive critical error: {}", id, e);
+                    } else {
+                        info!("{} keep alive non-critical error: {}", id, e);
+                    }
+                    self.remove(&id).await;
+                }
+            }
+        });
+    }
+
+    async fn remove(&self, id: &String) {
+        self.0.sessions.lock().await.remove(id);
+    }
+
+    pub async fn pop(&self) -> Result<(ReadSession, WriteSession)> {
+        match self.0.sessions.lock().await.pop_first() {
+            Some((_, session)) => session.join().await,
+            None => Err(anyhow!("pool is empty")),
+        }
     }
 }
 
@@ -37,17 +181,15 @@ pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result
 
     let listener = cfg.listen.listen_to(controller).await?;
     info!("server listening on {}", cfg.listen);
-    let (sender, receiver) = async_channel::unbounded();
     let options = &Arc::new(ServerOptions {
         verifier,
         signer,
-        receiver,
+        pool: TunnelPool::new(),
     });
     controller.spawn(start_tunnel(
         controller.children(),
         listener,
         options.clone(),
-        sender,
     ));
     for s in cfg.services.iter() {
         let listener = s.bind_to.listen_to(controller).await?;
@@ -62,22 +204,12 @@ pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result
     Ok(())
 }
 
-async fn start_tunnel(
-    controller: Controller,
-    mut listener: Listener,
-    options: ServerOptionsRef,
-    sender: SessionSender,
-) {
+async fn start_tunnel(controller: Controller, mut listener: Listener, options: ServerOptionsRef) {
     let controller = &controller;
     loop {
         match listener.accept(controller).await {
             Ok(stream) => {
-                controller.spawn(handle_tunnel(
-                    controller.clone(),
-                    stream,
-                    options.clone(),
-                    sender.clone(),
-                ));
+                controller.spawn(handle_tunnel(controller.clone(), stream, options.clone()));
             }
             Err(e) => {
                 if is_critical_listener_error(&e) {
@@ -96,14 +228,9 @@ async fn start_tunnel(
     controller.wait().await;
 }
 
-async fn handle_tunnel(
-    controller: Controller,
-    stream: Stream,
-    options: ServerOptionsRef,
-    sender: SessionSender,
-) {
+async fn handle_tunnel(controller: Controller, stream: Stream, options: ServerOptionsRef) {
     let peer = stream.reader.peer_addr();
-    match handle_tunnel_impl(&controller, stream, &options, &sender).await {
+    match handle_tunnel_impl(&controller, stream, &options).await {
         Ok(_) => {
             debug!("new tunnel session created: {}", peer);
         }
@@ -117,9 +244,8 @@ async fn handle_tunnel_impl(
     controller: &Controller,
     stream: Stream,
     options: &ServerOptionsRef,
-    sender: &SessionSender,
 ) -> Result<()> {
-    let rsp = server_handshake(
+    let (reader, writer) = server_handshake(
         controller,
         stream.reader,
         stream.writer,
@@ -127,7 +253,9 @@ async fn handle_tunnel_impl(
         &options.verifier,
     )
     .await?;
-    sender.send(rsp).await?;
+    options
+        .push_stream(controller.clone(), reader, writer)
+        .await;
     Ok(())
 }
 
@@ -178,20 +306,20 @@ async fn handle_service_stream(
     options: ServerOptionsRef,
     connect_to: Address,
 ) {
-    let repr = format!("{}", stream);
-    debug!("new service stream connected: {}", repr);
+    let debug = format!("{}", stream);
+    debug!("new service stream connected: {}", debug);
     match handle_service_stream_impl(&controller, stream, &options, &connect_to).await {
         Ok((read, write)) => {
             info!(
                 "stream {} closed and has read {} bytes and wrote {} bytes",
-                repr, read, write
+                debug, read, write
             );
         }
         Err(e) => {
             if is_relay_critical_error(&e) {
-                error!("stream {} relay critical error: {:#}", repr, e);
+                error!("stream {} relay critical error: {:#}", debug, e);
             } else {
-                info!("stream {} relay non-critical error: {:#}", repr, e);
+                info!("stream {} relay non-critical error: {:#}", debug, e);
             }
         }
     };
@@ -241,13 +369,7 @@ async fn get_a_useable_connection_impl(
     stream: &mut Stream,
     connect_to: &Address,
 ) -> Result<(ReadSession, WriteSession)> {
-    let (mut read_half, mut write_half) =
-        match timeout(Duration::from_secs(1), options.pop_stream()).await {
-            Ok(rsp) => rsp,
-            Err(_) => {
-                return Err(anyhow!("timeout to get a relay session after 1 second"));
-            }
-        };
+    let (mut read_half, mut write_half) = options.pop_stream().await?;
 
     debug!("stream got a tunnel: {}->{}", stream, read_half);
     write_half
@@ -257,7 +379,9 @@ async fn get_a_useable_connection_impl(
         "tunnel connect message has sent, wait connect message reply: {}->{}",
         stream, read_half,
     );
-    read_half.read_connect_message(controller).await?;
+    read_half
+        .wait_connect_message(controller, &mut write_half)
+        .await?;
     debug!(
         "tunnel connect message has received, relay started: {}->{}",
         stream, read_half,

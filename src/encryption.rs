@@ -567,26 +567,6 @@ impl Encryption {
         Ok(self.message.as_ref())
     }
 
-    async fn handle_specific_message<T, F: FnOnce(&[u8]) -> Result<T>>(
-        &mut self,
-        controller: &Controller,
-        reader: &mut Reader,
-        expect_type: MessageType,
-        f: F,
-    ) -> Result<T> {
-        self.message.read_from_inplace(controller, reader).await?;
-        self.decrypt_inplace()?;
-        let typ = self.message.get_type();
-        if typ != expect_type {
-            return Err(anyhow!(
-                "Unexpected message type: {} != {}",
-                typ,
-                expect_type
-            ));
-        }
-        f(self.message.get_payload())
-    }
-
     fn decrypt_inplace(&mut self) -> Result<()> {
         let message = &mut self.message;
         let nonce = self.sequence.xor_secret_iv(&self.secret_iv);
@@ -636,15 +616,42 @@ impl ReadSession {
         Self { reader, encryption }
     }
 
-    pub async fn read_connect_message(&mut self, controller: &Controller) -> Result<Address> {
-        self.encryption
-            .handle_specific_message(
-                controller,
-                &mut self.reader,
-                MessageType::Connect,
-                Address::from_bytes,
-            )
-            .await
+    pub async fn read_ping(&mut self, controller: &Controller) -> Result<()> {
+        let (typ, _) = self
+            .encryption
+            .read_message(controller, &mut self.reader)
+            .await?;
+        match typ {
+            MessageType::Ping => Ok(()),
+            _ => Err(anyhow!("Unexpected message type: {}", typ)),
+        }
+    }
+
+    pub async fn wait_connect_message(
+        &mut self,
+        controller: &Controller,
+        writer: &mut WriteSession,
+    ) -> Result<Address> {
+        loop {
+            let (typ, payload) = self
+                .encryption
+                .read_message(controller, &mut self.reader)
+                .await?;
+            match typ {
+                MessageType::Connect => return Address::from_bytes(payload),
+                MessageType::Ping => {
+                    match writer
+                        .write_ping(controller)
+                        .await
+                        .context("Failed to write ping")
+                    {
+                        Ok(()) => continue,
+                        Err(err) => return Err(err),
+                    }
+                }
+                _ => return Err(anyhow!("Unexpected message type: {}", typ)),
+            };
+        }
     }
 
     #[inline]
@@ -739,6 +746,14 @@ impl fmt::Display for WriteSession {
 impl WriteSession {
     pub fn new(writer: Writer, encryption: Encryption) -> Self {
         Self { writer, encryption }
+    }
+
+    pub async fn write_ping(&mut self, controller: &Controller) -> Result<()> {
+        let data = self.encryption.replace_payload(MessageType::Ping, &[])?;
+        self.writer
+            .write_all(controller, data)
+            .await
+            .context("Failed to write ping message to stream")
     }
 
     pub async fn write_connect_message(
@@ -1235,14 +1250,20 @@ mod tests {
             .write_connect_message(controller, &address)
             .await
             .unwrap();
-        let recv = client_read.read_connect_message(controller).await.unwrap();
+        let recv = client_read
+            .wait_connect_message(controller, &mut client_write)
+            .await
+            .unwrap();
         assert_eq!(address, recv);
 
         client_write
             .write_connect_message(controller, &address)
             .await
             .unwrap();
-        let recv = server_read.read_connect_message(controller).await.unwrap();
+        let recv = server_read
+            .wait_connect_message(controller, &mut server_write)
+            .await
+            .unwrap();
         assert_eq!(address, recv);
     }
 
@@ -1384,7 +1405,10 @@ mod tests {
                 .await
                 .unwrap();
                 println!("Client handshake done");
-                read_half.read_connect_message(controller).await.unwrap();
+                read_half
+                    .wait_connect_message(controller, &mut write_half)
+                    .await
+                    .unwrap();
                 println!("Client read connect message done");
                 tokio::join!(
                     async move {
