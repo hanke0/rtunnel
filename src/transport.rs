@@ -2,11 +2,8 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
-use std::result::Result::Ok;
 use std::time::Duration;
 
-use anyhow::Result;
-use anyhow::anyhow;
 use serde::de::{Deserialize, Deserializer, Visitor};
 use socket2::TcpKeepalive;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -15,6 +12,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+
+use crate::anyerror;
+use crate::errors::{self, Result, cancel_error, from_io_error};
 
 pub struct Reader {
     inner: ReadInner,
@@ -30,23 +30,19 @@ impl fmt::Display for Reader {
 
 impl Reader {
     #[inline]
-    pub async fn read(&mut self, controller: &Controller, buf: &mut [u8]) -> io::Result<usize> {
+    pub async fn read(&mut self, controller: &Controller, buf: &mut [u8]) -> Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
-            r = self.inner.read(buf) => r,
+            r = self.inner.read(buf) => r.map_err(from_io_error),
         }
     }
     #[inline]
-    pub async fn read_exact(
-        &mut self,
-        controller: &Controller,
-        buf: &mut [u8],
-    ) -> io::Result<usize> {
+    pub async fn read_exact(&mut self, controller: &Controller, buf: &mut [u8]) -> Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
-            r = self.inner.read_exact(buf) => r,
+            r = self.inner.read_exact(buf) => r.map_err(from_io_error),
         }
     }
     #[inline]
@@ -71,18 +67,13 @@ impl fmt::Display for Writer {
     }
 }
 
-#[inline]
-pub fn cancel_error() -> io::Error {
-    io::Error::other("controller cancelled")
-}
-
 impl Writer {
     #[inline]
-    pub async fn write_all(&mut self, controller: &Controller, data: &[u8]) -> io::Result<()> {
+    pub async fn write_all(&mut self, controller: &Controller, data: &[u8]) -> Result<()> {
         assert_ne!(data.len(), 0);
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
-            r = self.inner.write_all(data) => r,
+            r = self.inner.write_all(data) => r.map_err(from_io_error),
         }
     }
     #[inline]
@@ -188,14 +179,14 @@ impl fmt::Display for Listener {
 }
 
 impl Listener {
-    pub async fn accept(&mut self, controller: &Controller) -> io::Result<Stream> {
+    pub async fn accept(&mut self, controller: &Controller) -> Result<Stream> {
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
             r = self.accept_impl() => r,
         }
     }
 
-    async fn accept_impl(&mut self) -> io::Result<Stream> {
+    async fn accept_impl(&mut self) -> Result<Stream> {
         match self {
             Listener::Tcp(s) => {
                 let (stream, _) = s.accept().await?;
@@ -242,19 +233,21 @@ impl Address {
             raw
         }
         .to_socket_addrs()?;
-        let addr = iter.next().ok_or(anyhow!("Invalid address"))?;
+        let addr = iter
+            .next()
+            .ok_or_else(|| errors::anyerror!("Invalid address {}", raw))?;
 
         Ok(Address::Tcp(addr))
     }
 
-    pub async fn connect_to(&self, controller: &Controller) -> io::Result<Stream> {
+    pub async fn connect_to(&self, controller: &Controller) -> Result<Stream> {
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
             r = self.connect_to_impl() => r,
         }
     }
 
-    async fn connect_to_impl(&self) -> io::Result<Stream> {
+    async fn connect_to_impl(&self) -> Result<Stream> {
         match self {
             Address::Tcp(a) => {
                 let stream = TcpStream::connect(a).await?;
@@ -264,7 +257,7 @@ impl Address {
         }
     }
 
-    pub async fn listen_to(&self, controller: &Controller) -> io::Result<Listener> {
+    pub async fn listen_to(&self, controller: &Controller) -> Result<Listener> {
         tokio::select! {
             _ = controller.wait_cancel() => {
                 Err(cancel_error())
@@ -273,7 +266,7 @@ impl Address {
         }
     }
 
-    async fn listen_to_impl(&self) -> io::Result<Listener> {
+    async fn listen_to_impl(&self) -> Result<Listener> {
         match self {
             Address::Tcp(a) => {
                 let listener = TcpListener::bind(a).await?;
@@ -283,7 +276,7 @@ impl Address {
     }
 }
 
-fn set_keepalive(stream: TcpStream) -> io::Result<TcpStream> {
+fn set_keepalive(stream: TcpStream) -> Result<TcpStream> {
     let stream: std::net::TcpStream = stream.into_std().unwrap();
     let socket: socket2::Socket = socket2::Socket::from(stream);
     let keepalive = TcpKeepalive::new()
@@ -292,7 +285,7 @@ fn set_keepalive(stream: TcpStream) -> io::Result<TcpStream> {
     socket.set_tcp_keepalive(&keepalive)?;
     let stream: std::net::TcpStream = socket.into();
 
-    tokio::net::TcpStream::from_std(stream)
+    tokio::net::TcpStream::from_std(stream).map_err(from_io_error)
 }
 
 struct AddressVisitor;
