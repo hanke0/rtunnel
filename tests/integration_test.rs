@@ -3,6 +3,7 @@ use std::string::String;
 use std::time::Duration;
 
 use clap::Parser;
+use log::LevelFilter;
 use tokio::io;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -16,10 +17,13 @@ use rtunnel::{Cli, Controller, run};
 
 #[tokio::test]
 async fn test_integration() {
-    let _ = env_logger::builder().is_test(true).try_init();
+    let _ = env_logger::builder()
+        .filter_level(LevelFilter::Debug)
+        .is_test(true)
+        .try_init();
 
     let controller = Controller::new();
-    let server_controller = controller.clone();
+    let server_controller = controller.children();
     let server_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
@@ -28,11 +32,12 @@ async fn test_integration() {
             "rtunnel.toml".into(),
         ];
         let options = Cli::parse_from(args);
-        run(&server_controller, options).await
+        let code = run(&server_controller, options).await;
+        assert_eq!(code, 0);
     });
 
     sleep(Duration::from_secs(1)).await;
-    let client_controller = controller.clone();
+    let client_controller = controller.children();
     let client_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
@@ -41,11 +46,14 @@ async fn test_integration() {
             "rtunnel.toml".into(),
         ];
         let options = Cli::parse_from(args);
-        run(&client_controller, options).await
+        let code = run(&client_controller, options).await;
+        assert_eq!(code, 0);
     });
 
+    sleep(Duration::from_secs(1)).await;
+
     let listener = TcpListener::bind("127.0.0.1:2335").await.unwrap();
-    let listen_controller = controller.clone();
+    let listen_controller = controller.children();
     let listen_handle = spawn(async move {
         loop {
             tokio::select! {

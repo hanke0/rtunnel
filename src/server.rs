@@ -6,7 +6,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, Receiver};
-use tokio::time::{self, Duration};
+use tokio::time::{self, Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ServerConfig;
@@ -167,10 +167,15 @@ impl TunnelPool {
     }
 
     pub async fn pop(&self) -> Result<(ReadSession, WriteSession)> {
-        match self.0.sessions.lock().await.pop_first() {
-            Some((_, session)) => session.join().await,
-            None => Err(errors::format_err!("pool is empty")),
+        for _ in 0..3 {
+            match self.0.sessions.lock().await.pop_first() {
+                Some((_, session)) => return session.join().await,
+                None => {
+                    sleep(Duration::from_millis(100)).await;
+                }
+            }
         }
+        Err(errors::format_err!("pool is empty"))
     }
 }
 
