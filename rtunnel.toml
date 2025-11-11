@@ -1,0 +1,20 @@
+[[servers]]
+private_key = "uE+2dhGEHxVLJEptRoEPhVpeLtJqNEX3RM6ByaXqemQ="
+public_key = "bh+EMDlM9A22kKMXkDDuJccIbquijyZEPXrFJ+U/oC0="
+client_public_key = "GppxhbAp2d9SyXS7lpe5aSgnbXHqQ0R+dYmXOH5ECe0="
+listen = "tcp://127.0.0.1:2333"
+
+services = [
+    { bind_to = "tcp://127.0.0.1:2334", connect_to = "tcp://127.0.0.1:2335" },
+]
+
+[[clients]]
+private_key = "NRyjopuplZotXr3yCtC1Vr7Cy+XqIZewHvz1WINxFLA="
+public_key = "GppxhbAp2d9SyXS7lpe5aSgnbXHqQ0R+dYmXOH5ECe0="
+server_public_key = "bh+EMDlM9A22kKMXkDDuJccIbquijyZEPXrFJ+U/oC0="
+
+server_address = "tcp://127.0.0.1:2333"
+
+services = [
+    { bind_to = "tcp://127.0.0.1:2334", connect_to = "tcp://127.0.0.1:2335" },
+]

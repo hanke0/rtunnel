@@ -31,7 +31,7 @@ async fn test_integration() {
         run(&server_controller, options).await
     });
 
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(1)).await;
     let client_controller = controller.clone();
     let client_handle = spawn(async move {
         let args: Vec<String> = vec![
@@ -69,7 +69,7 @@ async fn test_integration() {
         }
     });
 
-    sleep(Duration::from_secs(10)).await;
+    sleep(Duration::from_secs(1)).await;
 
     let mut set = JoinSet::new();
     for _ in 0..10 {
