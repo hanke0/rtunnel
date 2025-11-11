@@ -13,7 +13,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::anyerror;
 use crate::errors::{self, Result, cancel_error, from_io_error};
 
 pub struct Reader {
@@ -235,7 +234,7 @@ impl Address {
         .to_socket_addrs()?;
         let addr = iter
             .next()
-            .ok_or_else(|| errors::anyerror!("Invalid address {}", raw))?;
+            .ok_or_else(|| errors::format_err!("Invalid address {}", raw))?;
 
         Ok(Address::Tcp(addr))
     }

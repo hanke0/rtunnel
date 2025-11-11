@@ -1,12 +1,10 @@
 use std::array;
 use std::fmt;
-use std::io;
 
 use aes_gcm::{
     Aes256Gcm,
     aead::{AeadMutInPlace, KeyInit},
 };
-use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
 use bytes::{BufMut, BytesMut};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -16,6 +14,7 @@ use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
 
+use crate::errors::{self, Context, Result, is_relay_critical_error};
 use crate::transport::{Address, Controller, Reader, Writer};
 
 type PrivateKey = [u8; 32];
@@ -59,7 +58,7 @@ impl MessageType {
             Self::CONNECT => Ok(MessageType::Connect),
             Self::DATA => Ok(MessageType::Data),
             Self::PING => Ok(MessageType::Ping),
-            _ => Err(anyhow!("Invalid message type: {}", msg_type)),
+            _ => Err(errors::format_err!("Invalid message type: {}", msg_type)),
         }
     }
 
@@ -284,6 +283,7 @@ impl HelloMessage {
                 buf.put_slice(random);
                 let signature = signer
                     .try_sign(buf)
+                    .map_err(errors::from_error)
                     .context("Failed to sign client hello")?;
                 buf.put_slice(signature.r_bytes());
                 buf.put_slice(signature.s_bytes());
@@ -319,11 +319,15 @@ impl HelloMessage {
     fn verify(&self, verifier: &VerifyingKey) -> Result<()> {
         let payload = self.0.get_payload();
         if payload.len() != Self::SIZE {
-            return Err(anyhow!("Invalid hello msg length: {}", payload.len()));
+            return Err(errors::format_err!(
+                "Invalid hello msg length: {}",
+                payload.len()
+            ));
         }
         let signature = self.get_signature();
         verifier
             .verify_strict(self.get_verify_part(), &signature)
+            .map_err(errors::from_error)
             .context("Failed to verify hello message signature")?;
         Ok(())
     }
@@ -340,6 +344,7 @@ fn generate_random_array<const N: usize>() -> Result<[u8; N]> {
     let mut random = [0u8; N];
     OsRng
         .try_fill_bytes(random.as_mut())
+        .map_err(errors::from_error)
         .context("Failed to generate random bytes")?;
     Ok(random)
 }
@@ -382,7 +387,7 @@ pub async fn client_handshake(
     mut writer: Writer,
     signer: &SigningKey,
     verifier: &VerifyingKey,
-) -> anyhow::Result<(ReadSession, WriteSession)> {
+) -> Result<(ReadSession, WriteSession)> {
     let ephemeral_private = ECDHPrivate::random();
     let ephemeral_public = ECDHPublic::from(&ephemeral_private);
     let client_random = generate_random()?;
@@ -412,7 +417,7 @@ pub async fn server_handshake(
     mut writer: Writer,
     signer: &SigningKey,
     verifier: &VerifyingKey,
-) -> anyhow::Result<(ReadSession, WriteSession)> {
+) -> Result<(ReadSession, WriteSession)> {
     let ephemeral_private = ECDHPrivate::random();
     let ephemeral_public = ECDHPublic::from(&ephemeral_private);
     let server_random = generate_random()?;
@@ -576,6 +581,7 @@ impl Encryption {
         message.rewrite_payload(message.get_type(), move |buf| {
             cipher
                 .decrypt_in_place(&nonce.into(), associated_data, buf)
+                .map_err(errors::from_error)
                 .context("Failed to decrypt message")
         })?;
         assert_eq!(self.message.get_type(), typ);
@@ -592,6 +598,7 @@ impl Encryption {
         message.rewrite_payload(msg_type, |payload| {
             cipher
                 .encrypt_in_place(&nonce.into(), associated_data, payload)
+                .map_err(errors::from_error)
                 .context("Failed to encrypt message")
         })?;
         assert_eq!(self.message.get_type(), msg_type);
@@ -623,7 +630,7 @@ impl ReadSession {
             .await?;
         match typ {
             MessageType::Ping => Ok(()),
-            _ => Err(anyhow!("Unexpected message type: {}", typ)),
+            _ => Err(errors::format_err!("Unexpected message type: {}", typ)),
         }
     }
 
@@ -649,7 +656,7 @@ impl ReadSession {
                         Err(err) => return Err(err),
                     }
                 }
-                _ => return Err(anyhow!("Unexpected message type: {}", typ)),
+                _ => return Err(errors::format_err!("Unexpected message type: {}", typ)),
             };
         }
     }
@@ -709,7 +716,7 @@ impl ReadSession {
     ) -> Result<usize> {
         let (typ, buf) = self.read_message(controller).await?;
         if typ != MessageType::Data {
-            return Err(anyhow!("Unexpected message type: {}", typ));
+            return Err(errors::format_err!("Unexpected message type: {}", typ));
         }
         writer
             .write_all(controller, buf)
@@ -717,19 +724,6 @@ impl ReadSession {
             .context("Failed to write to stream")?;
         Ok(buf.len())
     }
-}
-
-pub fn is_relay_critical_error(error: &anyhow::Error) -> bool {
-    for cause in error.chain() {
-        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
-            match io_error.kind() {
-                io::ErrorKind::UnexpectedEof => return false,
-                io::ErrorKind::Other => return false,
-                _ => return true,
-            }
-        }
-    }
-    true
 }
 
 pub struct WriteSession {
@@ -950,11 +944,11 @@ impl KeyPair {
     }
 }
 
-fn vec_to_array<const N: usize>(v: Vec<u8>) -> anyhow::Result<[u8; N]> {
+fn vec_to_array<const N: usize>(v: Vec<u8>) -> Result<[u8; N]> {
     let r = v.try_into();
     match r {
         Ok(a) => Ok(a),
-        Err(e) => Err(anyhow::anyhow!(
+        Err(e) => Err(errors::format_err!(
             "key length is mismatch: expect {} got {}",
             N,
             e.len()
@@ -964,9 +958,12 @@ fn vec_to_array<const N: usize>(v: Vec<u8>) -> anyhow::Result<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
-    use crate::transport::Stream;
+    use ntest::timeout;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::sync::mpsc::channel;
 
     use super::*;
+    use crate::transport::Stream;
 
     #[test]
     fn test_split_off() {
@@ -1035,11 +1032,6 @@ mod tests {
             server_hello.get_signature().to_bytes()
         );
     }
-
-    use ntest::timeout;
-
-    use tokio::net::{TcpListener, TcpStream};
-    use tokio::sync::mpsc::unbounded_channel;
 
     fn test_setup() {
         let _ = env_logger::builder().is_test(true).try_init();
@@ -1389,7 +1381,7 @@ mod tests {
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
         let controller = &Controller::default();
-        let (sender, mut receiver) = unbounded_channel();
+        let (sender, mut receiver) = channel(2);
         let sender = &sender;
         let address = Address::from_string("tcp://127.0.0.1:8080").unwrap();
 
@@ -1430,20 +1422,18 @@ mod tests {
                                 .write_all(controller, EXPECTED)
                                 .await
                                 .unwrap();
-                            println!("peer write done");
                             let mut buf = [0u8; EXPECTED.len()];
                             peer_client
                                 .reader
                                 .read_exact(controller, &mut buf)
                                 .await
                                 .unwrap();
-                            println!("peer read done");
                             assert_eq!(EXPECTED, &buf);
                         };
                         for _ in 0..100 {
                             do_once().await;
                         }
-                        sender.send(()).unwrap();
+                        sender.send(()).await.unwrap();
                     }
                 );
             },
@@ -1483,20 +1473,18 @@ mod tests {
                                 .write_all(controller, EXPECTED)
                                 .await
                                 .unwrap();
-                            println!("local write done");
                             let mut buf = [0u8; EXPECTED.len()];
                             local_client
                                 .reader
                                 .read_exact(controller, &mut buf)
                                 .await
                                 .unwrap();
-                            println!("local read done");
                             assert_eq!(EXPECTED, &buf);
                         };
                         for _ in 0..100 {
                             do_once().await;
                         }
-                        sender.send(()).unwrap();
+                        sender.send(()).await.unwrap();
                     }
                 );
             },
@@ -1504,6 +1492,7 @@ mod tests {
                 for _ in 0..2 {
                     receiver.recv().await.unwrap();
                 }
+                println!("task done");
                 controller.cancel();
             },
         );

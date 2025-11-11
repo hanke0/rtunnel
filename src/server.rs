@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 use tokio::sync::Mutex;
@@ -15,8 +13,11 @@ use crate::config::ServerConfig;
 use crate::encryption::{
     ReadSession, WriteSession, copy_encrypted_bidirectional, server_handshake,
 };
-use crate::encryption::{decode_signing_key, decode_verifying_key, is_relay_critical_error};
-use crate::transport::{Address, Controller, Listener, Stream, cancel_error};
+use crate::encryption::{decode_signing_key, decode_verifying_key};
+use crate::errors::{
+    self, Result, cancel_error, is_accept_critical_error, is_relay_critical_error,
+};
+use crate::transport::{Address, Controller, Listener, Stream};
 
 struct ServerOptions {
     verifier: VerifyingKey,
@@ -98,7 +99,7 @@ async fn keep_alive(
     while !stopped.is_cancelled() {
         tokio::select! {
             _ = controller.wait_cancel() => {
-                return Err(anyhow!(cancel_error()));
+                return Err(cancel_error());
             },
             _ = stopped.cancelled() => {
                 break;
@@ -168,7 +169,7 @@ impl TunnelPool {
     pub async fn pop(&self) -> Result<(ReadSession, WriteSession)> {
         match self.0.sessions.lock().await.pop_first() {
             Some((_, session)) => session.join().await,
-            None => Err(anyhow!("pool is empty")),
+            None => Err(errors::format_err!("pool is empty")),
         }
     }
 }
@@ -212,7 +213,7 @@ async fn start_tunnel(controller: Controller, mut listener: Listener, options: S
                 controller.spawn(handle_tunnel(controller.clone(), stream, options.clone()));
             }
             Err(e) => {
-                if is_critical_listener_error(&e) {
+                if is_accept_critical_error(&e) {
                     if controller.has_cancel() {
                         return;
                     }
@@ -277,7 +278,7 @@ async fn start_service(
                 ));
             }
             Err(e) => {
-                if is_critical_listener_error(&e) {
+                if is_accept_critical_error(&e) {
                     if controller.has_cancel() {
                         return;
                     }
@@ -291,13 +292,6 @@ async fn start_service(
     }
     controller.cancel_all();
     controller.wait().await;
-}
-
-fn is_critical_listener_error(io_error: &io::Error) -> bool {
-    !matches!(
-        io_error.kind(),
-        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-    )
 }
 
 async fn handle_service_stream(
@@ -317,6 +311,9 @@ async fn handle_service_stream(
         }
         Err(e) => {
             if is_relay_critical_error(&e) {
+                if controller.has_cancel() {
+                    return;
+                }
                 error!("stream {} relay critical error: {:#}", debug, e);
             } else {
                 info!("stream {} relay non-critical error: {:#}", debug, e);
@@ -360,7 +357,7 @@ async fn get_a_useable_connection(
             }
         }
     }
-    Err(anyhow!("failed to get a useable connection"))
+    Err(errors::format_err!("failed to get a useable connection"))
 }
 
 async fn get_a_useable_connection_impl(

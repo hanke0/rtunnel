@@ -13,7 +13,7 @@ use tokio::time::sleep;
 use clap::{Parser, Subcommand};
 use config::{ClientConfig, ServerConfig};
 use encryption::KeyPair;
-use log::{debug, error, info};
+use log::{debug, info};
 use tokio::runtime::Builder;
 use tokio::signal::unix::SignalKind;
 use tokio::{select, signal};
@@ -58,7 +58,7 @@ async fn start_client(configs: Vec<ClientConfig>) {
             info!("connected to {}", cfg.server_address);
             continue;
         }
-        error!(
+        format_err!(
             "connect to {} failed, exiting: {:#}",
             cfg.server_address,
             err.unwrap_err()
@@ -82,7 +82,7 @@ async fn start_server(configs: Vec<ServerConfig>) {
         if err.is_ok() {
             continue;
         }
-        error!(
+        format_err!(
             "start server {} failed, exiting: {:#}",
             cfg.listen,
             err.unwrap_err()

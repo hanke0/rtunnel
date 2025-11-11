@@ -1,45 +1,69 @@
-use std::time::Duration;
+use std::fmt::Debug;
+use std::fmt::Display;
 
-pub type Result<T, E = anyhow::Error> = anyhow::Result<T, E>;
-
-pub type Error = anyhow::Error;
+pub use anyhow::Context;
+pub use anyhow::Error;
+pub use anyhow::Result;
 
 pub enum ErrorKind {
     BadIo(std::io::Error),
-    EOF(std::io::Error),
-    IoRetrable(std::io::Error),
-    Timeout(std::time::Duration),
+    Eof(std::io::Error),
+    IoRetryAble(std::io::Error),
+    Timeout(std::io::Error),
     Canceled(),
-    Other(String),
-    Unknown(),
+    Other(Error),
 }
 
+#[inline]
 pub fn cancel_error() -> Error {
     Error::new(ErrorKind::Canceled())
 }
 
-pub fn other_error(msg: String) -> Error {
-    Error::new(ErrorKind::Other(msg)
+#[inline]
+pub fn from_msg<S: Display + Debug + Send + Sync + 'static>(msg: S) -> Error {
+    Error::new(ErrorKind::Other(Error::msg(msg)))
 }
 
+#[inline]
 pub fn from_io_error(error: std::io::Error) -> Error {
     Error::new(ErrorKind::from_io_error(error))
 }
 
-const UNKNOWN: ErrorKind = ErrorKind::Unknown();
+#[inline]
+pub fn from_error<E: std::error::Error + Send + Sync + 'static>(e: E) -> Error {
+    Error::new(ErrorKind::Other(Error::new(e)))
+}
+
+#[inline]
+pub fn is_relay_critical_error(error: &Error) -> bool {
+    kind_of(error).is_relay_critical()
+}
+
+#[inline]
+pub fn is_accept_critical_error(error: &Error) -> bool {
+    kind_of(error).is_accept_critical()
+}
 
 impl ErrorKind {
     pub fn from_io_error(error: std::io::Error) -> Self {
         match error.kind() {
-            std::io::ErrorKind::UnexpectedEof => Self::EOF(error),
-            std::io::ErrorKind::WouldBlock => Self::IoRetrable(error),
-            std::io::ErrorKind::Interrupted => Self::IoRetrable(error),
-            std::io::ErrorKind::TimedOut => Self::Timeout(Duration::default()),
+            std::io::ErrorKind::UnexpectedEof => Self::Eof(error),
+            std::io::ErrorKind::WouldBlock => Self::IoRetryAble(error),
+            std::io::ErrorKind::Interrupted => Self::IoRetryAble(error),
+            std::io::ErrorKind::TimedOut => Self::Timeout(error),
             _ => Self::BadIo(error),
         }
     }
-    pub fn from_timeout(duration: std::time::Duration) -> Self {
-        Self::Timeout(duration)
+
+    pub fn is_accept_critical(&self) -> bool {
+        !matches!(self, ErrorKind::IoRetryAble(_))
+    }
+
+    pub fn is_relay_critical(&self) -> bool {
+        !matches!(
+            self,
+            ErrorKind::IoRetryAble(_) | ErrorKind::Eof(_) | ErrorKind::Canceled()
+        )
     }
 }
 
@@ -47,12 +71,11 @@ impl std::error::Error for ErrorKind {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::BadIo(e) => Some(e),
-            Self::EOF(e) => Some(e),
-            Self::IoRetrable(e) => Some(e),
+            Self::Eof(e) => Some(e),
+            Self::IoRetryAble(e) => Some(e),
             Self::Other(e) => Some(e.as_ref()),
             Self::Canceled() => None,
-            Self::Timeout(_) => None,
-            Self::Unknown() => None,
+            Self::Timeout(e) => Some(e),
         }
     }
 }
@@ -66,13 +89,12 @@ impl From<std::io::Error> for ErrorKind {
 impl std::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BadIo(e) => write!(f, "bad io result: {}", e),
-            Self::EOF(e) => write!(f, "end of file: {}", e),
-            Self::IoRetrable(e) => write!(f, "io is unusable currently: {}", e),
+            Self::BadIo(e) => write!(f, "bad io result: {:#}", e),
+            Self::Eof(e) => write!(f, "end of file: {:#}", e),
+            Self::IoRetryAble(e) => write!(f, "io is unusable currently: {:#}", e),
             Self::Canceled() => write!(f, "controller cancelled"),
-            Self::Other(e) => write!(f, "{}", e),
-            Self::Timeout(e) => write!(f, "timeout after {:?}", e),
-            Self::Unknown() => write!(f, "unknown error"),
+            Self::Other(e) => write!(f, "{:#}", e),
+            Self::Timeout(e) => write!(f, "{:#}", e),
         }
     }
 }
@@ -89,18 +111,34 @@ pub fn kind_of(e: &Error) -> &ErrorKind {
             return kind;
         }
     }
-    &UNKNOWN
+    unreachable!()
 }
 
 #[macro_export]
-macro_rules! anyerror {
+macro_rules! format_err {
     ($msg:literal $(,)?) => {
-        $crate::__private::ErrorKind::Other($crate::__private::anyhow::anyhow!($msg))
-    };
-    ($err:expr $(,)?) => {
-        $crate::__private::ErrorKind::Other($crate::__private::anyhow::anyhow!($err))
+        $crate::errors::__private::must_use(
+            $crate::errors::from_msg($msg)
+        )
     };
     ($fmt:expr, $($arg:tt)*) => {
-        $crate::__private::ErrorKind::Other($crate::__private::anyhow::anyhow!($fmt, $($arg)*))
+        $crate::errors::__private::must_use(
+            $crate::errors::from_msg($crate::errors::__private::format!($fmt, $($arg)*))
+        )
     };
+}
+
+pub use format_err;
+
+// Not public API. Referenced by macro-generated code.
+#[doc(hidden)]
+pub mod __private {
+    #[doc(hidden)]
+    pub use std::format;
+
+    #[doc(hidden)]
+    #[inline(always)]
+    pub const fn must_use<T>(value: T) -> T {
+        value
+    }
 }

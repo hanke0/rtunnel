@@ -1,10 +1,11 @@
-use crate::transport;
-use anyhow::Context;
-use anyhow::anyhow;
-use serde::Deserialize;
-use serde::de::DeserializeOwned;
 use std::fs::{self, File};
 use std::io::Read;
+
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+
+use crate::errors::{Context, Result, format_err, from_error, from_io_error};
+use crate::transport;
 
 #[derive(Deserialize)]
 struct Config {
@@ -42,22 +43,22 @@ pub struct Service {
 }
 
 impl ServerConfig {
-    pub fn from_file(path: &str) -> anyhow::Result<ServerConfigList> {
+    pub fn from_file(path: &str) -> Result<ServerConfigList> {
         let cfg = from_file::<Config>(path)?;
-        let servers = cfg.servers.ok_or(anyhow!("No server config found"))?;
+        let servers = cfg.servers.ok_or(format_err!("No server config found"))?;
         if servers.is_empty() {
-            return Err(anyhow::Error::msg("No server found"));
+            return Err(format_err!("No server found"));
         }
         Ok(servers)
     }
 }
 
 impl ClientConfig {
-    pub fn from_file(path: &str) -> anyhow::Result<ClientConfigList> {
+    pub fn from_file(path: &str) -> Result<ClientConfigList> {
         let cfg = from_file::<Config>(path)?;
-        let mut clients = cfg.clients.ok_or(anyhow!("No client config found"))?;
+        let mut clients = cfg.clients.ok_or(format_err!("No client config found"))?;
         if clients.is_empty() {
-            return Err(anyhow::Error::msg("No client found"));
+            return Err(format_err!("No client found"));
         }
         for client in clients.iter_mut() {
             if client.max_connections <= 0 {
@@ -71,21 +72,26 @@ impl ClientConfig {
     }
 }
 
-fn from_file<T: DeserializeOwned>(path: &str) -> anyhow::Result<T> {
+fn from_file<T: DeserializeOwned>(path: &str) -> Result<T> {
     check_config_perm(path).with_context(|| format!("Failed to get file permissions {}", path))?;
-    let mut file = File::open(path).with_context(|| format!("Failed to open {}", path))?;
+    let mut file = File::open(path)
+        .map_err(from_io_error)
+        .with_context(|| format!("Failed to open {}", path))?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)
+        .map_err(from_io_error)
         .with_context(|| format!("Failed to read {}", path))?;
-    let config: T =
-        toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path))?;
+    let config: T = toml::from_str(&contents)
+        .map_err(from_error)
+        .with_context(|| format!("Failed to parse {}", path))?;
     Ok(config)
 }
 
 // Check if the file is readable and writable only by the owner(0600).
-fn check_config_perm(path: &str) -> anyhow::Result<()> {
-    let metadata =
-        fs::metadata(path).with_context(|| format!("Failed to get file permission: {}", path,))?;
+fn check_config_perm(path: &str) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .map_err(from_io_error)
+        .with_context(|| format!("Failed to get file permission: {}", path,))?;
     let permissions = metadata.permissions();
 
     // On Unix systems, we can check the mode directly
@@ -94,10 +100,10 @@ fn check_config_perm(path: &str) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let perm = permissions.mode() & 0o777;
         if perm != 0o600 {
-            return Err(anyhow::Error::msg(format!(
+            return Err(format_err!(
                 "Config file permission should be 0600, current is 0{:o}",
                 perm,
-            )));
+            ));
         }
         Ok(())
     }

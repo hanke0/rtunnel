@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
-use std::io;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
 use tokio::select;
@@ -12,9 +10,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::config::ClientConfig;
 use crate::encryption::client_handshake;
 use crate::encryption::copy_encrypted_bidirectional;
-use crate::encryption::is_relay_critical_error;
 use crate::encryption::{ReadSession, WriteSession};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
+use crate::errors::{self, Context, Result, is_relay_critical_error};
 use crate::transport::{Address, Controller};
 
 #[derive(Clone, Copy)]
@@ -223,21 +221,11 @@ async fn start_new_tunnel(
     }
 }
 
-fn can_retry_connect(error: &anyhow::Error) -> bool {
-    for cause in error.chain() {
-        if let Some(io_error) = cause.downcast_ref::<io::Error>() {
-            match io_error.kind() {
-                io::ErrorKind::ConnectionRefused => return false,
-                io::ErrorKind::Other => return false,
-                io::ErrorKind::HostUnreachable => return false,
-                io::ErrorKind::NetworkUnreachable => return false,
-                io::ErrorKind::PermissionDenied => return false,
-                io::ErrorKind::Unsupported => return false,
-                _ => return true,
-            }
-        }
-    }
-    true
+fn can_retry_connect(error: &errors::Error) -> bool {
+    matches!(
+        errors::kind_of(error),
+        errors::ErrorKind::Timeout(_) | errors::ErrorKind::IoRetryAble(_)
+    )
 }
 
 async fn start_new_tunnel_impl(
@@ -317,7 +305,7 @@ async fn handle_relay_impl(
         .await?;
     debug!("tunnel connect message has read: {}", &addr);
     if !allows.contains(&addr) {
-        return Err(anyhow!("Address not allowed: {}", &addr));
+        return Err(errors::format_err!("Address not allowed: {}", &addr));
     }
     let mut conn = addr
         .connect_to(controller)
