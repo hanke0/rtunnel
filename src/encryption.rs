@@ -337,10 +337,10 @@ type ServerHello = HelloMessage;
 type ClientHello = HelloMessage;
 
 fn generate_random() -> Result<RandomKey> {
-    generate_random_array::<32>()
+    generate_random_bytes::<32>()
 }
 
-fn generate_random_array<const N: usize>() -> Result<[u8; N]> {
+pub fn generate_random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut random = [0u8; N];
     OsRng
         .try_fill_bytes(random.as_mut())

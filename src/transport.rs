@@ -351,6 +351,10 @@ impl Default for Controller {
 }
 
 impl Controller {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     #[inline]
     pub fn spawn<F>(&self, task: F) -> JoinHandle<F::Output>
     where
