@@ -98,16 +98,12 @@ impl Drop for StreamGuard {
 pub async fn start_client(controller: &Controller, cfg: &ClientConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.server_public_key)?;
     let signer = decode_signing_key(&cfg.private_key)?;
-    let mut allows = HashSet::new();
-    for service in cfg.services.iter() {
-        allows.insert(service.connect_to);
-    }
 
     let options = Arc::new(ClientOptions {
         address: cfg.server_address,
         verifier,
         signer,
-        allows,
+        allows: cfg.allowed_addresses.clone(),
         max_connections: cfg.max_connections,
         idle_connections: cfg.idle_connections,
     });

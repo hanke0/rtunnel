@@ -15,6 +15,6 @@ server_public_key = "bh+EMDlM9A22kKMXkDDuJccIbquijyZEPXrFJ+U/oC0="
 
 server_address = "tcp://127.0.0.1:2333"
 
-services = [
-    { bind_to = "tcp://127.0.0.1:2334", connect_to = "tcp://127.0.0.1:2335" },
+allowed_addresses = [
+    "tcp://127.0.0.1:2335",
 ]

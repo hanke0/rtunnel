@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Read;
 
@@ -29,7 +30,7 @@ pub struct ClientConfig {
     pub private_key: String,
     pub server_public_key: String,
     pub server_address: transport::Address,
-    pub services: Vec<Service>,
+    pub allowed_addresses: HashSet<transport::Address>,
     #[serde(default)]
     pub max_connections: i32,
     #[serde(default)]
