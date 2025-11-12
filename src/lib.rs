@@ -130,7 +130,7 @@ pub struct Cli {
         long = "log-level",
         help = "log level",
         default_value = "info",
-        global = true,
+        global = true
     )]
     pub log_level: log::LevelFilter,
 }
