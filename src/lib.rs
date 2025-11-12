@@ -119,6 +119,7 @@ async fn graceful_exit(controller: &Controller, side: &str) {
 
 #[derive(Debug, Parser)] // requires `derive` feature
 #[command(name = "rtunnel")]
+#[command(version)]
 #[command(about = "A simple and reliable tunnel", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
@@ -128,7 +129,8 @@ pub struct Cli {
         short = 'l',
         long = "log-level",
         help = "log level",
-        default_value = "info"
+        default_value = "info",
+        global = true,
     )]
     pub log_level: log::LevelFilter,
 }
