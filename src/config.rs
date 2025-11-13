@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Read;
 
+use anyhow::Ok;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -9,7 +10,7 @@ use crate::errors::{Context, Result, format_err, from_error, from_io_error};
 use crate::transport;
 
 #[derive(Deserialize)]
-struct Config {
+pub struct Config {
     pub servers: Option<ServerConfigList>,
     pub clients: Option<ClientConfigList>,
 }
@@ -45,7 +46,11 @@ pub struct Service {
 
 impl ServerConfig {
     pub fn from_file(path: &str) -> Result<ServerConfigList> {
-        let cfg = from_file::<Config>(path)?;
+        let content = read_config_file(path)?;
+        Self::from_string(&content)
+    }
+    pub fn from_string(contents: &str) -> Result<ServerConfigList> {
+        let cfg = from_string::<Config>(contents)?;
         let servers = cfg.servers.ok_or(format_err!("No server config found"))?;
         if servers.is_empty() {
             return Err(format_err!("No server found"));
@@ -56,7 +61,11 @@ impl ServerConfig {
 
 impl ClientConfig {
     pub fn from_file(path: &str) -> Result<ClientConfigList> {
-        let cfg = from_file::<Config>(path)?;
+        let content = read_config_file(path)?;
+        Self::from_string(&content)
+    }
+    pub fn from_string(contents: &str) -> Result<ClientConfigList> {
+        let cfg = from_string::<Config>(contents)?;
         let mut clients = cfg.clients.ok_or(format_err!("No client config found"))?;
         if clients.is_empty() {
             return Err(format_err!("No client found"));
@@ -73,7 +82,7 @@ impl ClientConfig {
     }
 }
 
-fn from_file<T: DeserializeOwned>(path: &str) -> Result<T> {
+fn read_config_file(path: &str) -> Result<String> {
     check_config_perm(path).with_context(|| format!("Failed to get file permissions {}", path))?;
     let mut file = File::open(path)
         .map_err(from_io_error)
@@ -82,10 +91,13 @@ fn from_file<T: DeserializeOwned>(path: &str) -> Result<T> {
     file.read_to_string(&mut contents)
         .map_err(from_io_error)
         .with_context(|| format!("Failed to read {}", path))?;
-    let config: T = toml::from_str(&contents)
+    Ok(contents)
+}
+
+fn from_string<T: DeserializeOwned>(contents: &str) -> Result<T> {
+    toml::from_str(contents)
         .map_err(from_error)
-        .with_context(|| format!("Failed to parse {}", path))?;
-    Ok(config)
+        .context("Failed to parse config")
 }
 
 // Check if the file is readable and writable only by the owner(0600).

@@ -26,6 +26,10 @@ pub async fn run(controller: &Controller, options: Cli) -> i32 {
             pair.print();
             0
         }
+        Commands::ExampleConfig {} => {
+            println!("{}", build_example_config());
+            0
+        }
         Commands::Client { config } => {
             info!("starting client, loading config from {}", config);
             let configs = ClientConfig::from_file(&config).expect("Failed to load config");
@@ -118,9 +122,12 @@ async fn graceful_exit(controller: &Controller, side: &str) {
 }
 
 #[derive(Debug, Parser)] // requires `derive` feature
-#[command(name = "rtunnel")]
-#[command(version)]
-#[command(about = "A simple and reliable tunnel", long_about = None)]
+#[command(
+    name = "rtunnel",
+    version,
+    about = "A lightweight tunnel tool.",
+    long_about = "A lightweight tunneling tool, written in Rust, for exposing local servers behind NATs and firewalls to the public internet."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -128,35 +135,100 @@ pub struct Cli {
     #[arg(
         short = 'l',
         long = "log-level",
-        help = "log level",
+        help = "set log level (trace, debug, info, warn, error, off)",
         default_value = "info",
         global = true
     )]
+    #[clap(value_enum)]
     pub log_level: log::LevelFilter,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    #[command(arg_required_else_help = false)]
+    #[command(
+        about = "generate public and private key pair",
+        arg_required_else_help = false
+    )]
     GenerateKey {},
-    #[command(arg_required_else_help = false)]
+    #[command(
+        about = "Generate example config to stdout",
+        arg_required_else_help = false
+    )]
+    ExampleConfig {},
+    #[command(
+        about = "Run the client to route traffic between the local machine and the tunnel",
+        arg_required_else_help = false
+    )]
     Client {
         #[arg(
             short = 'c',
             long = "config",
             help = "config file path",
-            default_value = "rtunnel.toml"
+            default_value = "rtunnel.toml",
+            value_hint = clap::ValueHint::FilePath
         )]
         config: String,
     },
-    #[command(arg_required_else_help = false)]
+    #[command(
+        about = "Run the server to route traffic between the tunnel and the public internet",
+        arg_required_else_help = false
+    )]
     Server {
         #[arg(
             short = 'c',
             long = "config",
             help = "config file path",
-            default_value = "rtunnel.toml"
+            default_value = "rtunnel.toml",
+            value_hint = clap::ValueHint::FilePath
         )]
         config: String,
     },
+}
+
+fn build_example_config() -> String {
+    let client_pair = KeyPair::random();
+    let server_pair = KeyPair::random();
+    let server_private = server_pair.private_key();
+    let server_public = server_pair.public_key();
+    let client_private = client_pair.private_key();
+    let client_public = client_pair.public_key();
+
+    format!(
+        "# Example config for server
+[[servers]]
+private_key = \"{server_private}\"
+public_key = \"{server_public}\"
+client_public_key = \"{client_public}\"
+listen = \"tcp://127.0.0.1:7000\"
+
+services = [
+    {{ bind_to = \"tcp://0.0.0.0:8001\", connect_to = \"tcp://127.0.0.1:80\" }},
+]
+
+# Example config for client
+[[clients]]
+private_key = \"{client_private}\"
+public_key = \"{client_public}\"
+server_public_key = \"{server_public}\"
+
+server_address = \"tcp://127.0.0.1:7000\"
+
+allowed_addresses = [
+    \"tcp://127.0.0.1:80\",
+]
+    "
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_config() {
+        let cfg = build_example_config();
+        assert!(!cfg.is_empty());
+        ServerConfig::from_string(&cfg).unwrap();
+        ClientConfig::from_string(&cfg).unwrap();
+    }
 }
