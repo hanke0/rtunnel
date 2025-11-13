@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info};
@@ -148,6 +149,7 @@ async fn keep_client_connections(
         ));
         current += 1;
     }
+    let mut last_report = Instant::now();
 
     while !controller.has_cancel() {
         let fut = receiver.recv();
@@ -184,6 +186,15 @@ async fn keep_client_connections(
                 ));
             }
             current += pending;
+        }
+        if last_report.elapsed().as_secs() > 60 {
+            info!(
+                "{} alive tunnel count: total={}, idle={}",
+                options.address,
+                current,
+                current - busy
+            );
+            last_report = Instant::now();
         }
     }
 }

@@ -150,11 +150,11 @@ impl TunnelPool {
                 Ok(_) => {
                     sender.send(r).await.unwrap();
                 }
-                Err(e) => {
-                    if is_relay_critical_error(&e) {
-                        error!("{} keep alive critical error: {}", id, e);
+                Err(err) => {
+                    if is_relay_critical_error(&err) {
+                        error!("{} keep alive critical error: {:#}", id, err);
                     } else {
-                        info!("{} keep alive non-critical error: {}", id, e);
+                        info!("{} keep alive non-critical error: {:#}", id, err);
                     }
                     self.remove(&id).await;
                 }
@@ -164,6 +164,10 @@ impl TunnelPool {
 
     async fn remove(&self, id: &String) {
         self.0.sessions.lock().await.remove(id);
+    }
+
+    async fn len(&self) -> usize {
+        self.0.sessions.lock().await.len()
     }
 
     pub async fn pop(&self) -> Result<(ReadSession, WriteSession)> {
@@ -192,6 +196,11 @@ pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result
         signer,
         pool: TunnelPool::new(),
     });
+    controller.spawn(tunnel_timer(
+        controller.clone(),
+        options.clone(),
+        cfg.listen,
+    ));
     controller.spawn(start_tunnel(
         controller.children(),
         listener,
@@ -208,6 +217,22 @@ pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result
         ));
     }
     Ok(())
+}
+
+async fn tunnel_timer(controller: Controller, options: ServerOptionsRef, address: Address) {
+    if !log::log_enabled!(log::Level::Info) {
+        return;
+    }
+    loop {
+        tokio::select! {
+            _ = controller.wait_cancel() => {
+                return;
+            },
+            _ = time::sleep(Duration::from_secs(60)) => {
+                info!("{} alive tunnel count: {}", address, options.pool.len().await);
+            },
+        }
+    }
 }
 
 async fn start_tunnel(controller: Controller, mut listener: Listener, options: ServerOptionsRef) {
