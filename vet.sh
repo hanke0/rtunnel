@@ -3,4 +3,4 @@
 set -e
 
 cargo fmt
-cargo clippy --no-deps --fix --allow-dirty -- -D warnings
+cargo clippy --no-deps --fix --allow-dirty --all-targets -- -D warnings

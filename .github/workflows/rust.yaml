@@ -6,9 +6,9 @@ on:
   release:
     types: [created]
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
 
 jobs:
   lints:
@@ -19,8 +19,10 @@ jobs:
       - uses: Swatinem/rust-cache@v1
       - name: Format
         run: cargo fmt --check
+      - name: Check
+        run: cargo check --all-targets
       - name: Clippy
-        run: cargo clippy --no-deps -- -D warnings
+        run: cargo clippy --no-deps --all-targets -- -D warnings
 
   build:
     name: Build - ${{ matrix.platform.os-name }}
@@ -51,7 +53,7 @@ jobs:
           - os-name: macOS-x86_64
             runs-on: macOS-latest
             target: x86_64-apple-darwin
-          
+
           - os-name: macOS-aarch64
             runs-on: macOS-latest
             target: aarch64-apple-darwin
@@ -65,7 +67,7 @@ jobs:
         with:
           command: build
           target: ${{ matrix.platform.target }}
-          args: "--locked --release"
+          args: '--locked --release'
           strip: true
       - name: Test
         uses: houseabsolute/actions-rust-cross@v1
@@ -79,5 +81,5 @@ jobs:
         with:
           executable-name: rtunnel
           target: ${{ matrix.platform.target }}
-          changes-file: ""
-          extra-files: ""
+          changes-file: ''
+          extra-files: ''

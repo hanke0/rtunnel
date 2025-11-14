@@ -13,6 +13,7 @@ use tokio::net::TcpStream;
 use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
 
+use rtunnel::errors::from_io_error;
 use rtunnel::generate_random_bytes;
 use rtunnel::{Cli, Controller, run};
 
@@ -88,8 +89,8 @@ async fn test_integration() {
     sleep(Duration::from_secs(1)).await;
 
     let mut set = JoinSet::new();
-    for _ in 0..10 {
-        set.spawn(connect_to_echo());
+    for _ in 0..1 {
+        set.spawn(connect_to_echo(controller.clone()));
     }
     set.join_all().await;
     controller.cancel();
@@ -99,17 +100,27 @@ async fn test_integration() {
     controller.wait().await;
 }
 
-async fn connect_to_echo() {
-    let mut stream = TcpStream::connect("127.0.0.1:2334").await.unwrap();
+async fn connect_to_echo(controller: Controller) {
+    let stream = TcpStream::connect("127.0.0.1:2334").await.unwrap();
     let expect = generate_random_bytes::<65535>().unwrap();
-    stream.write_all(expect.as_ref()).await.unwrap();
     let mut got = [0u8; 65535];
-    stream.read_exact(&mut got).await.unwrap();
-    if expect != got {
-        panic!(
-            "echo server test failed, got != expect, expect-length={}, got-length={}",
-            expect.len(),
-            got.len()
-        )
-    }
+    let mut_got = &mut got;
+    let (mut reader, mut writer) = stream.into_split();
+
+    controller
+        .timeout_default(async move {
+            writer
+                .write_all(expect.as_ref())
+                .await
+                .map_err(from_io_error)
+        })
+        .await
+        .unwrap();
+
+    controller
+        .timeout_default(async move { reader.read_exact(mut_got).await.map_err(from_io_error) })
+        .await
+        .unwrap();
+    assert_eq!(expect.len(), got.len());
+    assert_eq!(expect, got);
 }

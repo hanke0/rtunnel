@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use tokio::select;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -118,7 +118,7 @@ pub async fn start_client(controller: &Controller, cfg: &ClientConfig) -> Result
 async fn start_client_sentry(controller: Controller, options: ClientOptionsRef) {
     let (sender, mut receiver) = unbounded_channel();
     let guard = StreamGuarder::new(sender);
-    keep_client_connections(&controller, &options, guard, &mut receiver).await;
+    keep_client_connections(&controller, &options, &guard, &mut receiver).await;
     controller.cancel_all();
     debug!("client sentry exiting, {}", options.address);
     controller.wait().await;
@@ -129,7 +129,7 @@ async fn start_client_sentry(controller: Controller, options: ClientOptionsRef) 
 async fn keep_client_connections(
     controller: &Controller,
     options: &ClientOptionsRef,
-    guard: StreamGuarder,
+    guard: &StreamGuarder,
     receiver: &mut Receiver,
 ) {
     let mut current = 0;
@@ -152,9 +152,8 @@ async fn keep_client_connections(
     let mut last_report = Instant::now();
 
     while !controller.has_cancel() {
-        let fut = receiver.recv();
         let result = select! {
-            r = fut => r,
+            r = receiver.recv() => r,
             _ = controller.wait_cancel() => {
                 break;
             }
@@ -169,7 +168,7 @@ async fn keep_client_connections(
             Some(NotifyEvent::RelayFinish) => {
                 busy -= 1;
             }
-            None => (),
+            None => unreachable!(),
         }
         let pending = max_idle - (current - busy);
         if current < max && pending > 0 {
@@ -240,15 +239,8 @@ async fn start_new_tunnel_impl(
     guard: &StreamGuarder,
     options: &ClientOptionsRef,
 ) -> Result<()> {
-    let (mut read_half, mut write_half) = connect_to_server(controller, options).await?;
-    handle_relay(
-        controller,
-        guard,
-        &mut read_half,
-        &mut write_half,
-        &options.allows,
-    )
-    .await;
+    let (read_half, write_half) = connect_to_server(controller, options).await?;
+    handle_relay(controller, guard, read_half, write_half, &options.allows).await;
     Ok(())
 }
 
@@ -279,22 +271,23 @@ async fn connect_to_server(
 async fn handle_relay(
     controller: &Controller,
     guard: &StreamGuarder,
-    read_half: &mut ReadSession,
-    write_half: &mut WriteSession,
+    read_half: ReadSession,
+    write_half: WriteSession,
     allows: &HashSet<Address>,
 ) {
+    let addr = format!("{}", read_half);
     match handle_relay_impl(controller, guard, read_half, write_half, allows).await {
         Ok((read, write)) => {
             info!(
                 "stream {} disconnected and has read {} bytes and wrote {}",
-                read_half, read, write
+                addr, read, write
             );
         }
         Err(e) => {
             if is_relay_critical_error(&e) {
-                error!("stream {} relay critical error:  {:#}", read_half, e);
+                error!("stream {} relay critical error:  {:#}", addr, e);
             } else {
-                info!("stream {} relay non-critical error:  {:#}", read_half, e);
+                info!("stream {} relay non-critical error:  {:#}", addr, e);
             }
         }
     };
@@ -303,30 +296,23 @@ async fn handle_relay(
 async fn handle_relay_impl(
     controller: &Controller,
     guard: &StreamGuarder,
-    read_half: &mut ReadSession,
-    write_half: &mut WriteSession,
+    mut read_half: ReadSession,
+    mut write_half: WriteSession,
     allows: &HashSet<Address>,
 ) -> Result<(usize, usize)> {
     let addr: Address = read_half
-        .wait_connect_message(controller, write_half)
+        .wait_connect_message(controller, &mut write_half)
         .await?;
-    debug!("tunnel connect message has read: {}", &addr);
+    trace!("tunnel connect message has read: {}", &addr);
     if !allows.contains(&addr) {
         return Err(errors::format_err!("Address not allowed: {}", &addr));
     }
-    let mut conn = addr
+    let conn = addr
         .connect_to(controller)
         .await
         .context("Failed to connect to local service")?;
-    debug!("tunnel relay established: {}->{}", &read_half, addr);
     write_half.write_connect_message(controller, &addr).await?;
+    debug!("tunnel relay started: {}->{}", &read_half, addr);
     let _guard = guard.relay_guard();
-    copy_encrypted_bidirectional(
-        controller,
-        read_half,
-        write_half,
-        &mut conn.reader,
-        &mut conn.writer,
-    )
-    .await
+    copy_encrypted_bidirectional(controller, read_half, write_half, conn.reader, conn.writer).await
 }

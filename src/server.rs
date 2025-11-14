@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::time::{self, Duration, sleep};
@@ -357,15 +357,15 @@ async fn handle_service_stream_impl(
     options: &ServerOptionsRef,
     connect_to: &Address,
 ) -> Result<(usize, usize)> {
-    let (mut read_half, mut write_half) =
+    let (read_half, write_half) =
         get_a_useable_connection(controller, options, &mut stream, connect_to).await?;
 
     copy_encrypted_bidirectional(
         controller,
-        &mut read_half,
-        &mut write_half,
-        &mut stream.reader,
-        &mut stream.writer,
+        read_half,
+        write_half,
+        stream.reader,
+        stream.writer,
     )
     .await
 }
@@ -396,19 +396,19 @@ async fn get_a_useable_connection_impl(
     connect_to: &Address,
 ) -> Result<(ReadSession, WriteSession)> {
     let (mut read_half, mut write_half) = options.pop_stream().await?;
-    debug!("stream got a tunnel: {}->{}", stream, read_half);
+    trace!("stream got a tunnel: {}->{}", stream, read_half);
 
     controller
         .timeout_default(write_half.write_connect_message(controller, connect_to))
         .await?;
-    debug!(
+    trace!(
         "tunnel connect message has sent, wait connect message reply: {}->{}",
         stream, read_half,
     );
     controller
         .timeout_default(read_half.wait_connect_message(controller, &mut write_half))
         .await?;
-    debug!(
+    trace!(
         "tunnel connect message has received, relay started: {}->{}",
         stream, read_half,
     );

@@ -74,6 +74,16 @@ impl ErrorKind {
             ErrorKind::IoRetryAble(_) | ErrorKind::Eof(_) | ErrorKind::Canceled()
         )
     }
+
+    pub fn is_eof(&self) -> bool {
+        matches!(self, ErrorKind::Eof(_))
+    }
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, ErrorKind::Timeout(_))
+    }
+    pub fn is_canceled(&self) -> bool {
+        matches!(self, ErrorKind::Canceled())
+    }
 }
 
 impl std::error::Error for ErrorKind {
@@ -98,12 +108,12 @@ impl From<std::io::Error> for ErrorKind {
 impl std::fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BadIo(e) => write!(f, "bad io result: {:#}", e),
-            Self::Eof(e) => write!(f, "end of file: {:#}", e),
-            Self::IoRetryAble(e) => write!(f, "io is unusable currently: {:#}", e),
+            Self::BadIo(_) => write!(f, "bad io"),
+            Self::Eof(_) => write!(f, "end of file"),
+            Self::IoRetryAble(_) => write!(f, "io is unusable currently"),
             Self::Canceled() => write!(f, "controller cancelled"),
-            Self::Other(e) => write!(f, "{:#}", e),
-            Self::Timeout(e) => write!(f, "{:#}", e),
+            Self::Other(_) => write!(f, "other error"),
+            Self::Timeout(_) => write!(f, "timeout"),
         }
     }
 }
@@ -115,6 +125,9 @@ impl std::fmt::Debug for ErrorKind {
 }
 
 pub fn kind_of(e: &Error) -> &ErrorKind {
+    if let Some(kind) = e.downcast_ref::<ErrorKind>() {
+        return kind;
+    }
     for cause in e.chain() {
         if let Some(kind) = cause.downcast_ref::<ErrorKind>() {
             return kind;

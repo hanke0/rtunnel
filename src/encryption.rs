@@ -9,13 +9,13 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as base64};
 use bytes::{BufMut, BytesMut};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
-use log::{debug, info};
+use log::{debug, trace};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use tokio::time::{Duration, sleep};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
 
-use crate::errors::{self, Context, Result, is_relay_critical_error};
+use crate::errors::{self, Context, Result};
 use crate::transport::{self, Address, Controller, Reader, Writer};
 
 type PrivateKey = [u8; 32];
@@ -195,6 +195,7 @@ impl Message {
         reader
             .read_exact(controller, &mut payload)
             .await
+            .map_err(errors::ErrorKind::Other)
             .context("Failed to read message from stream")?;
         self.0.unsplit(payload);
         Ok(())
@@ -444,10 +445,10 @@ pub async fn server_handshake(
 
 pub async fn copy_encrypted_bidirectional(
     controller: &Controller,
-    read_half: &mut ReadSession,
-    write_half: &mut WriteSession,
-    raw_reader: &mut Reader,
-    raw_writer: &mut Writer,
+    mut read_half: ReadSession,
+    mut write_half: WriteSession,
+    mut raw_reader: Reader,
+    mut raw_writer: Writer,
 ) -> Result<(usize, usize)> {
     if controller.has_cancel() {
         debug!(
@@ -460,16 +461,28 @@ pub async fn copy_encrypted_bidirectional(
     let (read_size, write_size) = tokio::join!(
         async move {
             let size = read_half
-                .relay_encrypted_to_plain_forever(children, raw_writer)
+                .relay_encrypted_to_plain_forever(children, &mut raw_writer)
                 .await;
-            children.cancel();
+            debug!(
+                "read_half {} relay_encrypted_to_plain_forever finished: {:?}",
+                read_half, size
+            );
+            if size.is_err() {
+                children.cancel();
+            }
             size
         },
         async move {
             let size = write_half
-                .relay_plain_to_encrypted_forever(children, raw_reader)
+                .relay_plain_to_encrypted_forever(children, &mut raw_reader)
                 .await;
-            children.cancel();
+            debug!(
+                "write_half {} relay_plain_to_encrypted_forever finished: {:?}",
+                write_half, size
+            );
+            if size.is_err() {
+                children.cancel();
+            }
             size
         },
     );
@@ -709,11 +722,7 @@ impl ReadSession {
                     size += n;
                 }
                 Err(err) => {
-                    if is_relay_critical_error(&err) {
-                        return Err(err);
-                    }
-                    info!("{self} relay encrypted to plain error: {:#}", err);
-                    return Ok(size);
+                    return Err(err);
                 }
             }
         }
@@ -726,7 +735,7 @@ impl ReadSession {
     ) -> Result<usize> {
         tokio::select! {
             n = self.relay_encrypted_to_plain_impl(controller, writer) => n,
-            _ = controller.wait_cancel() => Ok(0),
+            _ = controller.wait_cancel() => Err(errors::cancel_error()),
         }
     }
 
@@ -736,7 +745,16 @@ impl ReadSession {
         controller: &Controller,
         writer: &mut Writer,
     ) -> Result<usize> {
-        let (typ, buf) = self.read_message(controller).await?;
+        let (typ, buf) = match self.read_message(controller).await {
+            Ok(r) => r,
+            Err(err) => {
+                if errors::kind_of(&err).is_eof() {
+                    trace!("{} read_message: EOF: {err:#}", self.reader);
+                    return Ok(0);
+                }
+                return Err(err);
+            }
+        };
         if typ != MessageType::Data {
             return Err(errors::format_err!("Unexpected message type: {}", typ));
         }
@@ -801,11 +819,7 @@ impl WriteSession {
                     size += n;
                 }
                 Err(err) => {
-                    if is_relay_critical_error(&err) {
-                        return Err(err);
-                    }
-                    debug!("{self} relay plain to encrypted error: {:#}", err);
-                    return Ok(size);
+                    return Err(err);
                 }
             }
         }
@@ -818,7 +832,7 @@ impl WriteSession {
     ) -> Result<usize> {
         tokio::select! {
             n = self.replay_plain_to_encrypted_impl(controller, reader) => n,
-            _ = controller.wait_cancel() => Ok(0),
+            _ = controller.wait_cancel() => Err(errors::cancel_error()),
         }
     }
 
@@ -1000,6 +1014,7 @@ mod tests {
     use tokio::sync::mpsc::channel;
 
     use super::*;
+    use crate::errors::kind_of;
     use crate::transport::Stream;
 
     #[test]
@@ -1409,8 +1424,8 @@ mod tests {
         // stream structure:
         // peer_client <-tcp-> peer_server <-copy-> server <-tcp-> client <-copy-> local_server <-tcp-> local_client
         let (client, server) = build_stream_pair().await;
-        let (mut peer_client, mut peer_server) = build_stream_pair().await;
-        let (mut local_client, mut local_server) = build_stream_pair().await;
+        let (mut peer_client, peer_server) = build_stream_pair().await;
+        let (mut local_client, local_server) = build_stream_pair().await;
         println!("client: {}", client);
         println!("peer_client: {}", peer_client);
         println!("local_client: {}", local_client);
@@ -1446,15 +1461,17 @@ mod tests {
                 println!("Client read connect message done");
                 tokio::join!(
                     async move {
-                        copy_encrypted_bidirectional(
+                        let e = copy_encrypted_bidirectional(
                             controller,
-                            &mut read_half,
-                            &mut write_half,
-                            &mut local_server.reader,
-                            &mut local_server.writer,
+                            read_half,
+                            write_half,
+                            local_server.reader,
+                            local_server.writer,
                         )
-                        .await
-                        .unwrap();
+                        .await;
+                        if e.is_err() {
+                            assert!(!kind_of(&e.err().unwrap()).is_relay_critical());
+                        }
                     },
                     async move {
                         let mut do_once = async move || {
@@ -1475,12 +1492,13 @@ mod tests {
                         for _ in 0..100 {
                             do_once().await;
                         }
+                        println!("client task done");
                         sender.send(()).await.unwrap();
                     }
                 );
             },
             async move {
-                let (mut read_half, mut write_half) = server_handshake(
+                let (read_half, mut write_half) = server_handshake(
                     controller,
                     server.reader,
                     server.writer,
@@ -1497,15 +1515,17 @@ mod tests {
                 println!("Server write connect message done");
                 tokio::join!(
                     async move {
-                        copy_encrypted_bidirectional(
+                        let e = copy_encrypted_bidirectional(
                             controller,
-                            &mut read_half,
-                            &mut write_half,
-                            &mut peer_server.reader,
-                            &mut peer_server.writer,
+                            read_half,
+                            write_half,
+                            peer_server.reader,
+                            peer_server.writer,
                         )
-                        .await
-                        .unwrap();
+                        .await;
+                        if e.is_err() {
+                            assert!(!kind_of(&e.err().unwrap()).is_relay_critical());
+                        }
                     },
                     async move {
                         let mut do_once = async move || {
@@ -1526,6 +1546,7 @@ mod tests {
                         for _ in 0..100 {
                             do_once().await;
                         }
+                        println!("server task done");
                         sender.send(()).await.unwrap();
                     }
                 );

@@ -249,7 +249,7 @@ impl Address {
     async fn connect_to_impl(&self) -> Result<Stream> {
         match self {
             Address::Tcp(a) => {
-                let stream = TcpStream::connect(a).await?;
+                let stream = TcpStream::connect(a).await.map_err(from_io_error)?;
                 let stream = set_keepalive(stream)?;
                 Ok(Stream::from_tcp_stream(stream))
             }
@@ -268,7 +268,7 @@ impl Address {
     async fn listen_to_impl(&self) -> Result<Listener> {
         match self {
             Address::Tcp(a) => {
-                let listener = TcpListener::bind(a).await?;
+                let listener = TcpListener::bind(a).await.map_err(from_io_error)?;
                 Ok(Listener::Tcp(listener))
             }
         }
@@ -280,7 +280,9 @@ fn set_keepalive(stream: TcpStream) -> Result<TcpStream> {
     let keepalive = TcpKeepalive::new()
         .with_time(Duration::from_secs(10))
         .with_interval(Duration::from_secs(1));
-    socket_ref.set_tcp_keepalive(&keepalive)?;
+    socket_ref
+        .set_tcp_keepalive(&keepalive)
+        .map_err(from_io_error)?;
     Ok(stream)
 }
 
@@ -540,5 +542,18 @@ mod tests {
         assert!(children.has_cancel());
         children.wait().await;
         controller.wait().await;
+    }
+
+    #[tokio::test]
+    async fn test_controller_timeout() {
+        let controller = Controller::default();
+        let err = controller
+            .timeout(Duration::from_secs(1), async {
+                sleep(Duration::from_secs(2)).await;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(errors::kind_of(&err).is_timeout());
     }
 }
