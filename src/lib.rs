@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use log::{debug, info};
-use tokio::signal::unix::SignalKind;
 use tokio::time::sleep;
 use tokio::{select, signal};
 
@@ -95,16 +94,50 @@ pub async fn run_server(controller: &Controller, configs: Vec<ServerConfig>) -> 
 }
 
 async fn wait_exit_signal() {
-    let mut sigint = signal::unix::signal(SignalKind::interrupt()).unwrap();
-    let mut sigterm = signal::unix::signal(SignalKind::terminate()).unwrap();
-    select! {
-        _ = sigint.recv() => {
-            info!("received ctrl-c signal");
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::SignalKind;
+        let mut sigint = signal::unix::signal(SignalKind::interrupt()).unwrap();
+        let mut sigterm = signal::unix::signal(SignalKind::terminate()).unwrap();
+        select! {
+            _ = sigint.recv() => {
+                info!("received ctrl-c signal");
+            }
+            _ = sigterm.recv() => {
+                info!("received sigterm signal");
+            }
+        };
+    }
+
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_close, ctrl_shutdown, ctrl_break};
+        let mut sigint = signal::ctrl_c();
+        let mut sigclose = ctrl_close()?;
+        let mut sigbreak = ctrl_break()?;
+        let mut sigshutdown = ctrl_shutdown()?;
+        select! {
+            _ = sigint.recv() => {
+                info!("received ctrl-c signal");
+            }
+            _ = sigclose.recv() => {
+                info!("received ctrl-close signal");
+            }
+            _ = sigbreak.recv() => {
+                info!("received ctrl-break signal");
+            }
+            _ = sigshutdown.recv() => {
+                info!("received ctrl-shutdown signal");
+            }
         }
-        _ = sigterm.recv() => {
-            info!("received sigterm signal");
-        }
-    };
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let mut sigint = signal::ctrl_c();
+        signal.recv().await;
+        info!("received ctrl-c signal");
+    }
 }
 
 async fn graceful_exit(controller: &Controller, side: &str) {
