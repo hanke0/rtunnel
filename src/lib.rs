@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use log::{debug, info};
+use tokio::select;
 use tokio::time::sleep;
-use tokio::{select, signal};
 
 pub mod client;
 pub mod config;
@@ -97,9 +97,9 @@ async fn wait_exit_signal() {
     let sigint_msg = "received ctrl-c signal";
     #[cfg(unix)]
     {
-        use tokio::signal::unix::SignalKind;
-        let mut sigint = signal::unix::signal(SignalKind::interrupt()).unwrap();
-        let mut sigterm = signal::unix::signal(SignalKind::terminate()).unwrap();
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut sigint = signal(SignalKind::interrupt()).unwrap();
+        let mut sigterm = signal(SignalKind::terminate()).unwrap();
         select! {
             _ = sigint.recv() => {
                 info!("{sigint_msg}");
