@@ -64,7 +64,7 @@ jobs:
           args: "--locked --release"
           strip: true
       - name: Publish artifacts and release
-        if: if: ${{ github.event_name == 'release' && github.event.action == 'created' }}
+        if: ${{ github.event_name == 'release' && github.event.action == 'created' }}
         uses: houseabsolute/actions-rust-release@v0
         with:
           executable-name: rtunnel
