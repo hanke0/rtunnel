@@ -111,7 +111,7 @@ async fn wait_exit_signal() {
 
     #[cfg(windows)]
     {
-        use tokio::signal::windows::{ctrl_close, ctrl_shutdown, ctrl_break};
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
         let mut sigint = signal::ctrl_c();
         let mut sigclose = ctrl_close()?;
         let mut sigbreak = ctrl_break()?;
