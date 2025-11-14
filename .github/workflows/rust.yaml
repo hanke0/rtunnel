@@ -60,13 +60,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Build and Test
+      - name: Build
         uses: houseabsolute/actions-rust-cross@v1
         with:
-          command: both
+          command: build
           target: ${{ matrix.platform.target }}
           args: "--locked --release"
           strip: true
+      - name: Test
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: test
+          target: ${{ matrix.platform.target }}
       - name: Publish artifacts and release
         if: ${{ github.event_name == 'release' && github.event.action == 'created' }}
         uses: houseabsolute/actions-rust-release@v0
