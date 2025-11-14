@@ -994,10 +994,10 @@ fn vec_to_array<const N: usize>(v: Vec<u8>) -> Result<[u8; N]> {
 
 #[cfg(test)]
 mod tests {
+    use log::LevelFilter;
     use ntest::timeout;
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc::channel;
-    use log::LevelFilter;
 
     use super::*;
     use crate::transport::Stream;
@@ -1071,7 +1071,10 @@ mod tests {
     }
 
     fn test_setup() {
-        let _ = env_logger::builder().is_test(true).filter_level(LevelFilter::Trace).try_init();
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(LevelFilter::Trace)
+            .try_init();
     }
 
     async fn build_stream_pair() -> (Stream, Stream) {
