@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Read;
 
-use anyhow::Ok;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
@@ -123,6 +122,6 @@ fn check_config_perm(path: &str) -> Result<()> {
 
     #[cfg(not(any(unix)))]
     {
-        OK(())
+        Ok(())
     }
 }
