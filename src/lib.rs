@@ -94,6 +94,7 @@ pub async fn run_server(controller: &Controller, configs: Vec<ServerConfig>) -> 
 }
 
 async fn wait_exit_signal() {
+    let sigint_msg = "received ctrl-c signal";
     #[cfg(unix)]
     {
         use tokio::signal::unix::SignalKind;
@@ -101,7 +102,7 @@ async fn wait_exit_signal() {
         let mut sigterm = signal::unix::signal(SignalKind::terminate()).unwrap();
         select! {
             _ = sigint.recv() => {
-                info!("received ctrl-c signal");
+                info!("{sigint_msg}");
             }
             _ = sigterm.recv() => {
                 info!("received sigterm signal");
@@ -111,14 +112,14 @@ async fn wait_exit_signal() {
 
     #[cfg(windows)]
     {
-        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
-        let mut sigint = signal::ctrl_c().unwrap();
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+        let mut sigint = ctrl_c().unwrap();
         let mut sigclose = ctrl_close().unwrap();
         let mut sigbreak = ctrl_break().unwrap();
         let mut sigshutdown = ctrl_shutdown().unwrap();
         select! {
             _ = sigint.recv() => {
-                info!("received ctrl-c signal");
+                info!("{sigint_msg}");
             }
             _ = sigclose.recv() => {
                 info!("received ctrl-close signal");
@@ -130,13 +131,6 @@ async fn wait_exit_signal() {
                 info!("received ctrl-shutdown signal");
             }
         }
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let mut sigint = signal::ctrl_c().unwrap();
-        signal.recv().await;
-        info!("received ctrl-c signal");
     }
 }
 

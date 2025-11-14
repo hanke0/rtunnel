@@ -121,7 +121,7 @@ fn check_config_perm(path: &str) -> Result<()> {
         Ok(())
     }
 
-    #[cfg(not(any(unix)))]
+    #[cfg(windows)]
     {
         _ = permissions;
         Ok(())
