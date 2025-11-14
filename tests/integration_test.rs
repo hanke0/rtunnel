@@ -19,7 +19,7 @@ use rtunnel::{Cli, Controller, run};
 #[tokio::test]
 async fn test_integration() {
     let _ = env_logger::builder()
-        .filter_level(LevelFilter::Debug)
+        .filter_level(LevelFilter::Trace)
         .is_test(true)
         .try_init();
 

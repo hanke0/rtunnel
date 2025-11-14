@@ -112,10 +112,10 @@ async fn wait_exit_signal() {
     #[cfg(windows)]
     {
         use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
-        let mut sigint = signal::ctrl_c();
-        let mut sigclose = ctrl_close()?;
-        let mut sigbreak = ctrl_break()?;
-        let mut sigshutdown = ctrl_shutdown()?;
+        let mut sigint = signal::ctrl_c().unwrap();
+        let mut sigclose = ctrl_close().unwrap();
+        let mut sigbreak = ctrl_break().unwrap();
+        let mut sigshutdown = ctrl_shutdown().unwrap();
         select! {
             _ = sigint.recv() => {
                 info!("received ctrl-c signal");
@@ -134,7 +134,7 @@ async fn wait_exit_signal() {
 
     #[cfg(not(any(unix, windows)))]
     {
-        let mut sigint = signal::ctrl_c();
+        let mut sigint = signal::ctrl_c().unwrap();
         signal.recv().await;
         info!("received ctrl-c signal");
     }
