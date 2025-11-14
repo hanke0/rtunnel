@@ -10,7 +10,7 @@ file=$(mktemp)
 
 cleanup() {
 	kill $server_pid $client_pid
-	rm "${file}"
+	rm -f "${file}"
 }
 
 unused_port() {
@@ -39,8 +39,8 @@ public_key = "8e5CzqP3Z2SCGpxZyT5NEiJQWbAnrS6s77SC+ZFIbhA="
 
 server_public_key = "t52DtA5i4SJWQYXtrOrM4GikogBe7KcQ5CwwGtS8sf4="
 server_address = "tcp://127.0.0.1:${server_port}"
-services = [
-    {bind_to = "tcp://127.0.0.1:${client_port}", connect_to = "tcp://127.0.0.1:80"},
+allowed_addresses = [
+    "tcp://127.0.0.1:${client_port}",
 ]
 # max_connections = 1024
 # idle_connections = 10
@@ -55,6 +55,8 @@ services = [
     {bind_to = "tcp://127.0.0.1:${client_port}", connect_to = "tcp://127.0.0.1:80"},
 ]
 EOF
+
+chmod 400 "${file}"
 
 trap cleanup EXIT
 

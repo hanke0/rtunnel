@@ -1,4 +1,5 @@
 use core::panic;
+use std::fs;
 use std::string::String;
 use std::time::Duration;
 
@@ -21,6 +22,13 @@ async fn test_integration() {
         .filter_level(LevelFilter::Debug)
         .is_test(true)
         .try_init();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perm = fs::Permissions::from_mode(0o600);
+        fs::set_permissions("rtunnel.toml", perm).unwrap();
+    }
 
     let controller = Controller::new();
     let server_controller = controller.children();

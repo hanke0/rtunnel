@@ -111,9 +111,10 @@ fn check_config_perm(path: &str) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perm = permissions.mode() & 0o777;
-        if perm != 0o600 {
+
+        if perm > 0o600 {
             return Err(format_err!(
-                "Config file permission should be 0600, current is 0{:o}",
+                "Config file permission should be less or equal than 0o600, current is 0o{:o}, try `chmod 600 {path}` to fix it",
                 perm,
             ));
         }
