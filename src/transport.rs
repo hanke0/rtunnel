@@ -276,15 +276,12 @@ impl Address {
 }
 
 fn set_keepalive(stream: TcpStream) -> Result<TcpStream> {
-    let stream: std::net::TcpStream = stream.into_std().unwrap();
-    let socket: socket2::Socket = socket2::Socket::from(stream);
+    let socket_ref = socket2::SockRef::from(&stream);
     let keepalive = TcpKeepalive::new()
         .with_time(Duration::from_secs(10))
         .with_interval(Duration::from_secs(1));
-    socket.set_tcp_keepalive(&keepalive)?;
-    let stream: std::net::TcpStream = socket.into();
-
-    tokio::net::TcpStream::from_std(stream).map_err(from_io_error)
+    socket_ref.set_tcp_keepalive(&keepalive)?;
+    Ok(stream)
 }
 
 struct AddressVisitor;
@@ -413,6 +410,34 @@ impl Controller {
             child.wait().await;
         });
         children
+    }
+
+    pub async fn timeout<T, F>(&self, duration: Duration, f: F) -> Result<T>
+    where
+        F: IntoFuture<Output = Result<T>>,
+    {
+        timeout(duration, f).await
+    }
+
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
+    pub async fn timeout_default<T, F>(&self, f: F) -> Result<T>
+    where
+        F: IntoFuture<Output = Result<T>>,
+    {
+        timeout(Self::DEFAULT_TIMEOUT, f).await
+    }
+}
+
+pub async fn timeout<T, F>(duration: Duration, f: F) -> Result<T>
+where
+    F: IntoFuture<Output = Result<T>>,
+{
+    match tokio::time::timeout(duration, f).await {
+        Ok(r) => r,
+        Err(_) => Err(from_io_error(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("timeout after {:?}", duration),
+        ))),
     }
 }
 

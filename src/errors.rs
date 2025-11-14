@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::time::Duration;
 
 pub use anyhow::Context;
 pub use anyhow::Error;
@@ -27,6 +28,14 @@ pub fn from_msg<S: Display + Debug + Send + Sync + 'static>(msg: S) -> Error {
 #[inline]
 pub fn from_io_error(error: std::io::Error) -> Error {
     Error::new(ErrorKind::from_io_error(error))
+}
+
+#[inline]
+pub fn from_timeout(spend: Duration) -> Error {
+    Error::new(ErrorKind::Timeout(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("timeout after {:?}", spend),
+    )))
 }
 
 #[inline]

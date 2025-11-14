@@ -12,10 +12,11 @@ use hkdf::Hkdf;
 use log::{debug, info};
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
+use tokio::time::{Duration, sleep};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
 
 use crate::errors::{self, Context, Result, is_relay_critical_error};
-use crate::transport::{Address, Controller, Reader, Writer};
+use crate::transport::{self, Address, Controller, Reader, Writer};
 
 type PrivateKey = [u8; 32];
 type PublicKey = [u8; 32];
@@ -639,25 +640,46 @@ impl ReadSession {
         controller: &Controller,
         writer: &mut WriteSession,
     ) -> Result<Address> {
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
         loop {
-            let (typ, payload) = self
-                .encryption
-                .read_message(controller, &mut self.reader)
-                .await?;
-            match typ {
-                MessageType::Connect => return Address::from_bytes(payload),
-                MessageType::Ping => {
-                    match writer
-                        .write_ping(controller)
-                        .await
-                        .context("Failed to write ping")
-                    {
-                        Ok(()) => continue,
+            tokio::select! {
+                _ = sleep(TIMEOUT) => {
+                    return Err(errors::from_timeout(TIMEOUT));
+                }
+                addr = self.wait_connect_message_impl(controller, writer) => {
+                    match addr {
+                        Ok(Some(addr)) => return Ok(addr),
+                        Ok(None) => continue,
                         Err(err) => return Err(err),
                     }
-                }
-                _ => return Err(errors::format_err!("Unexpected message type: {}", typ)),
+                },
             };
+        }
+    }
+
+    async fn wait_connect_message_impl(
+        &mut self,
+        controller: &Controller,
+        writer: &mut WriteSession,
+    ) -> Result<Option<Address>> {
+        let (typ, payload) = self
+            .encryption
+            .read_message(controller, &mut self.reader)
+            .await?;
+        match typ {
+            MessageType::Connect => Ok(Some(Address::from_bytes(payload)?)),
+            MessageType::Ping => {
+                match writer
+                    .write_ping(controller)
+                    .await
+                    .context("Failed to write ping")
+                {
+                    Ok(()) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            }
+            _ => Err(errors::format_err!("Unexpected message type: {}", typ)),
         }
     }
 
@@ -832,6 +854,20 @@ impl WriteSession {
             .context("Failed to write to stream")?;
         Ok(())
     }
+}
+
+pub async fn keep_alive(
+    controller: &Controller,
+    reader: &mut ReadSession,
+    writer: &mut WriteSession,
+) -> Result<()> {
+    const TIMEOUT: Duration = Duration::from_secs(3);
+    transport::timeout(TIMEOUT, writer.write_ping(controller))
+        .await
+        .context("Failed to write ping message to stream")?;
+    transport::timeout(TIMEOUT, reader.read_ping(controller))
+        .await
+        .context("Failed to read ping message from stream")
 }
 
 const CLIENT_IV_LABEL: &[u8] = b"client_iv";
@@ -1238,6 +1274,7 @@ mod tests {
         );
 
         let address = Address::from_string("tcp://127.0.0.1:8080").unwrap();
+        server_write.write_ping(controller).await.unwrap();
         server_write
             .write_connect_message(controller, &address)
             .await
@@ -1248,6 +1285,7 @@ mod tests {
             .unwrap();
         assert_eq!(address, recv);
 
+        client_write.write_ping(controller).await.unwrap();
         client_write
             .write_connect_message(controller, &address)
             .await

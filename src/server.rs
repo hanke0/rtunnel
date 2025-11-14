@@ -10,10 +10,10 @@ use tokio::time::{self, Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ServerConfig;
+use crate::encryption::{self, decode_signing_key, decode_verifying_key};
 use crate::encryption::{
     ReadSession, WriteSession, copy_encrypted_bidirectional, server_handshake,
 };
-use crate::encryption::{decode_signing_key, decode_verifying_key};
 use crate::errors::{
     self, Result, cancel_error, is_accept_critical_error, is_relay_critical_error,
 };
@@ -105,8 +105,7 @@ async fn keep_alive(
                 break;
             }
             _ = interval.tick() => {
-                writer.write_ping(&controller).await?;
-                reader.read_ping(&controller).await?;
+                encryption::keep_alive(&controller,&mut reader, &mut writer).await?;
                 interval.reset();
             }
         }
@@ -397,17 +396,17 @@ async fn get_a_useable_connection_impl(
     connect_to: &Address,
 ) -> Result<(ReadSession, WriteSession)> {
     let (mut read_half, mut write_half) = options.pop_stream().await?;
-
     debug!("stream got a tunnel: {}->{}", stream, read_half);
-    write_half
-        .write_connect_message(controller, connect_to)
+
+    controller
+        .timeout_default(write_half.write_connect_message(controller, connect_to))
         .await?;
     debug!(
         "tunnel connect message has sent, wait connect message reply: {}->{}",
         stream, read_half,
     );
-    read_half
-        .wait_connect_message(controller, &mut write_half)
+    controller
+        .timeout_default(read_half.wait_connect_message(controller, &mut write_half))
         .await?;
     debug!(
         "tunnel connect message has received, relay started: {}->{}",
