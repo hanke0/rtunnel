@@ -123,6 +123,7 @@ fn check_config_perm(path: &str) -> Result<()> {
 
     #[cfg(not(any(unix)))]
     {
+        _ = permissions;
         Ok(())
     }
 }

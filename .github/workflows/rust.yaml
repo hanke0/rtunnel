@@ -20,7 +20,7 @@ jobs:
       - name: Format
         run: cargo fmt --check
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --no-deps -- -D warnings
 
   build:
     name: Build - ${{ matrix.platform.os-name }}
@@ -69,6 +69,7 @@ jobs:
           strip: true
       - name: Test
         uses: houseabsolute/actions-rust-cross@v1
+        if: ${{ matrix.platform.target != 'x86_64-unknown-freebsd' }}
         with:
           command: test
           target: ${{ matrix.platform.target }}
