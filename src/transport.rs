@@ -15,6 +15,10 @@ use tokio_util::task::TaskTracker;
 
 use crate::errors::{self, Result, cancel_error, from_io_error};
 
+/// Reader for reading data from network streams.
+///
+/// This struct provides async methods for reading data from network connections,
+/// with support for cancellation through the controller.
 pub struct Reader {
     inner: ReadInner,
     local_addr: SocketAddr,
@@ -54,6 +58,10 @@ impl Reader {
     }
 }
 
+/// Writer for writing data to network streams.
+///
+/// This struct provides async methods for writing data to network connections,
+/// with support for cancellation through the controller.
 pub struct Writer {
     inner: WriteInner,
     local_addr: SocketAddr,
@@ -114,6 +122,10 @@ impl WriteInner {
     }
 }
 
+/// A bidirectional network stream.
+///
+/// This struct represents a network connection with separate reader and writer halves,
+/// allowing for concurrent reading and writing operations.
 pub struct Stream {
     pub reader: Reader,
     pub writer: Writer,
@@ -162,6 +174,10 @@ impl Stream {
     }
 }
 
+/// Network listener for accepting incoming connections.
+///
+/// This enum represents different types of network listeners that can accept
+/// incoming connections and create streams.
 pub enum Listener {
     Tcp(TcpListener),
 }
@@ -196,6 +212,10 @@ impl Listener {
     }
 }
 
+/// Network address representation.
+///
+/// This enum represents different types of network addresses that can be used
+/// for connecting to or listening on network endpoints.
 #[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
 pub enum Address {
     Tcp(SocketAddr),
@@ -323,6 +343,11 @@ impl<'de> Deserialize<'de> for Address {
     }
 }
 
+/// Controller for managing async tasks and cancellation.
+///
+/// This struct provides facilities for spawning tasks, managing their lifecycle,
+/// and coordinating cancellation across a hierarchy of tasks. It supports creating
+/// child controllers that can be cancelled independently or as part of a parent.
 pub struct Controller {
     cancel_token: CancellationToken,
     tracker: TaskTracker,
@@ -430,6 +455,23 @@ impl Controller {
     }
 }
 
+/// Executes a future with a timeout.
+///
+/// This function wraps a future and returns an error if it doesn't complete
+/// within the specified duration.
+///
+/// # Arguments
+///
+/// * `duration` - The maximum time to wait for the future to complete
+/// * `f` - The future to execute
+///
+/// # Returns
+///
+/// Returns the result of the future if it completes within the timeout.
+///
+/// # Errors
+///
+/// Returns a timeout error if the future doesn't complete within the specified duration.
 pub async fn timeout<T, F>(duration: Duration, f: F) -> Result<T>
 where
     F: IntoFuture<Output = Result<T>>,

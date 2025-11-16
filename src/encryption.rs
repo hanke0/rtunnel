@@ -24,6 +24,10 @@ type RandomKey = [u8; 32];
 type Secret = [u8; 32];
 type NonceB = [u8; 12];
 
+/// Message type enumeration for tunnel protocol messages.
+///
+/// This enum represents the different types of messages that can be sent
+/// over the encrypted tunnel connection.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum MessageType {
     Handshake,
@@ -73,12 +77,13 @@ impl MessageType {
     }
 }
 
-/*
-2 byte header fields looks like:
-
-[2bit msg type ] [ 14 bit msg length ]
-[            msg data                ]
-*/
+/// Encrypted tunnel protocol message.
+///
+/// Messages have a 2-byte header containing:
+/// - 2 bits for message type
+/// - 14 bits for message length
+///
+/// Followed by the message payload data.
 pub struct Message(BytesMut);
 
 impl Message {
@@ -214,6 +219,10 @@ impl AsRef<[u8]> for Message {
     }
 }
 
+/// Hello message used during the handshake phase.
+///
+/// This message contains the ephemeral public key, random data, and a signature
+/// for establishing a secure connection between client and server.
 pub struct HelloMessage(Message);
 
 impl AsRef<[u8]> for HelloMessage {
@@ -342,6 +351,19 @@ fn generate_random() -> Result<RandomKey> {
     generate_random_bytes::<32>()
 }
 
+/// Generates a cryptographically secure random byte array.
+///
+/// # Type Parameters
+///
+/// * `N` - The size of the byte array to generate
+///
+/// # Returns
+///
+/// Returns a random byte array of size `N`.
+///
+/// # Errors
+///
+/// Returns an error if the random number generator fails.
 pub fn generate_random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut random = [0u8; N];
     OsRng
@@ -383,6 +405,27 @@ fn handshake(
     )
 }
 
+/// Performs the client-side handshake to establish an encrypted tunnel.
+///
+/// This function initiates the cryptographic handshake from the client side,
+/// exchanging keys and establishing encryption sessions for bidirectional communication.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `reader` - The reader for receiving data from the server
+/// * `writer` - The writer for sending data to the server
+/// * `signer` - The signing key for authenticating the client
+/// * `verifier` - The verifying key for verifying the server's identity
+///
+/// # Returns
+///
+/// Returns a tuple of `(ReadSession, WriteSession)` for encrypted communication.
+///
+/// # Errors
+///
+/// Returns an error if the handshake fails due to network issues, invalid keys,
+/// or protocol violations.
 pub async fn client_handshake(
     controller: &Controller,
     mut reader: Reader,
@@ -413,6 +456,27 @@ pub async fn client_handshake(
     ))
 }
 
+/// Performs the server-side handshake to establish an encrypted tunnel.
+///
+/// This function responds to the client's handshake, exchanging keys and
+/// establishing encryption sessions for bidirectional communication.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `reader` - The reader for receiving data from the client
+/// * `writer` - The writer for sending data to the client
+/// * `signer` - The signing key for authenticating the server
+/// * `verifier` - The verifying key for verifying the client's identity
+///
+/// # Returns
+///
+/// Returns a tuple of `(ReadSession, WriteSession)` for encrypted communication.
+///
+/// # Errors
+///
+/// Returns an error if the handshake fails due to network issues, invalid keys,
+/// or protocol violations.
 pub async fn server_handshake(
     controller: &Controller,
     mut reader: Reader,
@@ -443,6 +507,27 @@ pub async fn server_handshake(
     ))
 }
 
+/// Copies data bidirectionally between encrypted and plain streams.
+///
+/// This function relays data in both directions: from encrypted to plain and
+/// from plain to encrypted, enabling transparent tunneling of network traffic.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `read_half` - The encrypted read session
+/// * `write_half` - The encrypted write session
+/// * `raw_reader` - The plain text reader
+/// * `raw_writer` - The plain text writer
+///
+/// # Returns
+///
+/// Returns a tuple of `(read_size, write_size)` indicating bytes transferred
+/// in each direction.
+///
+/// # Errors
+///
+/// Returns an error if the relay operation fails.
 pub async fn copy_encrypted_bidirectional(
     controller: &Controller,
     mut read_half: ReadSession,
@@ -516,6 +601,10 @@ impl AsRef<[u8; 12]> for Seq {
     }
 }
 
+/// Encryption context for encrypting and decrypting tunnel messages.
+///
+/// This struct manages the encryption state, including the cipher, sequence numbers,
+/// and nonces used for secure message transmission.
 pub struct Encryption {
     secret_iv: NonceB,
     sequence: Seq,
@@ -621,6 +710,10 @@ impl Encryption {
     }
 }
 
+/// Read session for receiving encrypted messages from the tunnel.
+///
+/// This struct provides methods for reading and decrypting messages from
+/// an encrypted tunnel connection.
 pub struct ReadSession {
     reader: Reader,
     encryption: Encryption,
@@ -766,6 +859,10 @@ impl ReadSession {
     }
 }
 
+/// Write session for sending encrypted messages over the tunnel.
+///
+/// This struct provides methods for encrypting and writing messages to
+/// an encrypted tunnel connection.
 pub struct WriteSession {
     writer: Writer,
     encryption: Encryption,
@@ -870,6 +967,20 @@ impl WriteSession {
     }
 }
 
+/// Sends and receives a ping message to keep the tunnel connection alive.
+///
+/// This function performs a bidirectional ping/pong exchange to ensure
+/// the tunnel connection remains active and detect connection failures.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `reader` - The read session for receiving the ping response
+/// * `writer` - The write session for sending the ping request
+///
+/// # Errors
+///
+/// Returns an error if the keep-alive exchange fails or times out.
 pub async fn keep_alive(
     controller: &Controller,
     reader: &mut ReadSession,
@@ -941,17 +1052,47 @@ fn expand_secret(
     )
 }
 
+/// A cryptographic key pair for tunnel authentication.
+///
+/// This struct contains both the private and public keys used for
+/// signing and verifying messages during the tunnel handshake.
 pub struct KeyPair {
     pub private: PrivateKey,
     pub public: PublicKey,
 }
 
+/// Decodes a base64-encoded signing key.
+///
+/// # Arguments
+///
+/// * `data` - The base64-encoded private key string
+///
+/// # Returns
+///
+/// Returns a `SigningKey` that can be used to sign messages.
+///
+/// # Errors
+///
+/// Returns an error if the data is not valid base64 or if the key length is incorrect.
 pub fn decode_signing_key<T: AsRef<[u8]>>(data: T) -> Result<SigningKey> {
     let data = base64.decode(data).context("Failed to decode key")?;
     let b = vec_to_array(data).context("Failed to decode key")?;
     Ok(SigningKey::from_bytes(&b))
 }
 
+/// Decodes a base64-encoded verifying key.
+///
+/// # Arguments
+///
+/// * `data` - The base64-encoded public key string
+///
+/// # Returns
+///
+/// Returns a `VerifyingKey` that can be used to verify message signatures.
+///
+/// # Errors
+///
+/// Returns an error if the data is not valid base64 or if the key length is incorrect.
 pub fn decode_verifying_key<T: AsRef<[u8]>>(data: T) -> Result<VerifyingKey> {
     let data = base64.decode(data).context("Failed to decode key")?;
     let b = vec_to_array(data).context("Failed to decode key")?;

@@ -8,6 +8,10 @@ use serde::de::DeserializeOwned;
 use crate::errors::{Context, Result, format_err, from_error, from_io_error};
 use crate::transport;
 
+/// Root configuration structure that can contain both server and client configurations.
+///
+/// This is the top-level configuration structure that is deserialized from TOML files.
+/// It may contain either server configurations, client configurations, or both.
 #[derive(Deserialize)]
 pub struct Config {
     pub servers: Option<ServerConfigList>,
@@ -17,6 +21,10 @@ pub struct Config {
 pub type ServerConfigList = Vec<ServerConfig>;
 pub type ClientConfigList = Vec<ClientConfig>;
 
+/// Server configuration for rtunnel.
+///
+/// This struct contains all the settings needed to run a tunnel server,
+/// including the listening address, cryptographic keys, and service definitions.
 #[derive(Deserialize)]
 pub struct ServerConfig {
     pub listen: transport::Address,
@@ -25,6 +33,10 @@ pub struct ServerConfig {
     pub services: Vec<Service>,
 }
 
+/// Client configuration for rtunnel.
+///
+/// This struct contains all the settings needed to run a tunnel client,
+/// including the server address, cryptographic keys, and connection limits.
 #[derive(Deserialize)]
 pub struct ClientConfig {
     pub private_key: String,
@@ -37,6 +49,10 @@ pub struct ClientConfig {
     pub idle_connections: i32,
 }
 
+/// Service definition for a tunnel server.
+///
+/// A service maps an external listening address to an internal destination address,
+/// allowing the server to forward traffic from the public interface to backend services.
 #[derive(Deserialize)]
 pub struct Service {
     pub bind_to: transport::Address,
@@ -44,10 +60,38 @@ pub struct Service {
 }
 
 impl ServerConfig {
+    /// Loads server configurations from a TOML file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the configuration file
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of server configurations parsed from the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, parsed, or if no server
+    /// configurations are found in the file.
     pub fn from_file(path: &str) -> Result<ServerConfigList> {
         let content = read_config_file(path)?;
         Self::from_string(&content)
     }
+    /// Parses server configurations from a TOML string.
+    ///
+    /// # Arguments
+    ///
+    /// * `contents` - The TOML configuration string
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of server configurations parsed from the string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the string cannot be parsed or if no server
+    /// configurations are found.
     pub fn from_string(contents: &str) -> Result<ServerConfigList> {
         let cfg = from_string::<Config>(contents)?;
         let servers = cfg.servers.ok_or(format_err!("No server config found"))?;
@@ -59,10 +103,40 @@ impl ServerConfig {
 }
 
 impl ClientConfig {
+    /// Loads client configurations from a TOML file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the configuration file
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of client configurations parsed from the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, parsed, or if no client
+    /// configurations are found in the file.
     pub fn from_file(path: &str) -> Result<ClientConfigList> {
         let content = read_config_file(path)?;
         Self::from_string(&content)
     }
+    /// Parses client configurations from a TOML string.
+    ///
+    /// # Arguments
+    ///
+    /// * `contents` - The TOML configuration string
+    ///
+    /// # Returns
+    ///
+    /// Returns a list of client configurations parsed from the string.
+    /// Default values are applied for `max_connections` (2048) and
+    /// `idle_connections` (8) if not specified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the string cannot be parsed or if no client
+    /// configurations are found.
     pub fn from_string(contents: &str) -> Result<ClientConfigList> {
         let cfg = from_string::<Config>(contents)?;
         let mut clients = cfg.clients.ok_or(format_err!("No client config found"))?;

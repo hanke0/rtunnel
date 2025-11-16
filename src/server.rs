@@ -184,6 +184,24 @@ impl TunnelPool {
 
 type ServerOptionsRef = Arc<ServerOptions>;
 
+/// Starts a tunnel server with the given configuration.
+///
+/// This function sets up listeners for tunnel connections and service endpoints,
+/// manages the tunnel connection pool, and handles incoming connections.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `cfg` - The server configuration
+///
+/// # Returns
+///
+/// Returns `Ok(())` if the server starts successfully.
+///
+/// # Errors
+///
+/// Returns an error if the configuration is invalid, listeners cannot be bound,
+/// or cryptographic keys are invalid.
 pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.client_public_key)?;
     let signer = decode_signing_key(&cfg.private_key)?;

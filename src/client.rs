@@ -16,6 +16,10 @@ use crate::encryption::{decode_signing_key, decode_verifying_key};
 use crate::errors::{self, Context, Result, is_relay_critical_error};
 use crate::transport::{Address, Controller};
 
+/// Event notification types for client connection management.
+///
+/// This enum represents different events that can occur during the lifecycle
+/// of client connections, used for tracking connection state and statistics.
 #[derive(Clone, Copy)]
 pub enum NotifyEvent {
     Shutdown,
@@ -96,6 +100,25 @@ impl Drop for StreamGuard {
     }
 }
 
+/// Starts a tunnel client with the given configuration.
+///
+/// This function establishes a connection to the tunnel server, performs the
+/// handshake, and begins managing tunnel connections. It spawns a background
+/// task to maintain the connection pool and handle reconnections.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `cfg` - The client configuration
+///
+/// # Returns
+///
+/// Returns `Ok(())` if the client starts successfully.
+///
+/// # Errors
+///
+/// Returns an error if the configuration is invalid, the connection fails,
+/// or the handshake cannot be completed.
 pub async fn start_client(controller: &Controller, cfg: &ClientConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.server_public_key)?;
     let signer = decode_signing_key(&cfg.private_key)?;

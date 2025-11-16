@@ -18,6 +18,19 @@ use crate::encryption::KeyPair;
 pub use crate::encryption::generate_random_bytes;
 pub use crate::transport::Controller;
 
+/// Runs the rtunnel application based on the provided CLI options.
+///
+/// This function handles the main command-line interface and dispatches to
+/// the appropriate handler based on the selected command.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `options` - The parsed command-line arguments
+///
+/// # Returns
+///
+/// Returns an exit code: 0 for success, non-zero for failure
 pub async fn run(controller: &Controller, options: Cli) -> i32 {
     match options.command {
         Commands::GenerateKey {} => {
@@ -42,6 +55,20 @@ pub async fn run(controller: &Controller, options: Cli) -> i32 {
     }
 }
 
+/// Runs the client mode of rtunnel.
+///
+/// This function starts one or more client connections based on the provided
+/// configurations. Each client connects to a tunnel server and manages
+/// connections for relaying traffic.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `configs` - A vector of client configurations to start
+///
+/// # Returns
+///
+/// Returns an exit code: 0 for success, 1 for failure
 pub async fn run_client(controller: &Controller, configs: Vec<ClientConfig>) -> i32 {
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
@@ -68,6 +95,20 @@ pub async fn run_client(controller: &Controller, configs: Vec<ClientConfig>) -> 
     0
 }
 
+/// Runs the server mode of rtunnel.
+///
+/// This function starts one or more server instances based on the provided
+/// configurations. Each server listens for tunnel connections and manages
+/// services that forward traffic to backend services.
+///
+/// # Arguments
+///
+/// * `controller` - The controller for managing async tasks and cancellation
+/// * `configs` - A vector of server configurations to start
+///
+/// # Returns
+///
+/// Returns an exit code: 0 for success, 1 for failure
 pub async fn run_server(controller: &Controller, configs: Vec<ServerConfig>) -> i32 {
     debug!("starting {} server", configs.len());
     for cfg in configs.iter() {
@@ -148,6 +189,10 @@ async fn graceful_exit(controller: &Controller, side: &str) {
     }
 }
 
+/// Command-line interface structure for rtunnel.
+///
+/// This struct represents the top-level CLI arguments and commands.
+/// It is used to parse and handle command-line input.
 #[derive(Debug, Parser)] // requires `derive` feature
 #[command(
     name = "rtunnel",
@@ -170,6 +215,9 @@ pub struct Cli {
     pub log_level: log::LevelFilter,
 }
 
+/// Available commands for the rtunnel CLI.
+///
+/// This enum represents all the subcommands that can be executed by rtunnel.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     #[command(
