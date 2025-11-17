@@ -15,7 +15,7 @@ use tokio::time::sleep;
 
 use rtunnel::errors::from_io_error;
 use rtunnel::generate_random_bytes;
-use rtunnel::{Cli, Context, run};
+use rtunnel::{Arguments, Context, run};
 
 #[tokio::test]
 async fn test_integration() {
@@ -40,7 +40,7 @@ async fn test_integration() {
             "--config".into(),
             "rtunnel.toml".into(),
         ];
-        let options = Cli::parse_from(args);
+        let options = Arguments::parse_from(args);
         let code = run(&server_controller, options).await;
         assert_eq!(code, 0);
     });
@@ -54,7 +54,7 @@ async fn test_integration() {
             "--config".into(),
             "rtunnel.toml".into(),
         ];
-        let options = Cli::parse_from(args);
+        let options = Arguments::parse_from(args);
         let code = run(&client_controller, options).await;
         assert_eq!(code, 0);
     });

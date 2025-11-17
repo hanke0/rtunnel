@@ -4,11 +4,11 @@ use clap::Parser;
 use tokio::runtime::Builder;
 
 use rtunnel::Context;
-use rtunnel::{Cli, run};
+use rtunnel::{Arguments, run};
 
 fn main() {
     let controller = Context::new();
-    let options = Cli::parse();
+    let options = Arguments::parse();
     env_logger::Builder::new()
         .filter_level(options.log_level)
         .format_indent(Some(4))

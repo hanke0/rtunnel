@@ -22,17 +22,8 @@ pub use crate::transport::Context;
 ///
 /// This function handles the main command-line interface and dispatches to
 /// the appropriate handler based on the selected command.
-///
-/// # Arguments
-///
-/// * `controller` - The controller for managing async tasks and cancellation
-/// * `options` - The parsed command-line arguments
-///
-/// # Returns
-///
-/// Returns an exit code: 0 for success, non-zero for failure
-pub async fn run(controller: &Context, options: Cli) -> i32 {
-    match options.command {
+pub async fn run(controller: &Context, args: Arguments) -> i32 {
+    match args.command {
         Commands::GenerateKey {} => {
             let pair = KeyPair::random();
             pair.print();
@@ -60,15 +51,6 @@ pub async fn run(controller: &Context, options: Cli) -> i32 {
 /// This function starts one or more client connections based on the provided
 /// configurations. Each client connects to a tunnel server and manages
 /// connections for relaying traffic.
-///
-/// # Arguments
-///
-/// * `controller` - The controller for managing async tasks and cancellation
-/// * `configs` - A vector of client configurations to start
-///
-/// # Returns
-///
-/// Returns an exit code: 0 for success, 1 for failure
 pub async fn run_client(controller: &Context, configs: Vec<ClientConfig>) -> i32 {
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
@@ -189,7 +171,7 @@ async fn graceful_exit(controller: &Context, side: &str) {
     }
 }
 
-/// Command-line interface structure for rtunnel.
+/// Command-line interface arguments structure for rtunnel.
 ///
 /// This struct represents the top-level CLI arguments and commands.
 /// It is used to parse and handle command-line input.
@@ -200,7 +182,7 @@ async fn graceful_exit(controller: &Context, side: &str) {
     about = "A lightweight tunnel tool.",
     long_about = "A lightweight tunneling tool, written in Rust, for exposing local servers behind NATs and firewalls to the public internet."
 )]
-pub struct Cli {
+pub struct Arguments {
     #[command(subcommand)]
     pub command: Commands,
 
