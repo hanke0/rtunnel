@@ -5,7 +5,7 @@ use std::io::Read;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::errors::{Context, Result, format_err, from_error, from_io_error};
+use crate::errors::{Context as _, Result, format_err, from_error, from_io_error};
 use crate::transport;
 
 /// Root configuration structure that can contain both server and client configurations.

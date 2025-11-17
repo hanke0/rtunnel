@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use tokio::time::{Duration, sleep};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
 
-use crate::errors::{self, Context, Result};
-use crate::transport::{self, Address, Controller, Reader, Writer};
+use crate::errors::{self, Context as _, Result};
+use crate::transport::{self, Address, Context, Reader, Writer};
 
 type PrivateKey = [u8; 32];
 type PublicKey = [u8; 32];
@@ -178,17 +178,13 @@ impl Message {
     }
 
     #[allow(dead_code)]
-    async fn read_from(controller: &Controller, reader: &mut Reader) -> Result<Self> {
+    async fn read_from(controller: &Context, reader: &mut Reader) -> Result<Self> {
         let mut msg = Self::default();
         msg.read_from_inplace(controller, reader).await?;
         Ok(msg)
     }
 
-    async fn read_from_inplace(
-        &mut self,
-        controller: &Controller,
-        reader: &mut Reader,
-    ) -> Result<()> {
+    async fn read_from_inplace(&mut self, controller: &Context, reader: &mut Reader) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
         reader
             .read_exact(controller, &mut self.0)
@@ -304,7 +300,7 @@ impl HelloMessage {
     }
 
     async fn read_from(
-        controller: &Controller,
+        controller: &Context,
         reader: &mut Reader,
         verifier: &VerifyingKey,
     ) -> Result<Self> {
@@ -317,7 +313,7 @@ impl HelloMessage {
 
     async fn read_from_inplace(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         reader: &mut Reader,
         verifier: &VerifyingKey,
     ) -> Result<()> {
@@ -427,7 +423,7 @@ fn handshake(
 /// Returns an error if the handshake fails due to network issues, invalid keys,
 /// or protocol violations.
 pub async fn client_handshake(
-    controller: &Controller,
+    controller: &Context,
     mut reader: Reader,
     mut writer: Writer,
     signer: &SigningKey,
@@ -478,7 +474,7 @@ pub async fn client_handshake(
 /// Returns an error if the handshake fails due to network issues, invalid keys,
 /// or protocol violations.
 pub async fn server_handshake(
-    controller: &Controller,
+    controller: &Context,
     mut reader: Reader,
     mut writer: Writer,
     signer: &SigningKey,
@@ -529,7 +525,7 @@ pub async fn server_handshake(
 ///
 /// Returns an error if the relay operation fails.
 pub async fn copy_encrypted_bidirectional(
-    controller: &Controller,
+    controller: &Context,
     mut read_half: ReadSession,
     mut write_half: WriteSession,
     mut raw_reader: Reader,
@@ -624,7 +620,7 @@ impl Encryption {
 
     async fn read_message<'a>(
         &'a mut self,
-        controller: &Controller,
+        controller: &Context,
         reader: &mut Reader,
     ) -> Result<(MessageType, &'a [u8])> {
         self.message.read_from_inplace(controller, reader).await?;
@@ -634,7 +630,7 @@ impl Encryption {
 
     async fn inplace_from_reader<'a>(
         &'a mut self,
-        controller: &Controller,
+        controller: &Context,
         reader: &mut Reader,
     ) -> Result<(usize, &'a [u8])> {
         let message = &mut self.message;
@@ -730,7 +726,7 @@ impl ReadSession {
         Self { reader, encryption }
     }
 
-    pub async fn read_ping(&mut self, controller: &Controller) -> Result<()> {
+    pub async fn read_ping(&mut self, controller: &Context) -> Result<()> {
         let (typ, _) = self
             .encryption
             .read_message(controller, &mut self.reader)
@@ -743,7 +739,7 @@ impl ReadSession {
 
     pub async fn wait_connect_message(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         writer: &mut WriteSession,
     ) -> Result<Address> {
         const TIMEOUT: Duration = Duration::from_secs(10);
@@ -766,7 +762,7 @@ impl ReadSession {
 
     async fn wait_connect_message_impl(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         writer: &mut WriteSession,
     ) -> Result<Option<Address>> {
         let (typ, payload) = self
@@ -792,7 +788,7 @@ impl ReadSession {
     #[inline]
     pub async fn read_message<'a>(
         &'a mut self,
-        controller: &Controller,
+        controller: &Context,
     ) -> Result<(MessageType, &'a [u8])> {
         self.encryption
             .read_message(controller, &mut self.reader)
@@ -801,7 +797,7 @@ impl ReadSession {
 
     pub async fn relay_encrypted_to_plain_forever(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         writer: &mut Writer,
     ) -> Result<usize> {
         let mut size: usize = 0;
@@ -823,7 +819,7 @@ impl ReadSession {
 
     async fn relay_encrypted_to_plain(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         writer: &mut Writer,
     ) -> Result<usize> {
         tokio::select! {
@@ -835,7 +831,7 @@ impl ReadSession {
     #[inline]
     async fn relay_encrypted_to_plain_impl(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         writer: &mut Writer,
     ) -> Result<usize> {
         let (typ, buf) = match self.read_message(controller).await {
@@ -879,7 +875,7 @@ impl WriteSession {
         Self { writer, encryption }
     }
 
-    pub async fn write_ping(&mut self, controller: &Controller) -> Result<()> {
+    pub async fn write_ping(&mut self, controller: &Context) -> Result<()> {
         let data = self.encryption.replace_payload(MessageType::Ping, &[])?;
         self.writer
             .write_all(controller, data)
@@ -889,7 +885,7 @@ impl WriteSession {
 
     pub async fn write_connect_message(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         address: &Address,
     ) -> Result<()> {
         let data = self
@@ -903,7 +899,7 @@ impl WriteSession {
 
     pub async fn relay_plain_to_encrypted_forever(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         reader: &mut Reader,
     ) -> Result<usize> {
         let mut size: usize = 0;
@@ -924,7 +920,7 @@ impl WriteSession {
 
     async fn relay_plain_to_encrypted(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         reader: &mut Reader,
     ) -> Result<usize> {
         tokio::select! {
@@ -936,7 +932,7 @@ impl WriteSession {
     #[inline]
     async fn replay_plain_to_encrypted_impl(
         &mut self,
-        controller: &Controller,
+        controller: &Context,
         reader: &mut Reader,
     ) -> Result<usize> {
         let (n, data) = self
@@ -955,7 +951,7 @@ impl WriteSession {
 
     #[inline]
     #[allow(dead_code)]
-    async fn write_data(&mut self, controller: &Controller, payload: &[u8]) -> Result<()> {
+    async fn write_data(&mut self, controller: &Context, payload: &[u8]) -> Result<()> {
         let data = self
             .encryption
             .replace_payload(MessageType::Data, payload)?;
@@ -982,7 +978,7 @@ impl WriteSession {
 ///
 /// Returns an error if the keep-alive exchange fails or times out.
 pub async fn keep_alive(
-    controller: &Controller,
+    controller: &Context,
     reader: &mut ReadSession,
     writer: &mut WriteSession,
 ) -> Result<()> {
@@ -1254,7 +1250,7 @@ mod tests {
         msg.replace_payload(MessageType::Data, move |buf| {
             buf.put(expected);
         });
-        let controller = Controller::default();
+        let controller = Context::default();
         client
             .writer
             .write_all(&controller, msg.as_ref())
@@ -1350,7 +1346,7 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Controller::default();
+        let controller = &Context::default();
 
         let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
             async move {
@@ -1406,7 +1402,7 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Controller::default();
+        let controller = &Context::default();
 
         let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
             async move {
@@ -1472,7 +1468,7 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Controller::default();
+        let controller = &Context::default();
 
         let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
             async move {
@@ -1578,7 +1574,7 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Controller::default();
+        let controller = &Context::default();
         let (sender, mut receiver) = channel(2);
         let sender = &sender;
         let address = Address::from_string("tcp://127.0.0.1:8080").unwrap();

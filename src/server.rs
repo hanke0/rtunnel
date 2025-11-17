@@ -17,7 +17,7 @@ use crate::encryption::{
 use crate::errors::{
     self, Result, cancel_error, is_accept_critical_error, is_relay_critical_error,
 };
-use crate::transport::{Address, Controller, Listener, Stream};
+use crate::transport::{Address, Context, Listener, Stream};
 
 struct ServerOptions {
     verifier: VerifyingKey,
@@ -32,7 +32,7 @@ impl ServerOptions {
     }
 
     #[inline]
-    async fn push_stream(&self, controller: Controller, reader: ReadSession, writer: WriteSession) {
+    async fn push_stream(&self, controller: Context, reader: ReadSession, writer: WriteSession) {
         self.pool.clone().add(controller, reader, writer).await
     }
 }
@@ -90,7 +90,7 @@ impl Session {
 }
 
 async fn keep_alive(
-    controller: Controller,
+    controller: Context,
     stopped: CancellationToken,
     mut reader: ReadSession,
     mut writer: WriteSession,
@@ -132,7 +132,7 @@ impl TunnelPool {
         }))
     }
 
-    async fn add(self, controller: Controller, reader: ReadSession, writer: WriteSession) {
+    async fn add(self, controller: Context, reader: ReadSession, writer: WriteSession) {
         let cancel_token = CancellationToken::new();
         let id = format!("{}", reader);
         let (sender, receiver) = mpsc::channel(1);
@@ -202,7 +202,7 @@ type ServerOptionsRef = Arc<ServerOptions>;
 ///
 /// Returns an error if the configuration is invalid, listeners cannot be bound,
 /// or cryptographic keys are invalid.
-pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result<()> {
+pub async fn start_server(controller: &Context, cfg: &ServerConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.client_public_key)?;
     let signer = decode_signing_key(&cfg.private_key)?;
 
@@ -236,7 +236,7 @@ pub async fn start_server(controller: &Controller, cfg: &ServerConfig) -> Result
     Ok(())
 }
 
-async fn tunnel_timer(controller: Controller, options: ServerOptionsRef, address: Address) {
+async fn tunnel_timer(controller: Context, options: ServerOptionsRef, address: Address) {
     if !log::log_enabled!(log::Level::Info) {
         return;
     }
@@ -252,7 +252,7 @@ async fn tunnel_timer(controller: Controller, options: ServerOptionsRef, address
     }
 }
 
-async fn start_tunnel(controller: Controller, mut listener: Listener, options: ServerOptionsRef) {
+async fn start_tunnel(controller: Context, mut listener: Listener, options: ServerOptionsRef) {
     let controller = &controller;
     loop {
         match listener.accept(controller).await {
@@ -276,7 +276,7 @@ async fn start_tunnel(controller: Controller, mut listener: Listener, options: S
     controller.wait().await;
 }
 
-async fn handle_tunnel(controller: Controller, stream: Stream, options: ServerOptionsRef) {
+async fn handle_tunnel(controller: Context, stream: Stream, options: ServerOptionsRef) {
     let addr = format!("{}", stream);
     match handle_tunnel_impl(&controller, stream, &options).await {
         Ok(_) => {
@@ -289,7 +289,7 @@ async fn handle_tunnel(controller: Controller, stream: Stream, options: ServerOp
 }
 
 async fn handle_tunnel_impl(
-    controller: &Controller,
+    controller: &Context,
     stream: Stream,
     options: &ServerOptionsRef,
 ) -> Result<()> {
@@ -308,7 +308,7 @@ async fn handle_tunnel_impl(
 }
 
 async fn start_service(
-    controller: Controller,
+    controller: Context,
     mut listener: Listener,
     connect_to: Address,
     options: ServerOptionsRef,
@@ -342,7 +342,7 @@ async fn start_service(
 }
 
 async fn handle_service_stream(
-    controller: Controller,
+    controller: Context,
     stream: Stream,
     options: ServerOptionsRef,
     connect_to: Address,
@@ -370,7 +370,7 @@ async fn handle_service_stream(
 }
 
 async fn handle_service_stream_impl(
-    controller: &Controller,
+    controller: &Context,
     mut stream: Stream,
     options: &ServerOptionsRef,
     connect_to: &Address,
@@ -389,7 +389,7 @@ async fn handle_service_stream_impl(
 }
 
 async fn get_a_useable_connection(
-    controller: &Controller,
+    controller: &Context,
     options: &ServerOptionsRef,
     stream: &mut Stream,
     connect_to: &Address,
@@ -408,7 +408,7 @@ async fn get_a_useable_connection(
 }
 
 async fn get_a_useable_connection_impl(
-    controller: &Controller,
+    controller: &Context,
     options: &ServerOptionsRef,
     stream: &mut Stream,
     connect_to: &Address,

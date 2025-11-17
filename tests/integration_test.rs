@@ -15,7 +15,7 @@ use tokio::time::sleep;
 
 use rtunnel::errors::from_io_error;
 use rtunnel::generate_random_bytes;
-use rtunnel::{Cli, Controller, run};
+use rtunnel::{Cli, Context, run};
 
 #[tokio::test]
 async fn test_integration() {
@@ -31,7 +31,7 @@ async fn test_integration() {
         fs::set_permissions("rtunnel.toml", perm).unwrap();
     }
 
-    let controller = Controller::new();
+    let controller = Context::new();
     let server_controller = controller.children();
     let server_handle = spawn(async move {
         let args: Vec<String> = vec![
@@ -100,7 +100,7 @@ async fn test_integration() {
     controller.wait().await;
 }
 
-async fn connect_to_echo(controller: Controller) {
+async fn connect_to_echo(controller: Context) {
     let stream = TcpStream::connect("127.0.0.1:2334").await.unwrap();
     let expect = generate_random_bytes::<65535>().unwrap();
     let mut got = [0u8; 65535];

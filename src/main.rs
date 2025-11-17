@@ -3,11 +3,11 @@ use std::process;
 use clap::Parser;
 use tokio::runtime::Builder;
 
-use rtunnel::Controller;
+use rtunnel::Context;
 use rtunnel::{Cli, run};
 
 fn main() {
-    let controller = Controller::new();
+    let controller = Context::new();
     let options = Cli::parse();
     env_logger::Builder::new()
         .filter_level(options.log_level)

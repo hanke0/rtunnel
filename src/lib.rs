@@ -16,7 +16,7 @@ pub mod transport;
 pub use crate::config::{ClientConfig, ServerConfig};
 use crate::encryption::KeyPair;
 pub use crate::encryption::generate_random_bytes;
-pub use crate::transport::Controller;
+pub use crate::transport::Context;
 
 /// Runs the rtunnel application based on the provided CLI options.
 ///
@@ -31,7 +31,7 @@ pub use crate::transport::Controller;
 /// # Returns
 ///
 /// Returns an exit code: 0 for success, non-zero for failure
-pub async fn run(controller: &Controller, options: Cli) -> i32 {
+pub async fn run(controller: &Context, options: Cli) -> i32 {
     match options.command {
         Commands::GenerateKey {} => {
             let pair = KeyPair::random();
@@ -69,7 +69,7 @@ pub async fn run(controller: &Controller, options: Cli) -> i32 {
 /// # Returns
 ///
 /// Returns an exit code: 0 for success, 1 for failure
-pub async fn run_client(controller: &Controller, configs: Vec<ClientConfig>) -> i32 {
+pub async fn run_client(controller: &Context, configs: Vec<ClientConfig>) -> i32 {
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
         let err = client::start_client(controller, cfg).await;
@@ -109,7 +109,7 @@ pub async fn run_client(controller: &Controller, configs: Vec<ClientConfig>) -> 
 /// # Returns
 ///
 /// Returns an exit code: 0 for success, 1 for failure
-pub async fn run_server(controller: &Controller, configs: Vec<ServerConfig>) -> i32 {
+pub async fn run_server(controller: &Context, configs: Vec<ServerConfig>) -> i32 {
     debug!("starting {} server", configs.len());
     for cfg in configs.iter() {
         let err = server::start_server(controller, cfg).await;
@@ -175,7 +175,7 @@ async fn wait_exit_signal() {
     }
 }
 
-async fn graceful_exit(controller: &Controller, side: &str) {
+async fn graceful_exit(controller: &Context, side: &str) {
     controller.cancel_all();
     loop {
         select! {

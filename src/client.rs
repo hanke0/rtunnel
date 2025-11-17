@@ -13,8 +13,8 @@ use crate::encryption::client_handshake;
 use crate::encryption::copy_encrypted_bidirectional;
 use crate::encryption::{ReadSession, WriteSession};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
-use crate::errors::{self, Context, Result, is_relay_critical_error};
-use crate::transport::{Address, Controller};
+use crate::errors::{self, Context as _, Result, is_relay_critical_error};
+use crate::transport::{Address, Context};
 
 /// Event notification types for client connection management.
 ///
@@ -119,7 +119,7 @@ impl Drop for StreamGuard {
 ///
 /// Returns an error if the configuration is invalid, the connection fails,
 /// or the handshake cannot be completed.
-pub async fn start_client(controller: &Controller, cfg: &ClientConfig) -> Result<()> {
+pub async fn start_client(controller: &Context, cfg: &ClientConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.server_public_key)?;
     let signer = decode_signing_key(&cfg.private_key)?;
 
@@ -138,7 +138,7 @@ pub async fn start_client(controller: &Controller, cfg: &ClientConfig) -> Result
     Ok(())
 }
 
-async fn start_client_sentry(controller: Controller, options: ClientOptionsRef) {
+async fn start_client_sentry(controller: Context, options: ClientOptionsRef) {
     let (sender, mut receiver) = unbounded_channel();
     let guard = StreamGuarder::new(sender);
     keep_client_connections(&controller, &options, &guard, &mut receiver).await;
@@ -150,7 +150,7 @@ async fn start_client_sentry(controller: Controller, options: ClientOptionsRef) 
 }
 
 async fn keep_client_connections(
-    controller: &Controller,
+    controller: &Context,
     options: &ClientOptionsRef,
     guard: &StreamGuarder,
     receiver: &mut Receiver,
@@ -222,7 +222,7 @@ async fn keep_client_connections(
 }
 
 async fn start_new_tunnel(
-    controller: Controller,
+    controller: Context,
     guard: StreamGuarder,
     options: ClientOptionsRef,
     fatal: bool,
@@ -258,7 +258,7 @@ fn can_retry_connect(error: &errors::Error) -> bool {
 }
 
 async fn start_new_tunnel_impl(
-    controller: &Controller,
+    controller: &Context,
     guard: &StreamGuarder,
     options: &ClientOptionsRef,
 ) -> Result<()> {
@@ -268,7 +268,7 @@ async fn start_new_tunnel_impl(
 }
 
 async fn connect_to_server(
-    controller: &Controller,
+    controller: &Context,
     options: &ClientOptionsRef,
 ) -> Result<(ReadSession, WriteSession)> {
     let conn = options
@@ -290,7 +290,7 @@ async fn connect_to_server(
 }
 
 async fn handle_relay(
-    controller: &Controller,
+    controller: &Context,
     guard: &StreamGuarder,
     read_half: ReadSession,
     write_half: WriteSession,
@@ -315,7 +315,7 @@ async fn handle_relay(
 }
 
 async fn handle_relay_impl(
-    controller: &Controller,
+    controller: &Context,
     guard: &StreamGuarder,
     mut read_half: ReadSession,
     mut write_half: WriteSession,

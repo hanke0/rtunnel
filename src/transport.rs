@@ -32,7 +32,7 @@ impl fmt::Display for Reader {
 
 impl Reader {
     #[inline]
-    pub async fn read(&mut self, controller: &Controller, buf: &mut [u8]) -> Result<usize> {
+    pub async fn read(&mut self, controller: &Context, buf: &mut [u8]) -> Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
@@ -40,7 +40,7 @@ impl Reader {
         }
     }
     #[inline]
-    pub async fn read_exact(&mut self, controller: &Controller, buf: &mut [u8]) -> Result<usize> {
+    pub async fn read_exact(&mut self, controller: &Context, buf: &mut [u8]) -> Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
@@ -66,7 +66,7 @@ impl fmt::Display for Writer {
 
 impl Writer {
     #[inline]
-    pub async fn write_all(&mut self, controller: &Controller, data: &[u8]) -> Result<()> {
+    pub async fn write_all(&mut self, controller: &Context, data: &[u8]) -> Result<()> {
         assert_ne!(data.len(), 0);
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
@@ -158,7 +158,7 @@ impl fmt::Display for Listener {
 }
 
 impl Listener {
-    pub async fn accept(&mut self, controller: &Controller) -> Result<Stream> {
+    pub async fn accept(&mut self, controller: &Context) -> Result<Stream> {
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
             r = self.accept_impl() => r,
@@ -169,7 +169,7 @@ impl Listener {
         match self {
             Listener::Tcp(s) => {
                 let (stream, _) = s.accept().await?;
-                let stream = set_keepalive(stream)?;
+                set_keep_alive(&stream)?;
                 Ok(Stream::from_tcp_stream(stream))
             }
         }
@@ -223,7 +223,7 @@ impl Address {
         Ok(Address::Tcp(addr))
     }
 
-    pub async fn connect_to(&self, controller: &Controller) -> Result<Stream> {
+    pub async fn connect_to(&self, controller: &Context) -> Result<Stream> {
         tokio::select! {
             _ = controller.wait_cancel() => Err(cancel_error()),
             r = self.connect_to_impl() => r,
@@ -234,13 +234,13 @@ impl Address {
         match self {
             Address::Tcp(a) => {
                 let stream = TcpStream::connect(a).await.map_err(from_io_error)?;
-                let stream = set_keepalive(stream)?;
+                set_keep_alive(&stream)?;
                 Ok(Stream::from_tcp_stream(stream))
             }
         }
     }
 
-    pub async fn listen_to(&self, controller: &Controller) -> Result<Listener> {
+    pub async fn listen_to(&self, controller: &Context) -> Result<Listener> {
         tokio::select! {
             _ = controller.wait_cancel() => {
                 Err(cancel_error())
@@ -259,15 +259,14 @@ impl Address {
     }
 }
 
-fn set_keepalive(stream: TcpStream) -> Result<TcpStream> {
-    let socket_ref = socket2::SockRef::from(&stream);
+fn set_keep_alive(stream: &TcpStream) -> Result<()> {
+    let socket_ref = socket2::SockRef::from(stream);
     let keepalive = TcpKeepalive::new()
         .with_time(Duration::from_secs(10))
         .with_interval(Duration::from_secs(1));
     socket_ref
         .set_tcp_keepalive(&keepalive)
-        .map_err(from_io_error)?;
-    Ok(stream)
+        .map_err(from_io_error)
 }
 
 struct AddressVisitor;
@@ -307,18 +306,18 @@ impl<'de> Deserialize<'de> for Address {
     }
 }
 
-/// Controller for managing async tasks and cancellation.
+/// Context for managing async tasks and cancellation.
 ///
 /// This struct provides facilities for spawning tasks, managing their lifecycle,
 /// and coordinating cancellation across a hierarchy of tasks. It supports creating
 /// child controllers that can be cancelled independently or as part of a parent.
-pub struct Controller {
+pub struct Context {
     cancel_token: CancellationToken,
     tracker: TaskTracker,
     father: Option<Box<Self>>,
 }
 
-impl Clone for Controller {
+impl Clone for Context {
     fn clone(&self) -> Self {
         Self {
             cancel_token: self.cancel_token.clone(),
@@ -328,7 +327,7 @@ impl Clone for Controller {
     }
 }
 
-impl Default for Controller {
+impl Default for Context {
     fn default() -> Self {
         Self {
             cancel_token: CancellationToken::new(),
@@ -338,7 +337,7 @@ impl Default for Controller {
     }
 }
 
-impl Controller {
+impl Context {
     pub fn new() -> Self {
         Self::default()
     }
@@ -459,7 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_controller_children_wait() {
-        let father = Controller::default();
+        let father = Context::default();
         let children = father.children();
         let grandson = children.children();
         let father1 = father.clone();
@@ -523,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_controller_cancel() {
-        let controller = Controller::default();
+        let controller = Context::default();
         let children = controller.children();
 
         children.cancel();
@@ -540,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_controller_cancel_children() {
-        let controller = Controller::default();
+        let controller = Context::default();
         let children = controller.children();
 
         controller.cancel();
@@ -552,7 +551,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_controller_timeout() {
-        let controller = Controller::default();
+        let controller = Context::default();
         let err = controller
             .timeout(Duration::from_secs(1), async {
                 sleep(Duration::from_secs(2)).await;
