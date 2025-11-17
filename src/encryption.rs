@@ -618,7 +618,7 @@ impl Encryption {
         }
     }
 
-    async fn read_message<'a>(
+    async fn read_and_decrypt_inplace<'a>(
         &'a mut self,
         controller: &Context,
         reader: &mut Reader,
@@ -628,7 +628,7 @@ impl Encryption {
         Ok((self.message.get_type(), self.message.get_payload()))
     }
 
-    async fn inplace_from_reader<'a>(
+    async fn read_and_encrypt_inplace<'a>(
         &'a mut self,
         controller: &Context,
         reader: &mut Reader,
@@ -722,14 +722,16 @@ impl fmt::Display for ReadSession {
 }
 
 impl ReadSession {
+    // new creates a new ReadSession.
     pub fn new(reader: Reader, encryption: Encryption) -> Self {
         Self { reader, encryption }
     }
 
+    // read_ping reads a PING message from the tunnel.
     pub async fn read_ping(&mut self, controller: &Context) -> Result<()> {
         let (typ, _) = self
             .encryption
-            .read_message(controller, &mut self.reader)
+            .read_and_decrypt_inplace(controller, &mut self.reader)
             .await?;
         match typ {
             MessageType::Ping => Ok(()),
@@ -737,6 +739,9 @@ impl ReadSession {
         }
     }
 
+    // wait_connect_message waits for a connect message from the tunnel.
+    // It returns the address of the remote service.
+    // It handles PING messages as well.
     pub async fn wait_connect_message(
         &mut self,
         controller: &Context,
@@ -767,7 +772,7 @@ impl ReadSession {
     ) -> Result<Option<Address>> {
         let (typ, payload) = self
             .encryption
-            .read_message(controller, &mut self.reader)
+            .read_and_decrypt_inplace(controller, &mut self.reader)
             .await?;
         match typ {
             MessageType::Connect => Ok(Some(Address::from_bytes(payload)?)),
@@ -784,17 +789,19 @@ impl ReadSession {
             _ => Err(errors::format_err!("Unexpected message type: {}", typ)),
         }
     }
-
+    // read_message reads an encrypted message from the tunnel and decrypts it.
     #[inline]
     pub async fn read_message<'a>(
         &'a mut self,
         controller: &Context,
     ) -> Result<(MessageType, &'a [u8])> {
         self.encryption
-            .read_message(controller, &mut self.reader)
+            .read_and_decrypt_inplace(controller, &mut self.reader)
             .await
     }
 
+    // relay_encrypted_to_plain_forever reads encrypted messages from the tunnel
+    // and writes them to the given writer.
     pub async fn relay_encrypted_to_plain_forever(
         &mut self,
         controller: &Context,
@@ -871,10 +878,12 @@ impl fmt::Display for WriteSession {
 }
 
 impl WriteSession {
+    // new creates a new WriteSession.
     pub fn new(writer: Writer, encryption: Encryption) -> Self {
         Self { writer, encryption }
     }
 
+    // write_ping writes a PING message to the tunnel.
     pub async fn write_ping(&mut self, controller: &Context) -> Result<()> {
         let data = self.encryption.replace_payload(MessageType::Ping, &[])?;
         self.writer
@@ -883,6 +892,7 @@ impl WriteSession {
             .context("Failed to write ping message to stream")
     }
 
+    // write_connect_message writes a CONNECT message to the tunnel.
     pub async fn write_connect_message(
         &mut self,
         controller: &Context,
@@ -897,6 +907,8 @@ impl WriteSession {
             .context("Failed to write connect message to stream")
     }
 
+    // relay_plain_to_encrypted_forever reads plain text from the given reader
+    // encrypts them, and writes them to the tunnel.
     pub async fn relay_plain_to_encrypted_forever(
         &mut self,
         controller: &Context,
@@ -937,7 +949,7 @@ impl WriteSession {
     ) -> Result<usize> {
         let (n, data) = self
             .encryption
-            .inplace_from_reader(controller, reader)
+            .read_and_encrypt_inplace(controller, reader)
             .await?;
         if n == 0 {
             return Ok(0);
