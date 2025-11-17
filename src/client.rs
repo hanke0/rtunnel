@@ -13,7 +13,7 @@ use crate::encryption::client_handshake;
 use crate::encryption::copy_encrypted_bidirectional;
 use crate::encryption::{ReadSession, WriteSession};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
-use crate::errors::{self, Context as _, Result, is_relay_critical_error};
+use crate::errors::{self, Result, ResultExt as _, is_relay_critical_error};
 use crate::transport::{Address, Context};
 
 /// Event notification types for client connection management.

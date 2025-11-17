@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use tokio::time::{Duration, sleep};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
 
-use crate::errors::{self, Context as _, Result};
+use crate::errors::{self, Result, ResultExt as _};
 use crate::transport::{self, Address, Context, Reader, Writer};
 
 type PrivateKey = [u8; 32];

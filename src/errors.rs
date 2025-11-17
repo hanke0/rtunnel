@@ -2,7 +2,7 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::time::Duration;
 
-pub use anyhow::Context;
+pub use anyhow::Context as ResultExt;
 pub use anyhow::Error;
 pub use anyhow::Result;
 
