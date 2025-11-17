@@ -277,13 +277,13 @@ async fn start_tunnel(controller: Controller, mut listener: Listener, options: S
 }
 
 async fn handle_tunnel(controller: Controller, stream: Stream, options: ServerOptionsRef) {
-    let peer = stream.reader.peer_addr();
+    let addr = format!("{}", stream);
     match handle_tunnel_impl(&controller, stream, &options).await {
         Ok(_) => {
-            debug!("new tunnel session created: {}", peer);
+            debug!("new tunnel session created: {}", addr);
         }
         Err(e) => {
-            error!("tunnel session {} establish error: {:#}", peer, e);
+            error!("tunnel session {} establish error: {:#}", addr, e);
         }
     }
 }

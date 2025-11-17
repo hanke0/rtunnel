@@ -21,13 +21,12 @@ use crate::errors::{self, Result, cancel_error, from_io_error};
 /// with support for cancellation through the controller.
 pub struct Reader {
     inner: ReadInner,
-    local_addr: SocketAddr,
-    peer_addr: SocketAddr,
+    display: String,
 }
 
 impl fmt::Display for Reader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.peer_addr(), self.local_addr())
+        f.write_str(&self.display)
     }
 }
 
@@ -48,14 +47,6 @@ impl Reader {
             r = self.inner.read_exact(buf) => r.map_err(from_io_error),
         }
     }
-    #[inline]
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
-    }
-    #[inline]
-    pub fn peer_addr(&self) -> SocketAddr {
-        self.peer_addr
-    }
 }
 
 /// Writer for writing data to network streams.
@@ -64,13 +55,12 @@ impl Reader {
 /// with support for cancellation through the controller.
 pub struct Writer {
     inner: WriteInner,
-    local_addr: SocketAddr,
-    peer_addr: SocketAddr,
+    display: String,
 }
 
 impl fmt::Display for Writer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}-{}", self.peer_addr(), self.local_addr())
+        f.write_str(&self.display)
     }
 }
 
@@ -82,14 +72,6 @@ impl Writer {
             _ = controller.wait_cancel() => Err(cancel_error()),
             r = self.inner.write_all(data) => r.map_err(from_io_error),
         }
-    }
-    #[inline]
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local_addr
-    }
-    #[inline]
-    pub fn peer_addr(&self) -> SocketAddr {
-        self.peer_addr
     }
 }
 
@@ -133,12 +115,7 @@ pub struct Stream {
 
 impl fmt::Display for Stream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}-{}",
-            self.reader.peer_addr(),
-            self.reader.local_addr()
-        )
+        self.reader.fmt(f)
     }
 }
 
@@ -146,31 +123,18 @@ impl Stream {
     pub fn from_tcp_stream(stream: TcpStream) -> Self {
         let local_addr = stream.local_addr().unwrap();
         let peer_addr = stream.peer_addr().unwrap();
+        let display = format!("{}-{}", local_addr, peer_addr);
         let (r, w) = stream.into_split();
         Stream {
             reader: Reader {
                 inner: ReadInner::Tcp(r),
-                local_addr,
-                peer_addr,
+                display: display.clone(),
             },
             writer: Writer {
                 inner: WriteInner::Tcp(w),
-                local_addr,
-                peer_addr,
+                display,
             },
         }
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn peer_addr(&self) -> SocketAddr {
-        self.reader.peer_addr
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    pub fn local_addr(&self) -> SocketAddr {
-        self.reader.local_addr
     }
 }
 

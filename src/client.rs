@@ -276,9 +276,7 @@ async fn connect_to_server(
         .connect_to(controller)
         .await
         .context("Failed to connect to tunnel server")?;
-    let peer_addr = conn.reader.peer_addr();
-    let local_addr = conn.reader.local_addr();
-    debug!("tunnel connected: {}->{}", peer_addr, local_addr);
+    debug!("connected to server: {}", conn);
     let (read_half, write_half) = client_handshake(
         controller,
         conn.reader,
@@ -287,7 +285,7 @@ async fn connect_to_server(
         &options.verifier,
     )
     .await?;
-    debug!("tunnel established: {}->{}", peer_addr, local_addr);
+    debug!("handshake success, tunnel established: {}", read_half);
     Ok((read_half, write_half))
 }
 
