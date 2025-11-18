@@ -5,8 +5,8 @@ use std::io::Read;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::errors::{Result, ResultExt as _, format_err, from_error, from_io_error};
-use crate::transport;
+use crate::errors::{Result, ResultExt as _};
+use crate::{transport, whatever};
 
 /// Root configuration structure that can contain both server and client configurations.
 ///
@@ -94,9 +94,9 @@ impl ServerConfig {
     /// configurations are found.
     pub fn from_string(contents: &str) -> Result<ServerConfigList> {
         let cfg = from_string::<Config>(contents)?;
-        let servers = cfg.servers.ok_or(format_err!("No server config found"))?;
+        let servers = cfg.servers.ok_or(whatever!("No server config found"))?;
         if servers.is_empty() {
-            return Err(format_err!("No server found"));
+            return Err(whatever!("No server found"));
         }
         Ok(servers)
     }
@@ -139,9 +139,9 @@ impl ClientConfig {
     /// configurations are found.
     pub fn from_string(contents: &str) -> Result<ClientConfigList> {
         let cfg = from_string::<Config>(contents)?;
-        let mut clients = cfg.clients.ok_or(format_err!("No client config found"))?;
+        let mut clients = cfg.clients.ok_or(whatever!("No client config found"))?;
         if clients.is_empty() {
-            return Err(format_err!("No client found"));
+            return Err(whatever!("No client found"));
         }
         for client in clients.iter_mut() {
             if client.max_connections <= 0 {
@@ -157,27 +157,21 @@ impl ClientConfig {
 
 fn read_config_file(path: &str) -> Result<String> {
     check_config_perm(path).with_context(|| format!("Failed to get file permissions {}", path))?;
-    let mut file = File::open(path)
-        .map_err(from_io_error)
-        .with_context(|| format!("Failed to open {}", path))?;
+    let mut file = File::open(path).with_context(|| format!("Failed to open {}", path))?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)
-        .map_err(from_io_error)
         .with_context(|| format!("Failed to read {}", path))?;
     Ok(contents)
 }
 
 fn from_string<T: DeserializeOwned>(contents: &str) -> Result<T> {
-    toml::from_str(contents)
-        .map_err(from_error)
-        .context("Failed to parse config")
+    toml::from_str(contents).context("Failed to parse config")
 }
 
 // Check if the file is readable and writable only by the owner(0600).
 fn check_config_perm(path: &str) -> Result<()> {
-    let metadata = fs::metadata(path)
-        .map_err(from_io_error)
-        .with_context(|| format!("Failed to get file permission: {}", path,))?;
+    let metadata =
+        fs::metadata(path).with_context(|| format!("Failed to get file permission: {}", path,))?;
     let permissions = metadata.permissions();
 
     // On Unix systems, we can check the mode directly
@@ -187,7 +181,7 @@ fn check_config_perm(path: &str) -> Result<()> {
         let perm = permissions.mode() & 0o777;
 
         if perm > 0o600 {
-            return Err(format_err!(
+            return Err(whatever!(
                 "Config file permission should be less or equal than 0o600, current is 0o{:o}, try `chmod 600 {path}` to fix it",
                 perm,
             ));

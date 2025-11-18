@@ -59,7 +59,7 @@ pub async fn run_client(controller: &Context, configs: Vec<ClientConfig>) -> i32
             info!("connected to {}", cfg.server_address);
             continue;
         }
-        format_err!(
+        whatever!(
             "connect to {} failed, exiting: {:#}",
             cfg.server_address,
             err.unwrap_err()
@@ -98,7 +98,7 @@ pub async fn run_server(controller: &Context, configs: Vec<ServerConfig>) -> i32
         if err.is_ok() {
             continue;
         }
-        format_err!(
+        whatever!(
             "start server {} failed, exiting: {:#}",
             cfg.listen,
             err.unwrap_err()

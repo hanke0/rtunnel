@@ -13,7 +13,6 @@ use tokio::net::TcpStream;
 use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
 
-use rtunnel::errors::from_io_error;
 use rtunnel::generate_random_bytes;
 use rtunnel::{Arguments, Context, run};
 
@@ -108,17 +107,12 @@ async fn connect_to_echo(controller: Context) {
     let (mut reader, mut writer) = stream.into_split();
 
     controller
-        .timeout_default(async move {
-            writer
-                .write_all(expect.as_ref())
-                .await
-                .map_err(from_io_error)
-        })
+        .timeout_default(async move { Ok(writer.write_all(expect.as_ref()).await?) })
         .await
         .unwrap();
 
     controller
-        .timeout_default(async move { reader.read_exact(mut_got).await.map_err(from_io_error) })
+        .timeout_default(async move { Ok(reader.read_exact(mut_got).await?) })
         .await
         .unwrap();
     assert_eq!(expect.len(), got.len());

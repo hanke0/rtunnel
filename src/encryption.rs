@@ -15,8 +15,9 @@ use sha2::{Digest, Sha256};
 use tokio::time::{Duration, sleep};
 use x25519_dalek::{EphemeralSecret as ECDHPrivate, PublicKey as ECDHPublic};
 
-use crate::errors::{self, Result, ResultExt as _};
+use crate::errors::{Error, Result, ResultExt as _};
 use crate::transport::{self, Address, Context, Reader, Writer};
+use crate::whatever;
 
 type PrivateKey = [u8; 32];
 type PublicKey = [u8; 32];
@@ -63,7 +64,7 @@ impl MessageType {
             Self::CONNECT => Ok(MessageType::Connect),
             Self::DATA => Ok(MessageType::Data),
             Self::PING => Ok(MessageType::Ping),
-            _ => Err(errors::format_err!("Invalid message type: {}", msg_type)),
+            _ => Err(whatever!("Invalid message type: {}", msg_type)),
         }
     }
 
@@ -196,7 +197,6 @@ impl Message {
         reader
             .read_exact(controller, &mut payload)
             .await
-            .map_err(errors::ErrorKind::Other)
             .context("Failed to read message from stream")?;
         self.0.unsplit(payload);
         Ok(())
@@ -290,7 +290,6 @@ impl HelloMessage {
                 buf.put_slice(random);
                 let signature = signer
                     .try_sign(buf)
-                    .map_err(errors::from_error)
                     .context("Failed to sign client hello")?;
                 buf.put_slice(signature.r_bytes());
                 buf.put_slice(signature.s_bytes());
@@ -326,15 +325,11 @@ impl HelloMessage {
     fn verify(&self, verifier: &VerifyingKey) -> Result<()> {
         let payload = self.0.get_payload();
         if payload.len() != Self::SIZE {
-            return Err(errors::format_err!(
-                "Invalid hello msg length: {}",
-                payload.len()
-            ));
+            return Err(whatever!("Invalid hello msg length: {}", payload.len()));
         }
         let signature = self.get_signature();
         verifier
             .verify_strict(self.get_verify_part(), &signature)
-            .map_err(errors::from_error)
             .context("Failed to verify hello message signature")?;
         Ok(())
     }
@@ -364,7 +359,6 @@ pub fn generate_random_bytes<const N: usize>() -> Result<[u8; N]> {
     let mut random = [0u8; N];
     OsRng
         .try_fill_bytes(random.as_mut())
-        .map_err(errors::from_error)
         .context("Failed to generate random bytes")?;
     Ok(random)
 }
@@ -680,7 +674,6 @@ impl Encryption {
         message.rewrite_payload(message.get_type(), move |buf| {
             cipher
                 .decrypt_in_place(&nonce.into(), associated_data, buf)
-                .map_err(errors::from_error)
                 .context("Failed to decrypt message")
         })?;
         assert_eq!(self.message.get_type(), typ);
@@ -697,7 +690,6 @@ impl Encryption {
         message.rewrite_payload(msg_type, |payload| {
             cipher
                 .encrypt_in_place(&nonce.into(), associated_data, payload)
-                .map_err(errors::from_error)
                 .context("Failed to encrypt message")
         })?;
         assert_eq!(self.message.get_type(), msg_type);
@@ -735,7 +727,7 @@ impl ReadSession {
             .await?;
         match typ {
             MessageType::Ping => Ok(()),
-            _ => Err(errors::format_err!("Unexpected message type: {}", typ)),
+            _ => Err(whatever!("Unexpected message type: {}", typ)),
         }
     }
 
@@ -752,7 +744,7 @@ impl ReadSession {
         loop {
             tokio::select! {
                 _ = sleep(TIMEOUT) => {
-                    return Err(errors::from_timeout(TIMEOUT));
+                    return Err(Error::from_timeout(TIMEOUT));
                 }
                 addr = self.wait_connect_message_impl(controller, writer) => {
                     match addr {
@@ -786,12 +778,12 @@ impl ReadSession {
                     Err(err) => Err(err),
                 }
             }
-            _ => Err(errors::format_err!("Unexpected message type: {}", typ)),
+            _ => Err(whatever!("Unexpected message type: {}", typ)),
         }
     }
     // read_message reads an encrypted message from the tunnel and decrypts it.
     #[inline]
-    pub async fn read_message<'a>(
+    pub async fn read_and_decrypt_inplace<'a>(
         &'a mut self,
         controller: &Context,
     ) -> Result<(MessageType, &'a [u8])> {
@@ -831,7 +823,7 @@ impl ReadSession {
     ) -> Result<usize> {
         tokio::select! {
             n = self.relay_encrypted_to_plain_impl(controller, writer) => n,
-            _ = controller.wait_cancel() => Err(errors::cancel_error()),
+            _ = controller.wait_cancel() => Err(Error::cancel()),
         }
     }
 
@@ -841,10 +833,10 @@ impl ReadSession {
         controller: &Context,
         writer: &mut Writer,
     ) -> Result<usize> {
-        let (typ, buf) = match self.read_message(controller).await {
+        let (typ, buf) = match self.read_and_decrypt_inplace(controller).await {
             Ok(r) => r,
             Err(err) => {
-                if errors::kind_of(&err).is_eof() {
+                if err.is_eof() {
                     trace!("{} read_message: EOF: {err:#}", self.reader);
                     return Ok(0);
                 }
@@ -852,7 +844,7 @@ impl ReadSession {
             }
         };
         if typ != MessageType::Data {
-            return Err(errors::format_err!("Unexpected message type: {}", typ));
+            return Err(whatever!("Unexpected message type: {}", typ));
         }
         writer
             .write_all(controller, buf)
@@ -937,7 +929,7 @@ impl WriteSession {
     ) -> Result<usize> {
         tokio::select! {
             n = self.replay_plain_to_encrypted_impl(controller, reader) => n,
-            _ = controller.wait_cancel() => Err(errors::cancel_error()),
+            _ = controller.wait_cancel() => Err(Error::cancel()),
         }
     }
 
@@ -1147,7 +1139,7 @@ fn vec_to_array<const N: usize>(v: Vec<u8>) -> Result<[u8; N]> {
     let r = v.try_into();
     match r {
         Ok(a) => Ok(a),
-        Err(e) => Err(errors::format_err!(
+        Err(e) => Err(whatever!(
             "key length is mismatch: expect {} got {}",
             N,
             e.len()
@@ -1163,7 +1155,6 @@ mod tests {
     use tokio::sync::mpsc::channel;
 
     use super::*;
-    use crate::errors::kind_of;
     use crate::transport::Stream;
 
     #[test]
@@ -1387,14 +1378,20 @@ mod tests {
         println!("handshake done");
         client_write.write_data(controller, &buf).await.unwrap();
         println!("client write done");
-        let (message_type, payload) = server_read.read_message(controller).await.unwrap();
+        let (message_type, payload) = server_read
+            .read_and_decrypt_inplace(controller)
+            .await
+            .unwrap();
         println!("server read done");
         assert_eq!(MessageType::Data, message_type);
         assert_eq!(buf.as_ref(), payload);
 
         server_write.write_data(controller, payload).await.unwrap();
         println!("server write done");
-        let (message_type, payload) = client_read.read_message(controller).await.unwrap();
+        let (message_type, payload) = client_read
+            .read_and_decrypt_inplace(controller)
+            .await
+            .unwrap();
         println!("client read done");
         assert_eq!(MessageType::Data, message_type);
         assert_eq!(buf.as_ref(), payload);
@@ -1619,7 +1616,7 @@ mod tests {
                         )
                         .await;
                         if e.is_err() {
-                            assert!(!kind_of(&e.err().unwrap()).is_relay_critical());
+                            assert!(!e.unwrap_err().is_relay_critical());
                         }
                     },
                     async move {
@@ -1673,7 +1670,7 @@ mod tests {
                         )
                         .await;
                         if e.is_err() {
-                            assert!(!kind_of(&e.err().unwrap()).is_relay_critical());
+                            assert!(!e.unwrap_err().is_relay_critical());
                         }
                     },
                     async move {

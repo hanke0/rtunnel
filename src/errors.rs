@@ -1,156 +1,272 @@
-use std::fmt::Debug;
-use std::fmt::Display;
+use std::error::Error as StdError;
+use std::fmt::{Debug, Display};
+use std::ops::Deref;
+use std::result::Result as StdResult;
+use std::string::String;
 use std::time::Duration;
 
-pub use anyhow::Context as ResultExt;
-pub use anyhow::Error;
-pub use anyhow::Result;
+pub type Result<T> = StdResult<T, Error>;
 
-pub enum ErrorKind {
-    BadIo(std::io::Error),
-    Eof(std::io::Error),
-    IoRetryAble(std::io::Error),
-    Timeout(std::io::Error),
-    Canceled(),
-    Other(Error),
+pub trait ResultExt<T> {
+    /// Wrap the error value with additional context.
+    fn context<C>(self, context: C) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static;
+
+    /// Wrap the error value with additional context that is evaluated lazily
+    /// only once an error does occur.
+    fn with_context<C, F>(self, f: F) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+        F: FnOnce() -> C;
 }
 
-#[inline]
-pub fn cancel_error() -> Error {
-    Error::new(ErrorKind::Canceled())
-}
-
-#[inline]
-pub fn from_msg<S: Display + Debug + Send + Sync + 'static>(msg: S) -> Error {
-    Error::new(ErrorKind::Other(Error::msg(msg)))
-}
-
-#[inline]
-pub fn from_io_error(error: std::io::Error) -> Error {
-    Error::new(ErrorKind::from_io_error(error))
-}
-
-#[inline]
-pub fn from_timeout(spend: Duration) -> Error {
-    Error::new(ErrorKind::Timeout(std::io::Error::new(
-        std::io::ErrorKind::TimedOut,
-        format!("timeout after {:?}", spend),
-    )))
-}
-
-#[inline]
-pub fn from_error<E: std::error::Error + Send + Sync + 'static>(e: E) -> Error {
-    Error::new(ErrorKind::Other(Error::new(e)))
-}
-
-#[inline]
-pub fn is_relay_critical_error(error: &Error) -> bool {
-    kind_of(error).is_relay_critical()
-}
-
-#[inline]
-pub fn is_accept_critical_error(error: &Error) -> bool {
-    kind_of(error).is_accept_critical()
-}
-
-impl ErrorKind {
-    pub fn from_io_error(error: std::io::Error) -> Self {
-        match error.kind() {
-            std::io::ErrorKind::UnexpectedEof => Self::Eof(error),
-            std::io::ErrorKind::WouldBlock => Self::IoRetryAble(error),
-            std::io::ErrorKind::Interrupted => Self::IoRetryAble(error),
-            std::io::ErrorKind::TimedOut => Self::Timeout(error),
-            _ => Self::BadIo(error),
+impl<T> ResultExt<T> for Result<T> {
+    fn context<C>(self, context: C) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+    {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(e.context(context)),
         }
     }
 
+    fn with_context<C, F>(self, f: F) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+        F: FnOnce() -> C,
+    {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(e.context(f())),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ErrorKind {
+    BadIo,
+    Eof,
+    IoRetryAble,
+    Timeout,
+    Canceled,
+    Other,
+}
+
+pub struct Error {
+    inner: Box<Inner>,
+}
+
+impl Error {
+    pub fn new<T: Display>(kind: ErrorKind, message: T) -> Self {
+        Self::from_string(kind, message.to_string())
+    }
+
+    pub fn from_string(kind: ErrorKind, message: String) -> Self {
+        Self {
+            inner: Box::new(Inner { kind, message }),
+        }
+    }
+
+    pub fn from_any<T: Display>(e: T) -> Self {
+        Self::whatever(e.to_string())
+    }
+
+    pub fn whatever(message: String) -> Self {
+        Self::from_string(ErrorKind::Other, message)
+    }
+
+    pub fn cancel() -> Self {
+        Self::from_string(ErrorKind::Canceled, "context cancelled".to_string())
+    }
+
+    pub fn from_io(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::UnexpectedEof => Self::new(ErrorKind::Eof, error.to_string()),
+            std::io::ErrorKind::WouldBlock => Self::new(ErrorKind::IoRetryAble, error.to_string()),
+            std::io::ErrorKind::Interrupted => Self::new(ErrorKind::IoRetryAble, error.to_string()),
+            std::io::ErrorKind::TimedOut => Self::new(ErrorKind::Timeout, error.to_string()),
+            _ => Self::new(ErrorKind::BadIo, error.to_string()),
+        }
+    }
+
+    pub fn from_timeout(duration: Duration) -> Self {
+        Self::from_string(ErrorKind::Timeout, format!("timeout after {duration:?}"))
+    }
+
     pub fn is_accept_critical(&self) -> bool {
-        !matches!(self, ErrorKind::IoRetryAble(_))
+        !matches!(self.inner.kind, ErrorKind::IoRetryAble)
     }
 
     pub fn is_relay_critical(&self) -> bool {
         !matches!(
-            self,
-            ErrorKind::IoRetryAble(_) | ErrorKind::Eof(_) | ErrorKind::Canceled()
+            self.inner.kind,
+            ErrorKind::IoRetryAble | ErrorKind::Eof | ErrorKind::Canceled
         )
     }
 
-    pub fn is_eof(&self) -> bool {
-        matches!(self, ErrorKind::Eof(_))
+    pub fn is_connect_critical(&self) -> bool {
+        !matches!(
+            self.inner.kind,
+            ErrorKind::IoRetryAble | ErrorKind::Canceled
+        )
     }
+
     pub fn is_timeout(&self) -> bool {
-        matches!(self, ErrorKind::Timeout(_))
+        matches!(self.inner.kind, ErrorKind::Timeout)
     }
-    pub fn is_canceled(&self) -> bool {
-        matches!(self, ErrorKind::Canceled())
+
+    pub fn is_eof(&self) -> bool {
+        matches!(self.inner.kind, ErrorKind::Eof)
+    }
+
+    pub fn context<T: Display>(mut self, context: T) -> Self {
+        self.inner.extend_message(context.to_string().as_str());
+        self
+    }
+
+    pub fn kind(&self) -> ErrorKind {
+        self.inner.kind
     }
 }
 
-impl std::error::Error for ErrorKind {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::BadIo(e) => Some(e),
-            Self::Eof(e) => Some(e),
-            Self::IoRetryAble(e) => Some(e),
-            Self::Other(e) => Some(e.as_ref()),
-            Self::Canceled() => None,
-            Self::Timeout(e) => Some(e),
+impl From<Inner> for Error {
+    fn from(inner: Inner) -> Self {
+        Self {
+            inner: Box::new(inner),
         }
     }
 }
 
-impl From<std::io::Error> for ErrorKind {
-    fn from(error: std::io::Error) -> Self {
-        ErrorKind::from_io_error(error)
-    }
-}
-
-impl std::fmt::Display for ErrorKind {
+impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BadIo(_) => write!(f, "bad io"),
-            Self::Eof(_) => write!(f, "end of file"),
-            Self::IoRetryAble(_) => write!(f, "io is unusable currently"),
-            Self::Canceled() => write!(f, "controller cancelled"),
-            Self::Other(_) => write!(f, "other error"),
-            Self::Timeout(_) => write!(f, "timeout"),
-        }
+        Display::fmt(&self.inner, f)
     }
 }
 
-impl std::fmt::Debug for ErrorKind {
+impl Debug for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self)
+        Display::fmt(&self, f)
     }
 }
 
-pub fn kind_of(e: &Error) -> &ErrorKind {
-    if let Some(kind) = e.downcast_ref::<ErrorKind>() {
-        return kind;
+impl AsRef<str> for Error {
+    fn as_ref(&self) -> &str {
+        &self.inner.message
     }
-    for cause in e.chain() {
-        if let Some(kind) = cause.downcast_ref::<ErrorKind>() {
-            return kind;
-        }
+}
+
+impl AsRef<dyn StdError> for Error {
+    fn as_ref(&self) -> &(dyn StdError + 'static) {
+        &self.inner
     }
-    unreachable!()
+}
+
+impl Deref for Error {
+    type Target = dyn StdError;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+struct Inner {
+    kind: ErrorKind,
+    message: String,
+}
+
+impl Inner {
+    const DELIMITER: &'static str = ": ";
+    fn extend_message(&mut self, message: &str) {
+        let mut msg =
+            String::with_capacity(self.message.len() + message.len() + Self::DELIMITER.len());
+        msg.push_str(message);
+        msg.push_str(Self::DELIMITER);
+        msg.push_str(&self.message);
+        self.message = msg;
+    }
+}
+
+impl From<Error> for Inner {
+    fn from(error: Error) -> Self {
+        *error.inner
+    }
+}
+
+impl StdError for Inner {}
+
+impl Display for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl Debug for Inner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self, f)
+    }
 }
 
 #[macro_export]
-macro_rules! format_err {
+macro_rules! whatever {
     ($msg:literal $(,)?) => {
         $crate::errors::__private::must_use(
-            $crate::errors::from_msg($msg)
+            $crate::errors::Error::whatever($msg.to_string())
         )
     };
     ($fmt:expr, $($arg:tt)*) => {
         $crate::errors::__private::must_use(
-            $crate::errors::from_msg($crate::errors::__private::format!($fmt, $($arg)*))
+            $crate::errors::Error::whatever($crate::errors::__private::format!($fmt, $($arg)*))
         )
     };
 }
 
-pub use format_err;
+pub use whatever;
+
+macro_rules! generate_from_any {
+    ($typ:ty, $from:ident) => {
+        impl From<$typ> for $crate::errors::Error {
+            fn from(error: $typ) -> Self {
+                Error::$from(error)
+            }
+        }
+
+        impl<T> $crate::errors::ResultExt<T> for std::result::Result<T, $typ> {
+            fn context<C>(self, context: C) -> Result<T>
+            where
+                C: Display + Send + Sync + 'static,
+            {
+                match self {
+                    Ok(t) => Ok(t),
+                    Err(e) => Err(Error::from(e).context(context)),
+                }
+            }
+
+            fn with_context<C, F>(self, f: F) -> Result<T>
+            where
+                C: Display + Send + Sync + 'static,
+                F: FnOnce() -> C,
+            {
+                match self {
+                    Ok(t) => Ok(t),
+                    Err(e) => Err(Error::from(e).context(f())),
+                }
+            }
+        }
+    };
+    ($typ:ty) => {
+        generate_from_any!($typ, from_any);
+    };
+}
+
+generate_from_any!(std::io::Error, from_io);
+generate_from_any!(std::fmt::Error);
+generate_from_any!(std::string::FromUtf8Error);
+generate_from_any!(base64::DecodeError);
+generate_from_any!(toml::de::Error);
+generate_from_any!(ed25519_dalek::SignatureError);
+generate_from_any!(rand_core::Error);
+generate_from_any!(aes_gcm::Error);
 
 // Not public API. Referenced by macro-generated code.
 #[doc(hidden)]
@@ -162,5 +278,20 @@ pub mod __private {
     #[inline(always)]
     pub const fn must_use<T>(value: T) -> T {
         value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Read};
+
+    #[test]
+    fn test_map_and_context() {
+        let mut w = io::empty();
+        let mut buf = [0u8; 1];
+        let r = w.read_exact(&mut buf).context("foo").unwrap_err();
+        assert_eq!(r.kind(), ErrorKind::Eof);
+        assert_eq!(r.to_string(), "foo: failed to fill whole buffer");
     }
 }

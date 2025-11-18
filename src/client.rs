@@ -13,7 +13,7 @@ use crate::encryption::client_handshake;
 use crate::encryption::copy_encrypted_bidirectional;
 use crate::encryption::{ReadSession, WriteSession};
 use crate::encryption::{decode_signing_key, decode_verifying_key};
-use crate::errors::{self, Result, ResultExt as _, is_relay_critical_error};
+use crate::errors::{Result, ResultExt as _, whatever};
 use crate::transport::{Address, Context};
 
 /// Event notification types for client connection management.
@@ -234,7 +234,7 @@ async fn start_new_tunnel(
     match start_new_tunnel_impl(&controller, &guard, &options).await {
         Ok(_) => {}
         Err(e) => {
-            if !fatal && can_retry_connect(&e) {
+            if !fatal && !e.is_connect_critical() {
                 info!(
                     "retry connect service {} cause by error: {:#}",
                     options.address, e
@@ -248,13 +248,6 @@ async fn start_new_tunnel(
             }
         }
     }
-}
-
-fn can_retry_connect(error: &errors::Error) -> bool {
-    matches!(
-        errors::kind_of(error),
-        errors::ErrorKind::Timeout(_) | errors::ErrorKind::IoRetryAble(_)
-    )
 }
 
 async fn start_new_tunnel_impl(
@@ -305,7 +298,7 @@ async fn handle_relay(
             );
         }
         Err(e) => {
-            if is_relay_critical_error(&e) {
+            if e.is_relay_critical() {
                 error!("stream {} relay critical error:  {:#}", addr, e);
             } else {
                 info!("stream {} relay non-critical error:  {:#}", addr, e);
@@ -326,7 +319,7 @@ async fn handle_relay_impl(
         .await?;
     trace!("tunnel connect message has read: {}", &addr);
     if !allows.contains(&addr) {
-        return Err(errors::format_err!("Address not allowed: {}", &addr));
+        return Err(whatever!("Address not allowed: {}", &addr));
     }
     let conn = addr
         .connect_to(controller)

@@ -14,10 +14,9 @@ use crate::encryption::{self, decode_signing_key, decode_verifying_key};
 use crate::encryption::{
     ReadSession, WriteSession, copy_encrypted_bidirectional, server_handshake,
 };
-use crate::errors::{
-    self, Result, cancel_error, is_accept_critical_error, is_relay_critical_error,
-};
+use crate::errors::{Error, Result};
 use crate::transport::{Address, Context, Listener, Stream};
+use crate::whatever;
 
 struct ServerOptions {
     verifier: VerifyingKey,
@@ -99,7 +98,7 @@ async fn keep_alive(
     while !stopped.is_cancelled() {
         tokio::select! {
             _ = controller.wait_cancel() => {
-                return Err(cancel_error());
+                return Err(Error::cancel());
             },
             _ = stopped.cancelled() => {
                 break;
@@ -150,7 +149,7 @@ impl TunnelPool {
                     sender.send(r).await.unwrap();
                 }
                 Err(err) => {
-                    if is_relay_critical_error(&err) {
+                    if err.is_relay_critical() {
                         error!("{} keep alive critical error: {:#}", id, err);
                     } else {
                         info!("{} keep alive non-critical error: {:#}", id, err);
@@ -178,7 +177,7 @@ impl TunnelPool {
                 }
             }
         }
-        Err(errors::format_err!("pool is empty"))
+        Err(whatever!("pool is empty"))
     }
 }
 
@@ -260,7 +259,7 @@ async fn start_tunnel(controller: Context, mut listener: Listener, options: Serv
                 controller.spawn(handle_tunnel(controller.clone(), stream, options.clone()));
             }
             Err(e) => {
-                if is_accept_critical_error(&e) {
+                if e.is_accept_critical() {
                     if controller.has_cancel() {
                         return;
                     }
@@ -325,7 +324,7 @@ async fn start_service(
                 ));
             }
             Err(e) => {
-                if is_accept_critical_error(&e) {
+                if e.is_accept_critical() {
                     if controller.has_cancel() {
                         return;
                     }
@@ -357,7 +356,7 @@ async fn handle_service_stream(
             );
         }
         Err(e) => {
-            if is_relay_critical_error(&e) {
+            if e.is_relay_critical() {
                 if controller.has_cancel() {
                     return;
                 }
@@ -404,7 +403,7 @@ async fn get_a_useable_connection(
             }
         }
     }
-    Err(errors::format_err!("failed to get a useable connection"))
+    Err(whatever!("failed to get a useable connection"))
 }
 
 async fn get_a_useable_connection_impl(
