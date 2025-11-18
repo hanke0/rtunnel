@@ -363,6 +363,11 @@ pub fn generate_random_bytes<const N: usize>() -> Result<[u8; N]> {
     Ok(random)
 }
 
+// Workaround for rust-analyzer false positive: Sha256::new() expects 1 argument
+fn new_digest<D: Digest>() -> D {
+    D::new()
+}
+
 enum HandshakeSide {
     Client,
     Server,
@@ -374,7 +379,7 @@ fn handshake(
     ephemeral_private: ECDHPrivate,
     side: HandshakeSide,
 ) -> (Encryption, Encryption) {
-    let mut hash = Sha256::new();
+    let mut hash = new_digest::<Sha256>();
     hash.update(client_hello.get_payload());
     hash.update(server_hello.get_payload());
     let hello_hash = hash.finalize();
