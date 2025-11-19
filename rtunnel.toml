@@ -18,3 +18,6 @@ server_address = "tcp://127.0.0.1:2333"
 allowed_addresses = [
     "tcp://127.0.0.1:2335",
 ]
+
+max_connections = 1024
+idle_connections = 100

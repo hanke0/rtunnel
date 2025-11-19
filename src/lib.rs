@@ -2,7 +2,7 @@ use std::string::String;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use log::{debug, info};
+use log::{debug, error, info};
 use tokio::select;
 use tokio::time::sleep;
 
@@ -55,17 +55,14 @@ pub async fn run_client(controller: &Context, configs: Vec<ClientConfig>) -> i32
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
         let err = client::start_client(controller, cfg).await;
-        if err.is_ok() {
-            info!("connected to {}", cfg.server_address);
-            continue;
+        match err {
+            Ok(_) => continue,
+            Err(e) => {
+                error!("connect to {} failed, exiting: {:#}", cfg.server_address, e);
+                graceful_exit(controller, "client").await;
+                return 1;
+            }
         }
-        whatever!(
-            "connect to {} failed, exiting: {:#}",
-            cfg.server_address,
-            err.unwrap_err()
-        );
-        graceful_exit(controller, "client").await;
-        return 1;
     }
     info!("all clients started, client is ready");
     select! {
@@ -95,16 +92,14 @@ pub async fn run_server(controller: &Context, configs: Vec<ServerConfig>) -> i32
     debug!("starting {} server", configs.len());
     for cfg in configs.iter() {
         let err = server::start_server(controller, cfg).await;
-        if err.is_ok() {
-            continue;
+        match err {
+            Ok(_) => continue,
+            Err(e) => {
+                error!("start server {} failed, exiting: {:#}", cfg.listen, e);
+                graceful_exit(controller, "server").await;
+                return 1;
+            }
         }
-        whatever!(
-            "start server {} failed, exiting: {:#}",
-            cfg.listen,
-            err.unwrap_err()
-        );
-        graceful_exit(controller, "server").await;
-        return 1;
     }
     info!("all service started, server is ready");
     select! {

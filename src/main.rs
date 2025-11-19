@@ -1,5 +1,7 @@
+use std::io::Write;
 use std::process;
 
+use chrono::Local;
 use clap::Parser;
 use tokio::runtime::Builder;
 
@@ -12,6 +14,15 @@ fn main() {
     env_logger::Builder::new()
         .filter_level(options.log_level)
         .format_indent(Some(4))
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "{} [{}] - {}",
+                Local::now().format("%Y-%m-%dT%H:%M:%S%Z"),
+                record.level(),
+                record.args()
+            )
+        })
         .init();
 
     let res = block_on(run(&controller, options));

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 usage() {
-	echo "Usage: $0 [-t <times-per-connection(1kb/time)>] [-c <concurrent>] [--frp] [--direct]"
+	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--frp] [--direct]"
 	exit 1
 }
 
@@ -11,8 +11,10 @@ checked_num() {
 	fi
 }
 
-times=1000
+times=10
 concurrent=10
+bytes=1024
+loops=100
 runmode=rtunnel
 echolistento=127.0.0.1:2335
 echoconnectto=127.0.0.1:2334
@@ -26,6 +28,16 @@ while [ "$#" -gt 0 ]; do
 	-c | --concurrent)
 		checked_num "$2"
 		concurrent=$2
+		shift 2
+		;;
+	-b | --bytes)
+		checked_num "$2"
+		bytes=$2
+		shift 2
+		;;
+	-l | --loop)
+		checked_num "$2"
+		loops=$2
 		shift 2
 		;;
 	--frp)
@@ -52,13 +64,19 @@ clientlog=/tmp/bench-client.log
 echolog=/tmp/echo-bench.log
 
 cleanup() {
-	kill $server_pid $client_pid $echopid
+	[ -n "$echopid" ] && kill $echopid >/dev/null 2>&1
+	[ -n "$server_pid" ] && kill $server_pid >/dev/null 2>&1
+	[ -n "$client_pid" ] && kill $client_pid >/dev/null 2>&1
 }
 
 trap 'cleanup' EXIT
 
-cargo build --release --bin echo-bench || exit 1
-cargo build --release --bin rtunnel || exit 1
+cargo build --quiet --release --bin echo-bench || exit 1
+case "$runmode" in
+rtunnel)
+	cargo build --quiet --release --bin rtunnel || exit 1
+	;;
+esac
 
 run_server() {
 	case "$runmode" in
@@ -105,13 +123,13 @@ get_version() {
 }
 
 run_echo_bench() {
-	target/release/echo-bench $echoconnectto $echolistento $concurrent $times 2>${echolog} &
+	target/release/echo-bench $echoconnectto $echolistento "$concurrent" "$times" "$bytes" "$loops" 2>${echolog} &
 	echopid=$!
 }
 
 is_alive() {
 	[ -z "$1" ] && return
-	kill -0 $1
+	kill -0 $1 >/dev/null 2>&1
 }
 
 get_cpu() {
@@ -165,10 +183,9 @@ done
 server_cpu1=$(get_cpu $server_pid)
 client_cpu1=$(get_cpu $client_pid)
 updateime1=$(get_uptime)
-
-echo "server-cpu: $(echo "scale=2; ($server_cpu1 - $server_cpu)/($updateime1 - $uptime)*100" | bc -l)%"
-echo "client-cpu: $(echo "scale=2; ($client_cpu1 - $client_cpu)/($updateime1 - $uptime)*100" | bc -l)%"
-echo
+clock_tick=$(getconf CLK_TCK)
+echo "server-cpu: $(echo "c=($server_cpu1 - $server_cpu)/$clock_tick/($updateime1 - $uptime)*100; scale=2; c" | bc -l)%"
+echo "client-cpu: $(echo "c=($client_cpu1 - $client_cpu)/$clock_tick/($updateime1 - $uptime)*100; scale=2; c" | bc -l)%"
 echo
 
 cleanup
