@@ -64,6 +64,8 @@ jobs:
         uses: actions/checkout@v4
       - name: Build
         uses: houseabsolute/actions-rust-cross@v1
+        env:
+          RUSTFLAGS: '--remap-path-prefix /home/runner/work/rtunnel/rtunnel/='
         with:
           command: build
           target: ${{ matrix.platform.target }}
