@@ -134,15 +134,11 @@ is_alive() {
 
 get_cpu() {
 	[ -z "$1" ] && return
-	local utime1 stime1
-	read -r _ _ _ _ _ _ _ _ _ _ _ _ _ utime1 stime1 _ <"/proc/$1/stat"
-	echo $((utime1 + stime1))
+	ps -p $1 -o time= | awk -F: '{ total=0; m=1; } { for (i=0; i < NF; i++) {total += $(NF-i)*m; m *= i >= 2 ? 24 : 60 }} {print total*1000}'
 }
 
 get_uptime() {
-	local updateime
-	read -r updateime _ <"/proc/uptime"
-	echo $updateime
+	date +%s%N | cut -b1-13
 }
 
 echo "tunnel: $runmode"
@@ -182,10 +178,15 @@ done
 
 server_cpu1=$(get_cpu $server_pid)
 client_cpu1=$(get_cpu $client_pid)
-updateime1=$(get_uptime)
-clock_tick=$(getconf CLK_TCK)
-echo "server-cpu: $(echo "c=($server_cpu1 - $server_cpu)/$clock_tick/($updateime1 - $uptime)*100; scale=2; c" | bc -l)%"
-echo "client-cpu: $(echo "c=($client_cpu1 - $client_cpu)/$clock_tick/($updateime1 - $uptime)*100; scale=2; c" | bc -l)%"
+uptime1=$(get_uptime)
+
+cpu1="($server_cpu1 - $server_cpu)/($uptime1 - $uptime)*100"
+cpu2="($client_cpu1 - $client_cpu)/($uptime1 - $uptime)*100"
+echo >&2 "server-cpu: $cpu1"
+echo >&2 "client-cpu: $cpu2"
+
+echo "server-cpu: $(echo "scale=3; $cpu1" | bc -l 2>/dev/null)%"
+echo "client-cpu: $(echo "scale=3; $cpu2" | bc -l 2>/dev/null)%"
 echo
 
 cleanup

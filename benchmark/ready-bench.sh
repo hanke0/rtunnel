@@ -7,12 +7,25 @@ download_tar() {
     mkdir /tmp/tarball
     tar -xf /tmp/a.tar.gz -C /tmp/tarball
     rm -rf /tmp/a.tar.gz
+    mkdir -p tmp
     find /tmp/tarball -name "$1" -exec echo cp -f {} tmp/ \; -exec cp -f {} tmp/ \;
     rm -rf /tmp/tarball
 }
 
-download_tar "frp[cs]" \
-    "https://github.com/fatedier/frp/releases/download/v0.65.0/frp_0.65.0_linux_amd64.tar.gz"
+case $(uname -o)_$(uname -m) in
+    *Linux_x86_64)
+        URL="https://github.com/fatedier/frp/releases/download/v0.65.0/frp_0.65.0_linux_amd64.tar.gz"
+        ;;
+    Darwin_arm64)
+        URL="https://github.com/fatedier/frp/releases/download/v0.65.0/frp_0.65.0_darwin_arm64.tar.gz"
+        ;;
+    *)
+        echo "unsupported architecture"
+        exit 1
+        ;;
+esac
+
+download_tar "frp[cs]" "$URL"
 
 write_tmp_config() {
     if [ ! -d tmp ]; then
