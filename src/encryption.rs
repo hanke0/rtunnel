@@ -573,18 +573,21 @@ struct Seq([u8; 12]);
 
 impl Seq {
     pub fn incr(&mut self) {
-        let mut i = 11;
-        loop {
-            self.0[i] += 1;
-            if self.0[i] != 0 {
-                return;
+        let mut carry = 1u16;
+
+        for i in (0..self.0.len()).rev() {
+            let sum = self.0[i] as u16 + carry;
+            self.0[i] = (sum & 0xFF) as u8;
+            carry = sum >> 8;
+
+            if carry == 0 {
+                return; // 没有进位，正常返回
             }
-            if i == 0 {
-                panic!("Sequence overflow: {:?}", self.0);
-            }
-            i -= 1;
         }
+
+        panic!("sequence overflow");
     }
+
     pub fn xor_secret_iv(&self, secret_iv: &NonceB) -> NonceB {
         array::from_fn(|i| self.0[i] ^ secret_iv[i])
     }
@@ -1161,6 +1164,25 @@ mod tests {
 
     use super::*;
     use crate::transport::Stream;
+
+    #[test]
+    fn test_seq_incr() {
+        let mut n: u128 = 0;
+        let mut seq = Seq([0u8; 12]);
+        for _ in 0..1024 {
+            assert_eq!(seq.0[..], n.to_be_bytes()[4..]);
+            seq.incr();
+            n += 1;
+            assert_eq!(seq.0[..], n.to_be_bytes()[4..]);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_seq_incr_overflow() {
+        let mut seq = Seq([255u8; 12]);
+        seq.incr();
+    }
 
     #[test]
     fn test_split_off() {

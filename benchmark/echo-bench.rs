@@ -1,5 +1,6 @@
 use std::env;
 use std::error::Error;
+use std::result::Result;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
@@ -31,13 +32,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ));
     }
     set.join_all().await;
-    println!("addr: {addr}, concurrent: {concurrent}, times: {times}");
+    eprintln!("addr: {addr}");
+    println!("concurrent: {concurrent}");
+    println!("times: {times}");
     println!("Success: {}", success.load(Ordering::Acquire));
     println!("Failed: {}", failed.load(Ordering::Acquire));
     println!("Spend: {}ms", spend.load(Ordering::Acquire));
     let throughout = times as f64 * success.load(Ordering::Acquire) as f64
         / spend.load(Ordering::Acquire) as f64;
-    println!("Throughput: {}MB/s", throughout);
+    println!("Throughput: {:.4}MB/s", throughout);
     Ok(())
 }
 
@@ -51,44 +54,44 @@ async fn client_task(
     let start = Instant::now();
     let result = run_client(&addr, times).await;
     let end = Instant::now();
-    if result.is_ok() {
-        success.fetch_add(1, Ordering::Release);
-        spend.fetch_add(
-            end.duration_since(start).as_millis() as i64,
-            Ordering::Release,
-        );
-    } else {
-        failed.fetch_add(1, Ordering::Release);
+    match result {
+        Err(e) => {
+            eprintln!("client task failed: {:#}", e);
+            failed.fetch_add(1, Ordering::Release);
+        }
+        Ok(_) => {
+            success.fetch_add(1, Ordering::Release);
+            spend.fetch_add(
+                end.duration_since(start).as_millis() as i64,
+                Ordering::Release,
+            );
+        }
     }
 }
 
 async fn run_server(addr: &str) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(addr).await?;
-    println!("Listening on: {addr}");
+    eprintln!("Listening on: {addr}");
     tokio::spawn(async move {
         loop {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let (socket, _) = listener.accept().await.unwrap();
             tokio::spawn(async move {
-                let mut buf = vec![0; 1024];
-                loop {
-                    let n = socket
-                        .read(&mut buf)
-                        .await
-                        .expect("failed to read data from socket");
-
-                    if n == 0 {
-                        return;
-                    }
-
-                    socket
-                        .write_all(&buf[0..n])
-                        .await
-                        .expect("failed to write data to socket");
-                }
+                if let Err(e) = handle_server_stream(socket).await { eprintln!("server task failed: {:#}", e) }
             });
         }
     });
     Ok(())
+}
+
+async fn handle_server_stream(mut socket: TcpStream) -> Result<(), Box<dyn Error>> {
+    let mut buf = vec![0; 1024];
+    loop {
+        let n = socket.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        socket.write_all(&buf[0..n]).await?;
+    }
 }
 
 async fn run_client(addr: &str, times: usize) -> Result<(), Box<dyn Error>> {
