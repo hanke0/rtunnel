@@ -60,14 +60,19 @@ chmod 400 "${file}"
 
 trap cleanup EXIT
 
+serverlog=/tmp/server.log
+clientlog=/tmp/client.log
+
 run_server() {
-	cargo run --bin rtunnel -- -l debug server --config "${file}" &
+	cargo run --bin rtunnel -- -l debug server --config "${file}" >"${serverlog}" 2>&1 &
 	server_pid=$!
+	echo "server log: ${serverlog}"
 }
 
 run_client() {
-	cargo run --bin rtunnel -- -l debug client --config "${file}" &
+	cargo run --bin rtunnel -- -l debug client --config "${file}" >"${clientlog}" 2>&1 &
 	client_pid=$!
+	echo "client log: ${clientlog}"
 }
 
 case "$runmode" in
