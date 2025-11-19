@@ -164,6 +164,7 @@ async fn graceful_exit(controller: &Context, side: &str) {
             }
         }
     }
+    info!("{side} has shutdown");
 }
 
 /// Command-line interface arguments structure for rtunnel.

@@ -17,9 +17,11 @@ fn main() {
         .format(|buf, record| {
             writeln!(
                 buf,
-                "{} [{}] - {}",
+                "{} [{}] [{}:{}] - {}",
                 Local::now().format("%Y-%m-%dT%H:%M:%S%Z"),
                 record.level(),
+                record.file().unwrap_or("-"),
+                record.line().unwrap_or(0),
                 record.args()
             )
         })

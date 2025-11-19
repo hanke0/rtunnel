@@ -155,6 +155,7 @@ impl TunnelPool {
                         info!("{} keep alive non-critical error: {:#}", id, err);
                     }
                     self.remove(&id).await;
+                    debug!("{} removed from pool", id);
                 }
             }
         });
@@ -325,11 +326,9 @@ async fn start_service(
             }
             Err(e) => {
                 if e.is_accept_critical() {
-                    if controller.has_cancel() {
-                        return;
+                    if !controller.has_cancel() {
+                        error!("listener accept error: {:#}", e);
                     }
-                    error!("listener accept error: {:#}", e);
-                    controller.cancel_all();
                     break;
                 }
                 info!("listener accept error, retrying: {:#}", e);

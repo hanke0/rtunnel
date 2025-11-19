@@ -20,4 +20,4 @@ allowed_addresses = [
 ]
 
 max_connections = 1024
-idle_connections = 100
+idle_connections = 10
