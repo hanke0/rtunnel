@@ -277,18 +277,26 @@ allowed_addresses = [
 }
 
 fn generate_certs(subjects: &[String]) {
-    let key = generate_simple_self_signed(subjects).unwrap();
-    println!("server_cert = \"\"\"\n{}\"\"\"", key.cert.pem());
+    let server_key = generate_simple_self_signed(subjects).unwrap();
+    let client_key = generate_simple_self_signed(subjects).unwrap();
+    println!("server_cert = \"\"\"\n{}\"\"\"", server_key.cert.pem());
     println!(
         "server_key = \"\"\"\n{}\"\"\"",
-        key.signing_key.serialize_pem()
+        server_key.signing_key.serialize_pem()
     );
-
-    let key = generate_simple_self_signed(subjects).unwrap();
-    println!("client_cert = \"\"\"\n{}\"\"\"", key.cert.pem());
+    println!(
+        "client_ca = \"\"\"\n{}\"\"\"",
+        client_key.signing_key.public_key_pem()
+    );
+    println!("\n");
+    println!("client_cert = \"\"\"\n{}\"\"\"", client_key.cert.pem());
     println!(
         "client_key = \"\"\"\n{}\"\"\"",
-        key.signing_key.serialize_pem()
+        client_key.signing_key.serialize_pem()
+    );
+    println!(
+        "server_ca = \"\"\"\n{}\"\"\"",
+        server_key.signing_key.public_key_pem()
     );
 }
 
