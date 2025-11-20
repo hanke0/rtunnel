@@ -84,9 +84,10 @@ run_server() {
 		return
 		;;
 	frp)
-		tmp/frps --log-level error -c tmp/frps.toml >"${severlog}" 2>&1 &
+		tmp/frps -c tmp/frps.toml >"${severlog}" 2>&1 &
 		;;
 	*)
+		chmod 600 rtunnel.toml
 		target/release/rtunnel -l error server >"${severlog}" 2>&1 &
 		;;
 	esac

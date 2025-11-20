@@ -25,7 +25,7 @@ case $(uname -o)_$(uname -m) in
         ;;
 esac
 
-download_tar "frp[cs]" "$URL"
+[ "$1" = "cfg" ] || download_tar "frp[cs]" "$URL"
 
 write_tmp_config() {
     if [ ! -d tmp ]; then
@@ -38,6 +38,7 @@ write_tmp_config() {
 write_tmp_config frpc.toml <<__EOF__
 serverAddr = "127.0.0.1"
 serverPort = 2333
+log.level = "error"
 
 [[proxies]]
 name = "test-tcp"
@@ -49,4 +50,5 @@ __EOF__
 
 write_tmp_config frps.toml <<__EOF__
 bindPort = 2333
+log.level = "error"
 __EOF__

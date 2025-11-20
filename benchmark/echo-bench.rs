@@ -14,9 +14,9 @@ use tokio::task::JoinSet;
 struct Metrics {
     connect_success: AtomicI64,
     connect_failed: AtomicI64,
-    connect_spend_ms: AtomicI64,
+    connect_spend_ns: AtomicI64,
     transfer_bytes: AtomicI64,
-    transfer_spend_ms: AtomicI64,
+    transfer_spend_ns: AtomicI64,
     transfer_success: AtomicI64,
     transfer_failed: AtomicI64,
 }
@@ -59,8 +59,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         metrics.connect_failed.load(Ordering::SeqCst)
     );
     println!(
-        "connect_spend_ms: {}",
-        metrics.connect_spend_ms.load(Ordering::SeqCst)
+        "connect_spend_ns: {}",
+        metrics.connect_spend_ns.load(Ordering::SeqCst)
             / metrics.connect_success.load(Ordering::SeqCst)
     );
     println!(
@@ -72,16 +72,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         metrics.transfer_failed.load(Ordering::SeqCst)
     );
     println!(
-        "transfer_spend_ms: {}",
-        metrics.transfer_spend_ms.load(Ordering::SeqCst)
+        "transfer_spend_ns: {}",
+        metrics.transfer_spend_ns.load(Ordering::SeqCst)
     );
     println!(
         "transfer_bytes: {}",
         metrics.transfer_bytes.load(Ordering::SeqCst)
     );
     let throughout = metrics.transfer_bytes.load(Ordering::SeqCst) as f64
-        / (metrics.transfer_spend_ms.load(Ordering::SeqCst) as f64)
-        * 1000.
+        / (metrics.transfer_spend_ns.load(Ordering::SeqCst) as f64)
+        * 1000_000_000.
         / 1024.;
 
     println!("Throughput: {:.3}KB/s", throughout);
@@ -113,9 +113,9 @@ async fn client_task(addr: String, times: usize, bytes: usize, loops: usize, met
             }
         };
         metrics.connect_success.fetch_add(1, Ordering::SeqCst);
-        let spend = Instant::now().duration_since(start).as_millis();
+        let spend = Instant::now().duration_since(start).as_nanos();
         metrics
-            .connect_spend_ms
+            .connect_spend_ns
             .fetch_add(spend as i64, Ordering::SeqCst);
 
         if bytes == 0 {
@@ -135,9 +135,9 @@ async fn client_task(addr: String, times: usize, bytes: usize, loops: usize, met
             match reader.read_exact(&mut buf).await {
                 Ok(_) => {
                     metrics.transfer_success.fetch_add(1, Ordering::SeqCst);
-                    let spend = Instant::now().duration_since(start).as_millis();
+                    let spend = Instant::now().duration_since(start).as_nanos();
                     metrics
-                        .transfer_spend_ms
+                        .transfer_spend_ns
                         .fetch_add(spend as i64, Ordering::SeqCst);
                     metrics
                         .transfer_bytes
