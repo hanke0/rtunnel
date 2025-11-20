@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use log::{debug, error, info};
+use rcgen::generate_simple_self_signed;
 use tokio::select;
 use tokio::time::sleep;
 
@@ -44,6 +45,10 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
             info!("starting server, loading config from {}", config);
             let configs = ServerConfig::from_file(&config).expect("Failed to load config");
             run_server(context, configs).await
+        }
+        Commands::SignCert { subjects } => {
+            generate_certs(&subjects);
+            0
         }
     }
 }
@@ -229,6 +234,11 @@ pub enum Commands {
         )]
         config: String,
     },
+    #[command(
+        about = "Generate self-signed certificate",
+        arg_required_else_help = false
+    )]
+    SignCert { subjects: Vec<String> },
 }
 
 fn build_example_config() -> String {
@@ -264,6 +274,22 @@ allowed_addresses = [
 ]
     "
     )
+}
+
+fn generate_certs(subjects: &[String]) {
+    let key = generate_simple_self_signed(subjects).unwrap();
+    println!("server_cert = \"\"\"\n{}\"\"\"", key.cert.pem());
+    println!(
+        "server_key = \"\"\"\n{}\"\"\"",
+        key.signing_key.serialize_pem()
+    );
+
+    let key = generate_simple_self_signed(subjects).unwrap();
+    println!("client_cert = \"\"\"\n{}\"\"\"", key.cert.pem());
+    println!(
+        "client_key = \"\"\"\n{}\"\"\"",
+        key.signing_key.serialize_pem()
+    );
 }
 
 #[cfg(test)]
