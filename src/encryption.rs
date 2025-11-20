@@ -524,45 +524,49 @@ pub async fn server_handshake(
 ///
 /// Returns an error if the relay operation fails.
 pub async fn copy_encrypted_bidirectional(
-    controller: &Context,
+    context: &Context,
     mut read_half: ReadSession,
     mut write_half: WriteSession,
     mut raw_reader: Reader,
     mut raw_writer: Writer,
 ) -> Result<(usize, usize)> {
-    if controller.has_cancel() {
+    if context.has_cancel() {
         debug!(
             "{}->{} copy_encrypted_bidirectional cancelled",
             read_half, raw_reader
         );
         return Ok((0, 0));
     }
-    let children = &controller.children();
+    let current = &Context::new();
     let (read_size, write_size) = tokio::join!(
         async move {
             let size = read_half
-                .relay_encrypted_to_plain_forever(children, &mut raw_writer)
+                .relay_encrypted_to_plain_forever(current, &mut raw_writer)
                 .await;
             debug!(
                 "read_half {} relay_encrypted_to_plain_forever finished: {:?}",
                 read_half, size
             );
             if size.is_err() {
-                children.cancel();
+                current.cancel();
             }
+            let _ = raw_writer.flush(current).await;
+            let _ = raw_writer.shutdown(current).await;
             size
         },
         async move {
             let size = write_half
-                .relay_plain_to_encrypted_forever(children, &mut raw_reader)
+                .relay_plain_to_encrypted_forever(current, &mut raw_reader)
                 .await;
             debug!(
                 "write_half {} relay_plain_to_encrypted_forever finished: {:?}",
                 write_half, size
             );
             if size.is_err() {
-                children.cancel();
+                current.cancel();
             }
+            let _ = write_half.flush(current).await;
+            let _ = write_half.shutdown(current).await;
             size
         },
     );
@@ -845,7 +849,10 @@ impl ReadSession {
             Ok(r) => r,
             Err(err) => {
                 if err.is_eof() {
-                    trace!("{} read_message: EOF: {err:#}", self.reader);
+                    trace!(
+                        "replay_encrypted_to_plain_impl: {} read_message: EOF: {err:#}",
+                        self.reader
+                    );
                     return Ok(0);
                 }
                 return Err(err);
@@ -881,6 +888,16 @@ impl WriteSession {
     // new creates a new WriteSession.
     pub fn new(writer: Writer, encryption: Encryption) -> Self {
         Self { writer, encryption }
+    }
+
+    #[inline]
+    pub async fn shutdown(&mut self, context: &Context) -> Result<()> {
+        self.writer.shutdown(context).await
+    }
+
+    #[inline]
+    pub async fn flush(&mut self, context: &Context) -> Result<()> {
+        self.writer.flush(context).await
     }
 
     // write_ping writes a PING message to the tunnel.
@@ -1163,6 +1180,7 @@ mod tests {
     use tokio::sync::mpsc::channel;
 
     use super::*;
+    use crate::logger::setup_logger;
     use crate::transport::Stream;
 
     #[test]
@@ -1253,10 +1271,7 @@ mod tests {
     }
 
     fn test_setup() {
-        let _ = env_logger::builder()
-            .is_test(true)
-            .filter_level(LevelFilter::Trace)
-            .try_init();
+        setup_logger(LevelFilter::Trace, true);
     }
 
     async fn build_stream_pair() -> (Stream, Stream) {

@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use log::LevelFilter;
+use log::{error, info};
+use rtunnel::errors::ResultExt;
 use tokio::io;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -14,14 +16,11 @@ use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
 
 use rtunnel::generate_random_bytes;
-use rtunnel::{Arguments, Context, run};
+use rtunnel::{Arguments, Context, run, setup_logger};
 
 #[tokio::test]
 async fn test_integration() {
-    let _ = env_logger::builder()
-        .filter_level(LevelFilter::Trace)
-        .is_test(true)
-        .try_init();
+    setup_logger(LevelFilter::Trace, true);
 
     #[cfg(unix)]
     {
@@ -30,8 +29,8 @@ async fn test_integration() {
         fs::set_permissions("rtunnel.toml", perm).unwrap();
     }
 
-    let controller = Context::new();
-    let server_controller = controller.children();
+    let context = Context::new();
+    let server_controller = context.children();
     let server_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
@@ -45,7 +44,7 @@ async fn test_integration() {
     });
 
     sleep(Duration::from_secs(1)).await;
-    let client_controller = controller.children();
+    let client_controller = context.children();
     let client_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
@@ -61,7 +60,7 @@ async fn test_integration() {
     sleep(Duration::from_secs(1)).await;
 
     let listener = TcpListener::bind("127.0.0.1:2335").await.unwrap();
-    let listen_controller = controller.children();
+    let listen_controller = context.children();
     let listen_handle = spawn(async move {
         loop {
             tokio::select! {
@@ -72,12 +71,12 @@ async fn test_integration() {
                                 let (mut reader, mut writer) = stream.into_split();
                                 let amount = io::copy(&mut reader, &mut writer).await;
                                 match amount {
-                                    Ok(amount) => println!("Copied {amount} bytes"),
-                                    Err(e) => println!("Failed to copy: {e}"),
+                                    Ok(amount) => info!("Copied {amount} bytes"),
+                                    Err(e) => error!("Failed to copy: {e}"),
                                 }
                             });
                         }
-                        Err(e) => println!("Failed to accept: {e}"),
+                        Err(e) => error!("Failed to accept: {e}"),
                     };
                 },
                 _ = listen_controller.wait_cancel() => return
@@ -87,16 +86,24 @@ async fn test_integration() {
 
     sleep(Duration::from_secs(1)).await;
 
-    let mut set = JoinSet::new();
-    for _ in 0..1 {
-        set.spawn(connect_to_echo(controller.clone()));
-    }
-    set.join_all().await;
-    controller.cancel();
+    let concurrent_test = async |context: Context, n: usize| {
+        let mut set = JoinSet::new();
+        for _ in 0..n {
+            set.spawn(connect_to_echo(context.clone()));
+        }
+        set.join_all().await;
+        info!("It's OK for {n} concurrent connections");
+    };
+    concurrent_test(context.clone(), 1).await;
+    concurrent_test(context.clone(), 8).await;
+    // TODO: no more tunnel available. Should we support create tunnel from server side?
+    // concurrent_test(context.clone(), 100).await;
+
+    context.cancel();
     listen_handle.await.unwrap();
     server_handle.await.unwrap();
     client_handle.await.unwrap();
-    controller.wait().await;
+    context.wait().await;
 }
 
 async fn connect_to_echo(controller: Context) {
@@ -104,17 +111,30 @@ async fn connect_to_echo(controller: Context) {
     let expect = generate_random_bytes::<65535>().unwrap();
     let mut got = [0u8; 65535];
     let mut_got = &mut got;
+    let addr = format!(
+        "{}-{}",
+        stream.peer_addr().unwrap(),
+        stream.local_addr().unwrap()
+    );
     let (mut reader, mut writer) = stream.into_split();
-
+    const TIMEOUT: Duration = Duration::from_secs(100);
     controller
-        .timeout_default(async move { Ok(writer.write_all(expect.as_ref()).await?) })
+        .timeout(TIMEOUT, async move {
+            Ok(writer.write_all(expect.as_ref()).await?)
+        })
         .await
+        .with_context(|| format!("fail to write: {}", addr))
         .unwrap();
-
+    info!("echo client {} write {} bytes", addr, expect.len());
     controller
-        .timeout_default(async move { Ok(reader.read_exact(mut_got).await?) })
+        .timeout(
+            TIMEOUT,
+            async move { Ok(reader.read_exact(mut_got).await?) },
+        )
         .await
+        .with_context(|| format!("fail to read: {}", addr))
         .unwrap();
+    info!("echo client {} read {} bytes", addr, got.len());
     assert_eq!(expect.len(), got.len());
     assert_eq!(expect, got);
 }

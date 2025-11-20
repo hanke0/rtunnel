@@ -117,6 +117,10 @@ impl Error {
         matches!(self.inner.kind, ErrorKind::Timeout)
     }
 
+    pub fn is_cancel(&self) -> bool {
+        matches!(self.inner.kind, ErrorKind::Canceled)
+    }
+
     pub fn is_eof(&self) -> bool {
         matches!(self.inner.kind, ErrorKind::Eof)
     }

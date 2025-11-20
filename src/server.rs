@@ -5,8 +5,9 @@ use std::sync::Arc;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info, trace};
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, Receiver};
-use tokio::time::{self, Duration, sleep};
+use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ServerConfig;
@@ -14,9 +15,8 @@ use crate::encryption::{self, decode_signing_key, decode_verifying_key};
 use crate::encryption::{
     ReadSession, WriteSession, copy_encrypted_bidirectional, server_handshake,
 };
-use crate::errors::{Error, Result};
+use crate::errors::{Error, Result, ResultExt};
 use crate::transport::{Address, Context, Listener, Stream};
-use crate::whatever;
 
 struct ServerOptions {
     verifier: VerifyingKey,
@@ -95,6 +95,7 @@ async fn keep_alive(
     mut writer: WriteSession,
 ) -> Result<(ReadSession, WriteSession)> {
     let interval = &mut time::interval(Duration::from_secs(5));
+    interval.reset();
     while !stopped.is_cancelled() {
         tokio::select! {
             _ = controller.wait_cancel() => {
@@ -116,6 +117,7 @@ struct TunnelPool(Arc<TunnelPoolInner>);
 
 struct TunnelPoolInner {
     sessions: Mutex<BTreeMap<String, Session>>,
+    notify: Notify,
 }
 
 impl Clone for TunnelPool {
@@ -128,6 +130,7 @@ impl TunnelPool {
     fn new() -> Self {
         Self(Arc::new(TunnelPoolInner {
             sessions: Mutex::new(BTreeMap::new()),
+            notify: Notify::new(),
         }))
     }
 
@@ -142,6 +145,7 @@ impl TunnelPool {
             receiver,
         };
         self.0.sessions.lock().await.insert(id.clone(), session);
+        self.0.notify.notify_last();
         tokio::spawn(async move {
             let r = keep_alive(controller, sender_token, reader, writer).await;
             match r {
@@ -170,15 +174,14 @@ impl TunnelPool {
     }
 
     pub async fn pop(&self) -> Result<(ReadSession, WriteSession)> {
-        for _ in 0..3 {
+        loop {
             match self.0.sessions.lock().await.pop_first() {
                 Some((_, session)) => return session.join().await,
                 None => {
-                    sleep(Duration::from_millis(100)).await;
+                    self.0.notify.notified().await;
                 }
             }
         }
-        Err(whatever!("pool is empty"))
     }
 }
 
@@ -350,7 +353,7 @@ async fn handle_service_stream(
     match handle_service_stream_impl(&controller, stream, &options, &connect_to).await {
         Ok((read, write)) => {
             info!(
-                "stream {} closed and has read {} bytes and wrote {} bytes",
+                "Stream {} closed and has read {} bytes and wrote {} bytes",
                 debug, read, write
             );
         }
@@ -359,9 +362,9 @@ async fn handle_service_stream(
                 if controller.has_cancel() {
                     return;
                 }
-                error!("stream {} relay critical error: {:#}", debug, e);
+                error!("Stream {} relay critical error: {:#}", debug, e);
             } else {
-                info!("stream {} relay non-critical error: {:#}", debug, e);
+                info!("Stream {} relay non-critical error: {:#}", debug, e);
             }
         }
     };
@@ -392,40 +395,26 @@ async fn get_a_useable_connection(
     stream: &mut Stream,
     connect_to: &Address,
 ) -> Result<(ReadSession, WriteSession)> {
-    for _ in 0..3 {
-        match get_a_useable_connection_impl(controller, options, stream, connect_to).await {
-            Ok((read_half, write_half)) => {
-                return Ok((read_half, write_half));
-            }
-            Err(e) => {
-                info!("get a useable connection error: {:#}", e);
-            }
-        }
-    }
-    Err(whatever!("failed to get a useable connection"))
-}
-
-async fn get_a_useable_connection_impl(
-    controller: &Context,
-    options: &ServerOptionsRef,
-    stream: &mut Stream,
-    connect_to: &Address,
-) -> Result<(ReadSession, WriteSession)> {
-    let (mut read_half, mut write_half) = options.pop_stream().await?;
-    trace!("stream got a tunnel: {}->{}", stream, read_half);
+    let (mut read_half, mut write_half) = controller
+        .timeout_default(options.pop_stream())
+        .await
+        .context("Failed to get a tunnel from pool")?;
+    trace!("Stream got a tunnel: {}->{}", stream, read_half);
 
     controller
         .timeout_default(write_half.write_connect_message(controller, connect_to))
-        .await?;
+        .await
+        .context("Failed to write connect message")?;
     trace!(
         "tunnel connect message has sent, wait connect message reply: {}->{}",
         stream, read_half,
     );
     controller
         .timeout_default(read_half.wait_connect_message(controller, &mut write_half))
-        .await?;
+        .await
+        .context("Failed to wait connect message")?;
     trace!(
-        "tunnel connect message has received, relay started: {}->{}",
+        "Tunnel connect message has received, relay started: {}->{}",
         stream, read_half,
     );
     Ok((read_half, write_half))

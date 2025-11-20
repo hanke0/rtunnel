@@ -133,8 +133,15 @@ is_alive() {
 }
 
 get_cpu() {
+	local utime stime clk_tck
 	[ -z "$1" ] && return
-	ps -p $1 -o time= | awk -F: '{ total=0; m=1; } { for (i=0; i < NF; i++) {total += $(NF-i)*m; m *= i >= 2 ? 24 : 60 }} {print total*1000}'
+	if [ -f "/proc/$1/stat" ]; then
+		read -r _ _ _ _ _ _ _ _ _ _ _ _ _ utime stime _ <"/proc/$1/stat"
+		clk_tck=$(getconf CLK_TCK)
+		echo $(((utime + stime) * 1000 / clk_tck))
+	else
+		ps -p $1 -o time= | awk -F: '{ total=0; m=1; } { for (i=0; i < NF; i++) {total += $(NF-i)*m; m *= i >= 2 ? 24 : 60 }} {print total*1000}'
+	fi
 }
 
 get_uptime() {

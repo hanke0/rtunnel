@@ -44,8 +44,6 @@ pub struct ClientConfig {
     pub server_address: transport::Address,
     pub allowed_addresses: HashSet<transport::Address>,
     #[serde(default)]
-    pub max_connections: i32,
-    #[serde(default)]
     pub idle_connections: i32,
 }
 
@@ -144,9 +142,6 @@ impl ClientConfig {
             return Err(whatever!("No client found"));
         }
         for client in clients.iter_mut() {
-            if client.max_connections <= 0 {
-                client.max_connections = 2048;
-            }
             if client.idle_connections <= 0 {
                 client.idle_connections = 8;
             }

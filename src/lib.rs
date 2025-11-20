@@ -10,12 +10,14 @@ pub mod client;
 pub mod config;
 pub mod encryption;
 pub mod errors;
+pub mod logger;
 pub mod server;
 pub mod transport;
 
 pub use crate::config::{ClientConfig, ServerConfig};
 use crate::encryption::KeyPair;
 pub use crate::encryption::generate_random_bytes;
+pub use crate::logger::setup_logger;
 pub use crate::transport::Context;
 
 /// Runs the rtunnel application based on the provided CLI options.

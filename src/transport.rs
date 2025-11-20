@@ -66,11 +66,27 @@ impl fmt::Display for Writer {
 
 impl Writer {
     #[inline]
-    pub async fn write_all(&mut self, controller: &Context, data: &[u8]) -> Result<()> {
+    pub async fn write_all(&mut self, context: &Context, data: &[u8]) -> Result<()> {
         assert_ne!(data.len(), 0);
         tokio::select! {
-            _ = controller.wait_cancel() => Err(Error::cancel()),
+            _ = context.wait_cancel() => Err(Error::cancel()),
             r = self.inner.write_all(data) => Ok(r?),
+        }
+    }
+
+    #[inline]
+    pub async fn shutdown(&mut self, context: &Context) -> Result<()> {
+        tokio::select! {
+            _ = context.wait_cancel() => Err(Error::cancel()),
+            r = self.inner.shutdown() => Ok(r?),
+        }
+    }
+
+    #[inline]
+    pub async fn flush(&mut self, context: &Context) -> Result<()> {
+        tokio::select! {
+            _ = context.wait_cancel() => Err(Error::cancel()),
+            r = self.inner.flush() => Ok(r?),
         }
     }
 }
@@ -100,6 +116,18 @@ impl WriteInner {
     pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
         match self {
             WriteInner::Tcp(s) => s.write_all(data).await,
+        }
+    }
+
+    pub async fn shutdown(&mut self) -> io::Result<()> {
+        match self {
+            WriteInner::Tcp(s) => s.shutdown().await,
+        }
+    }
+
+    pub async fn flush(&mut self) -> io::Result<()> {
+        match self {
+            WriteInner::Tcp(s) => s.flush().await,
         }
     }
 }
@@ -516,19 +544,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_controller_cancel() {
-        let controller = Context::default();
-        let children = controller.children();
+        let context = Context::default();
+        let children = context.children();
 
         children.cancel();
-        assert!(!controller.has_cancel());
+        assert!(!context.has_cancel());
         assert!(children.has_cancel());
         assert_eq!(children.task_count(), 0);
         children.wait().await;
 
-        controller.cancel();
-        assert!(controller.has_cancel());
-        controller.wait().await;
-        assert_eq!(controller.task_count(), 0);
+        context.cancel();
+        assert!(context.has_cancel());
+        context.wait().await;
+        assert_eq!(context.task_count(), 0);
     }
 
     #[tokio::test]
