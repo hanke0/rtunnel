@@ -9,15 +9,12 @@ use tokio::time::sleep;
 
 pub mod client;
 pub mod config;
-pub mod encryption;
 pub mod errors;
 pub mod logger;
 pub mod server;
 pub mod transport;
 
 pub use crate::config::{ClientConfig, ServerConfig};
-use crate::encryption::KeyPair;
-pub use crate::encryption::generate_random_bytes;
 pub use crate::logger::setup_logger;
 pub use crate::transport::Context;
 
@@ -27,11 +24,6 @@ pub use crate::transport::Context;
 /// the appropriate handler based on the selected command.
 pub async fn run(context: &Context, args: Arguments) -> i32 {
     match args.command {
-        Commands::GenerateKey {} => {
-            let pair = KeyPair::random();
-            pair.print();
-            0
-        }
         Commands::ExampleConfig {} => {
             println!("{}", build_example_config());
             0
@@ -197,11 +189,6 @@ pub struct Arguments {
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     #[command(
-        about = "generate public and private key pair",
-        arg_required_else_help = false
-    )]
-    GenerateKey {},
-    #[command(
         about = "Generate example config to stdout",
         arg_required_else_help = false
     )]
@@ -242,13 +229,6 @@ pub enum Commands {
 }
 
 fn build_example_config() -> String {
-    let client_pair = KeyPair::random();
-    let server_pair = KeyPair::random();
-    let server_private = server_pair.private_key();
-    let server_public = server_pair.public_key();
-    let client_private = client_pair.private_key();
-    let client_public = client_pair.public_key();
-
     format!(
         "# Example config for server
 [[servers]]

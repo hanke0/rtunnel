@@ -1,32 +1,74 @@
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
+use std::sync::Arc;
 use std::time::Duration;
 
-use serde::de::{Deserialize, Deserializer, Visitor};
+use bytes::BytesMut;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::server::WebPkiClientVerifier;
 use socket2::TcpKeepalive;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsConnector;
+use tokio_rustls::TlsStream;
+use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::errors::{Error, Result, whatever};
+use crate::config;
+use crate::errors::{Error, Result, ResultExt as _, whatever};
+
+pub fn build_connector(config: config::ConnectTo) -> Result<Connector> {
+    match config {
+        config::ConnectTo::Tcp { addr } => Ok(Connector::Tcp(TcpConnectTo::new(addr))),
+        config::ConnectTo::Tls {
+            addr,
+            client_cert,
+            client_key,
+            server_ca,
+            subject,
+        } => {
+            let connector =
+                TlsConnectTo::try_from_pem(client_cert, client_key, server_ca, subject, addr)?;
+            Ok(Connector::Tls(connector))
+        }
+    }
+}
+
+pub async fn build_listener(config: config::ListenTo) -> Result<Listener> {
+    match config {
+        config::ListenTo::Tcp { addr } => Ok(Listener::Tcp(TcpListener::bind(addr).await?)),
+        config::ListenTo::Tls {
+            addr,
+            server_cert,
+            server_key,
+            client_ca,
+            subject,
+        } => Ok(Listener::Tls(
+            TlsListener::listen(server_cert, server_key, client_ca, subject, addr).await?,
+        )),
+    }
+}
 
 /// Reader for reading data from network streams.
 ///
 /// This struct provides async methods for reading data from network connections,
 /// with support for cancellation through the context.
-pub struct Reader {
-    inner: ReadInner,
-    display: String,
+pub enum Reader {
+    Tcp(OwnedReadHalf, String),
+    Tls(ReadHalf<TlsStream<TcpStream>>, String),
 }
 
 impl fmt::Display for Reader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.display)
+        match self {
+            Reader::Tcp(_, s) => f.write_str(s),
+            Reader::Tls(_, s) => f.write_str(s),
+        }
     }
 }
 
@@ -36,15 +78,30 @@ impl Reader {
         assert_ne!(buf.len(), 0);
         tokio::select! {
             _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.inner.read(buf) => Ok(r?),
+            r = self.read_impl(buf) => Ok(r?),
         }
     }
+
+    async fn read_impl(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Reader::Tcp(s, _) => s.read(buf).await,
+            Reader::Tls(s, _) => s.read(buf).await,
+        }
+    }
+
     #[inline]
     pub async fn read_exact(&mut self, context: &Context, buf: &mut [u8]) -> Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
             _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.inner.read_exact(buf) => Ok(r?),
+            r = self.read_exact_impl(buf) => Ok(r?),
+        }
+    }
+
+    async fn read_exact_impl(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Reader::Tcp(s, _) => s.read_exact(buf).await,
+            Reader::Tls(s, _) => s.read_exact(buf).await,
         }
     }
 }
@@ -53,14 +110,17 @@ impl Reader {
 ///
 /// This struct provides async methods for writing data to network connections,
 /// with support for cancellation through the context.
-pub struct Writer {
-    inner: WriteInner,
-    display: String,
+pub enum Writer {
+    Tcp(OwnedWriteHalf, String),
+    Tls(WriteHalf<TlsStream<TcpStream>>, String),
 }
 
 impl fmt::Display for Writer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.display)
+        match self {
+            Writer::Tcp(_, s) => f.write_str(s),
+            Writer::Tls(_, s) => f.write_str(s),
+        }
     }
 }
 
@@ -70,7 +130,14 @@ impl Writer {
         assert_ne!(data.len(), 0);
         tokio::select! {
             _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.inner.write_all(data) => Ok(r?),
+            r = self.write_all_impl(data) => Ok(r?),
+        }
+    }
+
+    async fn write_all_impl(&mut self, data: &[u8]) -> io::Result<()> {
+        match self {
+            Writer::Tcp(s, _) => s.write_all(data).await,
+            Writer::Tls(s, _) => s.write_all(data).await,
         }
     }
 
@@ -78,7 +145,14 @@ impl Writer {
     pub async fn shutdown(&mut self, context: &Context) -> Result<()> {
         tokio::select! {
             _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.inner.shutdown() => Ok(r?),
+            r = self.shutdown_impl() => Ok(r?),
+        }
+    }
+
+    async fn shutdown_impl(&mut self) -> io::Result<()> {
+        match self {
+            Writer::Tcp(s, _) => s.shutdown().await,
+            Writer::Tls(s, _) => s.shutdown().await,
         }
     }
 
@@ -86,48 +160,14 @@ impl Writer {
     pub async fn flush(&mut self, context: &Context) -> Result<()> {
         tokio::select! {
             _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.inner.flush() => Ok(r?),
-        }
-    }
-}
-
-enum ReadInner {
-    Tcp(OwnedReadHalf),
-}
-
-impl ReadInner {
-    pub async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            ReadInner::Tcp(s) => s.read(buf).await,
-        }
-    }
-    pub async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            ReadInner::Tcp(s) => s.read_exact(buf).await,
-        }
-    }
-}
-
-enum WriteInner {
-    Tcp(OwnedWriteHalf),
-}
-
-impl WriteInner {
-    pub async fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        match self {
-            WriteInner::Tcp(s) => s.write_all(data).await,
+            r = self.flush_impl() => Ok(r?),
         }
     }
 
-    pub async fn shutdown(&mut self) -> io::Result<()> {
+    async fn flush_impl(&mut self) -> io::Result<()> {
         match self {
-            WriteInner::Tcp(s) => s.shutdown().await,
-        }
-    }
-
-    pub async fn flush(&mut self) -> io::Result<()> {
-        match self {
-            WriteInner::Tcp(s) => s.flush().await,
+            Writer::Tcp(s, _) => s.flush().await,
+            Writer::Tls(s, _) => s.flush().await,
         }
     }
 }
@@ -148,20 +188,25 @@ impl fmt::Display for Stream {
 }
 
 impl Stream {
+    pub fn from_tls_stream(stream: TlsStream<TcpStream>) -> Self {
+        let local_addr = stream.get_ref().0.local_addr().unwrap();
+        let peer_addr = stream.get_ref().0.peer_addr().unwrap();
+        let display = format!("{}-{}", local_addr, peer_addr);
+        let (r, w) = tokio::io::split(stream);
+        Stream {
+            reader: Reader::Tls(r, display.clone()),
+            writer: Writer::Tls(w, display),
+        }
+    }
+
     pub fn from_tcp_stream(stream: TcpStream) -> Self {
         let local_addr = stream.local_addr().unwrap();
         let peer_addr = stream.peer_addr().unwrap();
         let display = format!("{}-{}", local_addr, peer_addr);
         let (r, w) = stream.into_split();
         Stream {
-            reader: Reader {
-                inner: ReadInner::Tcp(r),
-                display: display.clone(),
-            },
-            writer: Writer {
-                inner: WriteInner::Tcp(w),
-                display,
-            },
+            reader: Reader::Tcp(r, display.clone()),
+            writer: Writer::Tcp(w, display),
         }
     }
 }
@@ -172,6 +217,7 @@ impl Stream {
 /// incoming connections and create streams.
 pub enum Listener {
     Tcp(TcpListener),
+    Tls(TlsListener),
 }
 
 impl fmt::Display for Listener {
@@ -180,6 +226,9 @@ impl fmt::Display for Listener {
             Listener::Tcp(s) => {
                 let addr = s.local_addr().unwrap();
                 write!(f, "{}", addr)
+            }
+            Listener::Tls(s) => {
+                write!(f, "{}", s.addr)
             }
         }
     }
@@ -200,88 +249,135 @@ impl Listener {
                 set_keep_alive(&stream)?;
                 Ok(Stream::from_tcp_stream(stream))
             }
-        }
-    }
-}
-
-/// Network address representation.
-///
-/// This enum represents different types of network addresses that can be used
-/// for connecting to or listening on network endpoints.
-#[derive(PartialEq, Eq, Hash, Clone, Copy, Debug)]
-pub enum Address {
-    Tcp(SocketAddr),
-}
-
-impl fmt::Display for Address {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Address::Tcp(a) => {
-                write!(f, "tcp://{}", a)
+            Listener::Tls(s) => {
+                let stream = s.accept().await?;
+                Ok(Stream::from_tls_stream(stream))
             }
         }
     }
 }
 
-impl Address {
-    pub fn as_string(&self) -> String {
-        match self {
-            Address::Tcp(a) => {
-                format!("tcp://{}", a)
-            }
-        }
+pub struct TlsListener {
+    acceptor: TlsAcceptor,
+    listener: TcpListener,
+    addr: SocketAddr,
+    subject: String,
+}
+
+impl TlsListener {
+    pub async fn listen(
+        server_cert: String,
+        server_key: String,
+        client_ca: String,
+        subject: String,
+        addr: SocketAddr,
+    ) -> Result<Self> {
+        let cert_chain = CertificateDer::from_pem_slice(server_cert.as_bytes())?;
+        let key_der = PrivateKeyDer::from_pem_slice(server_key.as_bytes())?;
+        let client_ca = CertificateDer::from_pem_slice(client_ca.as_bytes())?;
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(client_ca)?;
+        let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(root_store)).build()?;
+        let config =
+            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .with_client_cert_verifier(client_cert_verifier)
+                .with_single_cert(vec![cert_chain], key_der)?;
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind(addr).await?;
+        Ok(Self {
+            acceptor,
+            listener,
+            addr,
+            subject,
+        })
     }
 
-    pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        let raw = String::from_utf8(data.to_vec())?;
-        Address::from_string(&raw)
+    async fn accept(&self) -> Result<TlsStream<TcpStream>> {
+        let (stream, _) = self.listener.accept().await?;
+        set_keep_alive(&stream)?;
+        let r = self.acceptor.accept(stream).await?;
+        Ok(TlsStream::from(r))
     }
+}
 
-    pub fn from_string(raw: &str) -> Result<Self> {
-        let mut iter = if raw.starts_with("tcp://") {
-            raw.strip_prefix("tcp://").unwrap()
-        } else {
-            raw
-        }
-        .to_socket_addrs()?;
-        let addr = iter
-            .next()
-            .ok_or_else(|| whatever!("Invalid address {}", raw))?;
+pub enum Connector {
+    Tls(TlsConnectTo),
+    Tcp(TcpConnectTo),
+}
 
-        Ok(Address::Tcp(addr))
-    }
-
-    pub async fn connect_to(&self, context: &Context) -> Result<Stream> {
+impl Connector {
+    pub async fn connect(&self, context: &Context) -> Result<Stream> {
         tokio::select! {
             _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.connect_to_impl() => r,
+            r = self.connect_impl() => Ok(r?),
         }
     }
 
-    async fn connect_to_impl(&self) -> Result<Stream> {
+    async fn connect_impl(&self) -> Result<Stream> {
         match self {
-            Address::Tcp(a) => {
-                let stream = TcpStream::connect(a).await?;
-                set_keep_alive(&stream)?;
-                Ok(Stream::from_tcp_stream(stream))
-            }
+            Connector::Tls(s) => s.connect().await,
+            Connector::Tcp(s) => s.connect().await,
         }
     }
+}
 
-    pub async fn listen_to(&self, context: &Context) -> Result<Listener> {
-        tokio::select! {
-            _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.listen_to_impl() => r
-        }
+pub struct TlsConnectTo {
+    connector: TlsConnector,
+    addr: SocketAddr,
+    server_name: ServerName<'static>,
+}
+
+impl TlsConnectTo {
+    pub fn try_from_pem(
+        client_cert: String,
+        client_key: String,
+        server_ca: String,
+        subject: String,
+        addr: SocketAddr,
+    ) -> Result<Self> {
+        let cert_chain = CertificateDer::from_pem_slice(client_cert.as_bytes())?;
+        let key_der = PrivateKeyDer::from_pem_slice(client_key.as_bytes())?;
+        let server_ca = CertificateDer::from_pem_slice(server_ca.as_bytes())?;
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.add(server_ca)?;
+        let server_name = ServerName::try_from(subject)?;
+
+        let config =
+            rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(vec![cert_chain], key_der)?;
+        let connector = TlsConnector::from(Arc::new(config));
+        Ok(Self {
+            connector,
+            addr,
+            server_name,
+        })
     }
 
-    async fn listen_to_impl(&self) -> Result<Listener> {
-        match self {
-            Address::Tcp(a) => {
-                let listener = TcpListener::bind(a).await?;
-                Ok(Listener::Tcp(listener))
-            }
-        }
+    pub async fn connect(&self) -> Result<Stream> {
+        let stream = TcpStream::connect(self.addr).await?;
+        set_keep_alive(&stream)?;
+        let stream = self
+            .connector
+            .connect(self.server_name.clone(), stream)
+            .await?;
+        Ok(Stream::from_tls_stream(stream.into()))
+    }
+}
+
+struct TcpConnectTo {
+    addr: SocketAddr,
+}
+
+impl TcpConnectTo {
+    pub fn new(addr: SocketAddr) -> Self {
+        Self { addr }
+    }
+
+    pub async fn connect(&self) -> Result<Stream> {
+        let stream = TcpStream::connect(self.addr).await?;
+        set_keep_alive(&stream)?;
+        Ok(Stream::from_tcp_stream(stream))
     }
 }
 
@@ -292,43 +388,6 @@ fn set_keep_alive(stream: &TcpStream) -> Result<()> {
         .with_interval(Duration::from_secs(1));
     socket_ref.set_tcp_keepalive(&keep_alive)?;
     Ok(())
-}
-
-struct AddressVisitor;
-
-impl Default for AddressVisitor {
-    fn default() -> Self {
-        AddressVisitor
-    }
-}
-
-impl Visitor<'_> for AddressVisitor {
-    // The type that our Visitor is going to produce.
-    type Value = Address;
-
-    // Format a message stating what data this Visitor expects to receive.
-    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str("tcp://127.0.0.1 or 127.0.0.1")
-    }
-
-    fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        match Address::from_string(v) {
-            Ok(v) => Ok(v),
-            Err(e) => Err(E::custom(e)),
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Address {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_str(AddressVisitor)
-    }
 }
 
 /// Context for managing async tasks and cancellation.
@@ -451,6 +510,169 @@ where
     match tokio::time::timeout(duration, f).await {
         Ok(r) => r,
         Err(_) => Err(Error::from_timeout(duration)),
+    }
+}
+
+/// Message type enumeration for tunnel protocol messages.
+///
+/// This enum represents the different types of messages that can be sent
+/// over the encrypted tunnel connection.
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub enum MessageType {
+    HandshakeData,
+    HandshakeCtrl,
+    Connect,
+    Ping,
+}
+
+impl MessageType {
+    const HANDSHAKE_DATA: u8 = 0b01000000;
+    const HANDSHAKE_CTRL: u8 = 0b10000000;
+    const CONNECT: u8 = 0b11000000;
+    const PING: u8 = 0b00000000;
+
+    fn from_checked_u8(msg_type: u8) -> Self {
+        Self::from_u8(msg_type).unwrap()
+    }
+
+    fn from_u8(msg_type: u8) -> Result<Self> {
+        match msg_type {
+            Self::HANDSHAKE_DATA => Ok(MessageType::HandshakeData),
+            Self::CONNECT => Ok(MessageType::Connect),
+            Self::HANDSHAKE_CTRL => Ok(MessageType::HandshakeCtrl),
+            Self::PING => Ok(MessageType::Ping),
+            _ => Err(whatever!("Invalid message type: {}", msg_type)),
+        }
+    }
+
+    fn as_u8(&self) -> u8 {
+        match self {
+            MessageType::HandshakeData => Self::HANDSHAKE_DATA,
+            MessageType::Connect => Self::HANDSHAKE_CTRL,
+            MessageType::HandshakeCtrl => Self::HANDSHAKE_CTRL,
+            MessageType::Ping => Self::PING,
+        }
+    }
+}
+
+/// Protocol message.
+///
+/// Messages have a 2-byte header containing:
+/// - 2 bits for message type
+/// - 14 bits for message length
+///
+/// Followed by the message payload data.
+pub struct Message(BytesMut);
+
+impl Message {
+    const MSG_TYPE_FLAG: u8 = 0b11000000;
+    const DATA_SIZE_HIGH_FLAG: u8 = 0b00111111;
+    const MAX_MSG_SIZE: usize = 0b00111111_11111111;
+    const HEADER_SIZE: usize = 2;
+
+    pub fn ping() -> Self {
+        let mut message = Self::with_capacity(0);
+        message.set_header(MessageType::Ping, 0);
+        message
+    }
+
+    pub fn connect(addr: &str) -> Self {
+        let mut message = Self::with_capacity(addr.len());
+        message.fill(MessageType::Connect, |buf| {
+            buf.extend_from_slice(addr.as_bytes());
+        });
+        message
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut buf = BytesMut::with_capacity(capacity + Self::HEADER_SIZE);
+        buf.resize(Self::HEADER_SIZE, 0);
+        let mut message = Message(buf);
+        message.set_header(MessageType::Ping, 0);
+        message
+    }
+
+    pub fn get_type(&self) -> MessageType {
+        MessageType::from_checked_u8(self.0[0] & Self::MSG_TYPE_FLAG)
+    }
+
+    fn get_unchecked_type(&self) -> Result<MessageType> {
+        MessageType::from_u8(self.0[0] & Self::MSG_TYPE_FLAG)
+    }
+
+    pub fn get_payload_size(&self) -> usize {
+        u16::from_be_bytes([self.0[0] & Self::DATA_SIZE_HIGH_FLAG, self.0[1]]) as usize
+    }
+
+    pub fn get_payload(&self) -> &[u8] {
+        &self.0[Self::HEADER_SIZE..]
+    }
+
+    fn set_header(&mut self, msg_type: MessageType, body_size: usize) {
+        let high = (body_size >> 8) as u8;
+        let low = (body_size & 0xff) as u8;
+        let buf = &mut self.0;
+        assert!(buf.len() > 1);
+        buf[0] = high | msg_type.as_u8();
+        buf[1] = low;
+    }
+
+    pub fn fill<O, F: FnOnce(&mut BytesMut) -> O>(&mut self, message_type: MessageType, f: F) -> O {
+        debug_assert!(
+            self.0.len() >= Self::HEADER_SIZE,
+            "Invalid message size: {}",
+            self.0.len()
+        );
+        let mut payload = self.0.split_off(Self::HEADER_SIZE);
+        payload.clear();
+        debug_assert_eq!(self.0.len(), Self::HEADER_SIZE);
+        let output = f(&mut payload);
+        let payload_size = payload.len();
+        debug_assert!(payload_size <= Self::MAX_MSG_SIZE);
+        debug_assert_eq!(self.0.len(), Self::HEADER_SIZE);
+        self.0.unsplit(payload);
+        debug_assert_eq!(self.0.len(), Self::HEADER_SIZE + payload_size);
+        self.set_header(message_type, payload_size);
+        output
+    }
+
+    pub async fn read_from(context: &Context, reader: &mut Reader) -> Result<Self> {
+        let mut msg = Self::default();
+        msg.read_from_inplace(context, reader).await?;
+        Ok(msg)
+    }
+
+    pub async fn read_from_inplace(
+        &mut self,
+        context: &Context,
+        reader: &mut Reader,
+    ) -> Result<()> {
+        self.0.resize(Self::HEADER_SIZE, 0);
+        reader
+            .read_exact(context, &mut self.0)
+            .await
+            .context("Failed to read message header from stream")?;
+        self.get_unchecked_type()?;
+        let mut payload = self.0.split_off(Self::HEADER_SIZE);
+        payload.resize(self.get_payload_size(), 0);
+        reader
+            .read_exact(context, &mut payload)
+            .await
+            .context("Failed to read message from stream")?;
+        self.0.unsplit(payload);
+        Ok(())
+    }
+}
+
+impl Default for Message {
+    fn default() -> Self {
+        Self::with_capacity(4096 - Self::HEADER_SIZE)
+    }
+}
+
+impl AsRef<[u8]> for Message {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
     }
 }
 

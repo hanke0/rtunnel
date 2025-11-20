@@ -7,12 +7,8 @@ use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::config::ClientConfig;
-use crate::encryption::client_handshake;
-use crate::encryption::copy_encrypted_bidirectional;
-use crate::encryption::{ReadSession, WriteSession};
-use crate::encryption::{decode_signing_key, decode_verifying_key};
 use crate::errors::{Result, ResultExt as _, whatever};
-use crate::transport::{Address, Context};
+use crate::transport::{ Context};
 
 struct ClientOptions {
     address: Address,

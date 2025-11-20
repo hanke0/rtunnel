@@ -143,6 +143,7 @@ impl From<Inner> for Error {
     }
 }
 
+
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         Display::fmt(&self.inner, f)
@@ -225,6 +226,7 @@ macro_rules! whatever {
     };
 }
 
+use tokio_rustls::rustls;
 pub use whatever;
 
 macro_rules! generate_from_any {
@@ -271,6 +273,10 @@ generate_from_any!(toml::de::Error);
 generate_from_any!(ed25519_dalek::SignatureError);
 generate_from_any!(rand_core::Error);
 generate_from_any!(aes_gcm::Error);
+generate_from_any!(rustls::Error);
+generate_from_any!(tokio_rustls::rustls::pki_types::InvalidDnsNameError);
+generate_from_any!(tokio_rustls::rustls::pki_types::pem::Error);
+generate_from_any!(rustls::server::VerifierBuilderError);
 
 // Not public API. Referenced by macro-generated code.
 #[doc(hidden)]

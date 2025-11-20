@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Read;
+use std::net::{SocketAddr, ToSocketAddrs};
+use std::string::String;
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::errors::{Result, ResultExt as _};
-use crate::{transport, whatever};
+use crate::errors::{Error, Result, ResultExt as _};
+use crate::whatever;
 
 /// Root configuration structure that can contain both server and client configurations.
 ///
@@ -27,10 +29,10 @@ pub type ClientConfigList = Vec<ClientConfig>;
 /// including the listening address, cryptographic keys, and service definitions.
 #[derive(Deserialize)]
 pub struct ServerConfig {
-    pub listen: transport::Address,
     pub private_key: String,
     pub client_public_key: String,
     pub services: Vec<Service>,
+    pub listen_to: ListenTo,
 }
 
 /// Client configuration for rtunnel.
@@ -41,10 +43,69 @@ pub struct ServerConfig {
 pub struct ClientConfig {
     pub private_key: String,
     pub server_public_key: String,
-    pub server_address: transport::Address,
-    pub allowed_addresses: HashSet<transport::Address>,
     #[serde(default)]
     pub idle_connections: i32,
+    pub connect_to: ConnectTo,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+pub enum ConnectTo {
+    #[serde(rename = "tcp")]
+    Tcp { addr: SocketAddr },
+    #[serde(rename = "tls")]
+    Tls {
+        client_cert: String,
+        client_key: String,
+        server_ca: String,
+        subject: String,
+        addr: SocketAddr,
+    },
+}
+
+fn parse_address(value: &str) -> Result<SocketAddr> {
+    let addr = if value.starts_with("tcp://") {
+        value.strip_prefix("tcp://").unwrap()
+    } else {
+        value
+    }
+    .to_socket_addrs()?
+    .next()
+    .ok_or(whatever!("Invalid address"))?;
+    Ok(addr)
+}
+
+impl TryFrom<String> for ConnectTo {
+    type Error = Error;
+    fn try_from(value: String) -> Result<Self> {
+        Ok(Self::Tcp {
+            addr: parse_address(&value)?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+pub enum ListenTo {
+    #[serde(rename = "tcp")]
+    Tcp { addr: SocketAddr },
+    #[serde(rename = "tls")]
+    Tls {
+        server_cert: String,
+        server_key: String,
+        client_ca: String,
+        subject: String,
+        addr: SocketAddr,
+    },
+}
+
+impl TryFrom<String> for ListenTo {
+    type Error = Error;
+    fn try_from(value: String) -> Result<Self> {
+        Ok(Self::Tcp {
+            addr: parse_address(&value)?,
+        })
+    }
 }
 
 /// Service definition for a tunnel server.
@@ -53,8 +114,8 @@ pub struct ClientConfig {
 /// allowing the server to forward traffic from the public interface to backend services.
 #[derive(Deserialize)]
 pub struct Service {
-    pub bind_to: transport::Address,
-    pub connect_to: transport::Address,
+    pub listen_to: String,
+    pub connect_to: String,
 }
 
 impl ServerConfig {
