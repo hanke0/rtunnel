@@ -179,23 +179,23 @@ impl Message {
     }
 
     #[allow(dead_code)]
-    async fn read_from(controller: &Context, reader: &mut Reader) -> Result<Self> {
+    async fn read_from(context: &Context, reader: &mut Reader) -> Result<Self> {
         let mut msg = Self::default();
-        msg.read_from_inplace(controller, reader).await?;
+        msg.read_from_inplace(context, reader).await?;
         Ok(msg)
     }
 
-    async fn read_from_inplace(&mut self, controller: &Context, reader: &mut Reader) -> Result<()> {
+    async fn read_from_inplace(&mut self, context: &Context, reader: &mut Reader) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
         reader
-            .read_exact(controller, &mut self.0)
+            .read_exact(context, &mut self.0)
             .await
             .context("Failed to read message header from stream")?;
         self.get_unchecked_type()?;
         let mut payload = self.0.split_off(Self::HEADER_SIZE);
         payload.resize(self.get_payload_size(), 0);
         reader
-            .read_exact(controller, &mut payload)
+            .read_exact(context, &mut payload)
             .await
             .context("Failed to read message from stream")?;
         self.0.unsplit(payload);
@@ -299,24 +299,22 @@ impl HelloMessage {
     }
 
     async fn read_from(
-        controller: &Context,
+        context: &Context,
         reader: &mut Reader,
         verifier: &VerifyingKey,
     ) -> Result<Self> {
         let mut hello = Self::default();
-        hello
-            .read_from_inplace(controller, reader, verifier)
-            .await?;
+        hello.read_from_inplace(context, reader, verifier).await?;
         Ok(hello)
     }
 
     async fn read_from_inplace(
         &mut self,
-        controller: &Context,
+        context: &Context,
         reader: &mut Reader,
         verifier: &VerifyingKey,
     ) -> Result<()> {
-        self.0.read_from_inplace(controller, reader).await?;
+        self.0.read_from_inplace(context, reader).await?;
         self.verify(verifier)
             .context("Failed to verify hello message")?;
         Ok(())
@@ -404,25 +402,8 @@ fn handshake(
 ///
 /// This function initiates the cryptographic handshake from the client side,
 /// exchanging keys and establishing encryption sessions for bidirectional communication.
-///
-/// # Arguments
-///
-/// * `controller` - The controller for managing async tasks and cancellation
-/// * `reader` - The reader for receiving data from the server
-/// * `writer` - The writer for sending data to the server
-/// * `signer` - The signing key for authenticating the client
-/// * `verifier` - The verifying key for verifying the server's identity
-///
-/// # Returns
-///
-/// Returns a tuple of `(ReadSession, WriteSession)` for encrypted communication.
-///
-/// # Errors
-///
-/// Returns an error if the handshake fails due to network issues, invalid keys,
-/// or protocol violations.
 pub async fn client_handshake(
-    controller: &Context,
+    context: &Context,
     mut reader: Reader,
     mut writer: Writer,
     signer: &SigningKey,
@@ -434,10 +415,10 @@ pub async fn client_handshake(
 
     let client_hello = ClientHello::build(ephemeral_public.as_bytes(), &client_random, signer)?;
     writer
-        .write_all(controller, client_hello.as_ref())
+        .write_all(context, client_hello.as_ref())
         .await
         .context("Failed to write to stream when client handshake")?;
-    let server_hello = ServerHello::read_from(controller, &mut reader, verifier).await?;
+    let server_hello = ServerHello::read_from(context, &mut reader, verifier).await?;
     let (client_encryption, server_encryption) = handshake(
         &client_hello,
         &server_hello,
@@ -455,25 +436,8 @@ pub async fn client_handshake(
 ///
 /// This function responds to the client's handshake, exchanging keys and
 /// establishing encryption sessions for bidirectional communication.
-///
-/// # Arguments
-///
-/// * `controller` - The controller for managing async tasks and cancellation
-/// * `reader` - The reader for receiving data from the client
-/// * `writer` - The writer for sending data to the client
-/// * `signer` - The signing key for authenticating the server
-/// * `verifier` - The verifying key for verifying the client's identity
-///
-/// # Returns
-///
-/// Returns a tuple of `(ReadSession, WriteSession)` for encrypted communication.
-///
-/// # Errors
-///
-/// Returns an error if the handshake fails due to network issues, invalid keys,
-/// or protocol violations.
 pub async fn server_handshake(
-    controller: &Context,
+    context: &Context,
     mut reader: Reader,
     mut writer: Writer,
     signer: &SigningKey,
@@ -483,10 +447,10 @@ pub async fn server_handshake(
     let ephemeral_public = ECDHPublic::from(&ephemeral_private);
     let server_random = generate_random()?;
 
-    let client_hello = ClientHello::read_from(controller, &mut reader, verifier).await?;
+    let client_hello = ClientHello::read_from(context, &mut reader, verifier).await?;
     let server_hello = ServerHello::build(ephemeral_public.as_bytes(), &server_random, signer)?;
     writer
-        .write_all(controller, server_hello.as_ref())
+        .write_all(context, server_hello.as_ref())
         .await
         .context("Failed to write to stream when server handshake")?;
 
@@ -506,23 +470,6 @@ pub async fn server_handshake(
 ///
 /// This function relays data in both directions: from encrypted to plain and
 /// from plain to encrypted, enabling transparent tunneling of network traffic.
-///
-/// # Arguments
-///
-/// * `controller` - The controller for managing async tasks and cancellation
-/// * `read_half` - The encrypted read session
-/// * `write_half` - The encrypted write session
-/// * `raw_reader` - The plain text reader
-/// * `raw_writer` - The plain text writer
-///
-/// # Returns
-///
-/// Returns a tuple of `(read_size, write_size)` indicating bytes transferred
-/// in each direction.
-///
-/// # Errors
-///
-/// Returns an error if the relay operation fails.
 pub async fn copy_encrypted_bidirectional(
     context: &Context,
     mut read_half: ReadSession,
@@ -626,17 +573,17 @@ impl Encryption {
 
     async fn read_and_decrypt_inplace<'a>(
         &'a mut self,
-        controller: &Context,
+        context: &Context,
         reader: &mut Reader,
     ) -> Result<(MessageType, &'a [u8])> {
-        self.message.read_from_inplace(controller, reader).await?;
+        self.message.read_from_inplace(context, reader).await?;
         self.decrypt_inplace()?;
         Ok((self.message.get_type(), self.message.get_payload()))
     }
 
     async fn read_and_encrypt_inplace<'a>(
         &'a mut self,
-        controller: &Context,
+        context: &Context,
         reader: &mut Reader,
     ) -> Result<(usize, &'a [u8])> {
         let message = &mut self.message;
@@ -652,7 +599,7 @@ impl Encryption {
                 }
                 assert_ne!(payload.len(), 0);
                 let n = reader
-                    .read(controller, payload)
+                    .read(context, payload)
                     .await
                     .context("Failed to read from stream")?;
                 payload.resize(n, 0);
@@ -732,10 +679,10 @@ impl ReadSession {
     }
 
     // read_ping reads a PING message from the tunnel.
-    pub async fn read_ping(&mut self, controller: &Context) -> Result<()> {
+    pub async fn read_ping(&mut self, context: &Context) -> Result<()> {
         let (typ, _) = self
             .encryption
-            .read_and_decrypt_inplace(controller, &mut self.reader)
+            .read_and_decrypt_inplace(context, &mut self.reader)
             .await?;
         match typ {
             MessageType::Ping => Ok(()),
@@ -748,7 +695,7 @@ impl ReadSession {
     // It handles PING messages as well.
     pub async fn wait_connect_message(
         &mut self,
-        controller: &Context,
+        context: &Context,
         writer: &mut WriteSession,
     ) -> Result<Address> {
         const TIMEOUT: Duration = Duration::from_secs(10);
@@ -758,7 +705,7 @@ impl ReadSession {
                 _ = sleep(TIMEOUT) => {
                     return Err(Error::from_timeout(TIMEOUT));
                 }
-                addr = self.wait_connect_message_impl(controller, writer) => {
+                addr = self.wait_connect_message_impl(context, writer) => {
                     match addr {
                         Ok(Some(addr)) => return Ok(addr),
                         Ok(None) => continue,
@@ -771,18 +718,18 @@ impl ReadSession {
 
     async fn wait_connect_message_impl(
         &mut self,
-        controller: &Context,
+        context: &Context,
         writer: &mut WriteSession,
     ) -> Result<Option<Address>> {
         let (typ, payload) = self
             .encryption
-            .read_and_decrypt_inplace(controller, &mut self.reader)
+            .read_and_decrypt_inplace(context, &mut self.reader)
             .await?;
         match typ {
             MessageType::Connect => Ok(Some(Address::from_bytes(payload)?)),
             MessageType::Ping => {
                 match writer
-                    .write_ping(controller)
+                    .write_ping(context)
                     .await
                     .context("Failed to write ping")
                 {
@@ -797,10 +744,10 @@ impl ReadSession {
     #[inline]
     pub async fn read_and_decrypt_inplace<'a>(
         &'a mut self,
-        controller: &Context,
+        context: &Context,
     ) -> Result<(MessageType, &'a [u8])> {
         self.encryption
-            .read_and_decrypt_inplace(controller, &mut self.reader)
+            .read_and_decrypt_inplace(context, &mut self.reader)
             .await
     }
 
@@ -808,12 +755,12 @@ impl ReadSession {
     // and writes them to the given writer.
     pub async fn relay_encrypted_to_plain_forever(
         &mut self,
-        controller: &Context,
+        context: &Context,
         writer: &mut Writer,
     ) -> Result<usize> {
         let mut size: usize = 0;
         loop {
-            let n = self.relay_encrypted_to_plain(controller, writer).await;
+            let n = self.relay_encrypted_to_plain(context, writer).await;
             match n {
                 Ok(n) => {
                     if n == 0 {
@@ -830,22 +777,22 @@ impl ReadSession {
 
     async fn relay_encrypted_to_plain(
         &mut self,
-        controller: &Context,
+        context: &Context,
         writer: &mut Writer,
     ) -> Result<usize> {
         tokio::select! {
-            n = self.relay_encrypted_to_plain_impl(controller, writer) => n,
-            _ = controller.wait_cancel() => Err(Error::cancel()),
+            n = self.relay_encrypted_to_plain_impl(context, writer) => n,
+            _ = context.wait_cancel() => Err(Error::cancel()),
         }
     }
 
     #[inline]
     async fn relay_encrypted_to_plain_impl(
         &mut self,
-        controller: &Context,
+        context: &Context,
         writer: &mut Writer,
     ) -> Result<usize> {
-        let (typ, buf) = match self.read_and_decrypt_inplace(controller).await {
+        let (typ, buf) = match self.read_and_decrypt_inplace(context).await {
             Ok(r) => r,
             Err(err) => {
                 if err.is_eof() {
@@ -862,7 +809,7 @@ impl ReadSession {
             return Err(whatever!("Unexpected message type: {}", typ));
         }
         writer
-            .write_all(controller, buf)
+            .write_all(context, buf)
             .await
             .context("Failed to write to stream")?;
         Ok(buf.len())
@@ -901,10 +848,10 @@ impl WriteSession {
     }
 
     // write_ping writes a PING message to the tunnel.
-    pub async fn write_ping(&mut self, controller: &Context) -> Result<()> {
+    pub async fn write_ping(&mut self, context: &Context) -> Result<()> {
         let data = self.encryption.replace_payload(MessageType::Ping, &[])?;
         self.writer
-            .write_all(controller, data)
+            .write_all(context, data)
             .await
             .context("Failed to write ping message to stream")
     }
@@ -912,14 +859,14 @@ impl WriteSession {
     // write_connect_message writes a CONNECT message to the tunnel.
     pub async fn write_connect_message(
         &mut self,
-        controller: &Context,
+        context: &Context,
         address: &Address,
     ) -> Result<()> {
         let data = self
             .encryption
             .replace_payload(MessageType::Connect, address.as_string().as_bytes())?;
         self.writer
-            .write_all(controller, data)
+            .write_all(context, data)
             .await
             .context("Failed to write connect message to stream")
     }
@@ -928,12 +875,12 @@ impl WriteSession {
     // encrypts them, and writes them to the tunnel.
     pub async fn relay_plain_to_encrypted_forever(
         &mut self,
-        controller: &Context,
+        context: &Context,
         reader: &mut Reader,
     ) -> Result<usize> {
         let mut size: usize = 0;
         loop {
-            match self.relay_plain_to_encrypted(controller, reader).await {
+            match self.relay_plain_to_encrypted(context, reader).await {
                 Ok(n) => {
                     if n == 0 {
                         return Ok(size);
@@ -949,30 +896,30 @@ impl WriteSession {
 
     async fn relay_plain_to_encrypted(
         &mut self,
-        controller: &Context,
+        context: &Context,
         reader: &mut Reader,
     ) -> Result<usize> {
         tokio::select! {
-            n = self.replay_plain_to_encrypted_impl(controller, reader) => n,
-            _ = controller.wait_cancel() => Err(Error::cancel()),
+            n = self.replay_plain_to_encrypted_impl(context, reader) => n,
+            _ = context.wait_cancel() => Err(Error::cancel()),
         }
     }
 
     #[inline]
     async fn replay_plain_to_encrypted_impl(
         &mut self,
-        controller: &Context,
+        context: &Context,
         reader: &mut Reader,
     ) -> Result<usize> {
         let (n, data) = self
             .encryption
-            .read_and_encrypt_inplace(controller, reader)
+            .read_and_encrypt_inplace(context, reader)
             .await?;
         if n == 0 {
             return Ok(0);
         }
         self.writer
-            .write_all(controller, data)
+            .write_all(context, data)
             .await
             .context("Failed to write to stream")?;
         Ok(n)
@@ -980,12 +927,12 @@ impl WriteSession {
 
     #[inline]
     #[allow(dead_code)]
-    async fn write_data(&mut self, controller: &Context, payload: &[u8]) -> Result<()> {
+    async fn write_data(&mut self, context: &Context, payload: &[u8]) -> Result<()> {
         let data = self
             .encryption
             .replace_payload(MessageType::Data, payload)?;
         self.writer
-            .write_all(controller, data)
+            .write_all(context, data)
             .await
             .context("Failed to write to stream")?;
         Ok(())
@@ -996,26 +943,16 @@ impl WriteSession {
 ///
 /// This function performs a bidirectional ping/pong exchange to ensure
 /// the tunnel connection remains active and detect connection failures.
-///
-/// # Arguments
-///
-/// * `controller` - The controller for managing async tasks and cancellation
-/// * `reader` - The read session for receiving the ping response
-/// * `writer` - The write session for sending the ping request
-///
-/// # Errors
-///
-/// Returns an error if the keep-alive exchange fails or times out.
 pub async fn keep_alive(
-    controller: &Context,
+    context: &Context,
     reader: &mut ReadSession,
     writer: &mut WriteSession,
 ) -> Result<()> {
     const TIMEOUT: Duration = Duration::from_secs(3);
-    transport::timeout(TIMEOUT, writer.write_ping(controller))
+    transport::timeout(TIMEOUT, writer.write_ping(context))
         .await
         .context("Failed to write ping message to stream")?;
-    transport::timeout(TIMEOUT, reader.read_ping(controller))
+    transport::timeout(TIMEOUT, reader.read_ping(context))
         .await
         .context("Failed to read ping message from stream")
 }
@@ -1295,14 +1232,14 @@ mod tests {
         msg.replace_payload(MessageType::Data, move |buf| {
             buf.put(expected);
         });
-        let controller = Context::default();
+        let context = Context::default();
         client
             .writer
-            .write_all(&controller, msg.as_ref())
+            .write_all(&context, msg.as_ref())
             .await
             .unwrap();
 
-        let recv = Message::read_from(&controller, &mut server.reader)
+        let recv = Message::read_from(&context, &mut server.reader)
             .await
             .unwrap();
         assert_eq!(MessageType::Data, recv.get_type());
@@ -1391,12 +1328,12 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Context::default();
+        let context = &Context::default();
 
         let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
             async move {
                 client_handshake(
-                    controller,
+                    context,
                     client.reader,
                     client.writer,
                     client_singer,
@@ -1407,7 +1344,7 @@ mod tests {
             },
             async move {
                 server_handshake(
-                    controller,
+                    context,
                     server.reader,
                     server.writer,
                     server_singer,
@@ -1418,22 +1355,16 @@ mod tests {
             },
         );
         println!("handshake done");
-        client_write.write_data(controller, &buf).await.unwrap();
+        client_write.write_data(context, &buf).await.unwrap();
         println!("client write done");
-        let (message_type, payload) = server_read
-            .read_and_decrypt_inplace(controller)
-            .await
-            .unwrap();
+        let (message_type, payload) = server_read.read_and_decrypt_inplace(context).await.unwrap();
         println!("server read done");
         assert_eq!(MessageType::Data, message_type);
         assert_eq!(buf.as_ref(), payload);
 
-        server_write.write_data(controller, payload).await.unwrap();
+        server_write.write_data(context, payload).await.unwrap();
         println!("server write done");
-        let (message_type, payload) = client_read
-            .read_and_decrypt_inplace(controller)
-            .await
-            .unwrap();
+        let (message_type, payload) = client_read.read_and_decrypt_inplace(context).await.unwrap();
         println!("client read done");
         assert_eq!(MessageType::Data, message_type);
         assert_eq!(buf.as_ref(), payload);
@@ -1453,12 +1384,12 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Context::default();
+        let context = &Context::default();
 
         let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
             async move {
                 client_handshake(
-                    controller,
+                    context,
                     client.reader,
                     client.writer,
                     client_singer,
@@ -1469,7 +1400,7 @@ mod tests {
             },
             async move {
                 server_handshake(
-                    controller,
+                    context,
                     server.reader,
                     server.writer,
                     server_singer,
@@ -1481,24 +1412,24 @@ mod tests {
         );
 
         let address = Address::from_string("tcp://127.0.0.1:8080").unwrap();
-        server_write.write_ping(controller).await.unwrap();
+        server_write.write_ping(context).await.unwrap();
         server_write
-            .write_connect_message(controller, &address)
+            .write_connect_message(context, &address)
             .await
             .unwrap();
         let recv = client_read
-            .wait_connect_message(controller, &mut client_write)
+            .wait_connect_message(context, &mut client_write)
             .await
             .unwrap();
         assert_eq!(address, recv);
 
-        client_write.write_ping(controller).await.unwrap();
+        client_write.write_ping(context).await.unwrap();
         client_write
-            .write_connect_message(controller, &address)
+            .write_connect_message(context, &address)
             .await
             .unwrap();
         let recv = server_read
-            .wait_connect_message(controller, &mut server_write)
+            .wait_connect_message(context, &mut server_write)
             .await
             .unwrap();
         assert_eq!(address, recv);
@@ -1519,12 +1450,12 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Context::default();
+        let context = &Context::default();
 
         let ((mut client_read, mut client_write), (mut server_read, mut server_write)) = tokio::join!(
             async move {
                 client_handshake(
-                    controller,
+                    context,
                     client.reader,
                     client.writer,
                     client_singer,
@@ -1535,7 +1466,7 @@ mod tests {
             },
             async move {
                 server_handshake(
-                    controller,
+                    context,
                     server.reader,
                     server.writer,
                     server_singer,
@@ -1549,57 +1480,49 @@ mod tests {
         // client write -> server read
         plain_client
             .writer
-            .write_all(controller, &buf[..])
+            .write_all(context, &buf[..])
             .await
             .unwrap();
         println!("plain write done: {}", buf.len());
         let n = client_write
-            .relay_plain_to_encrypted(controller, &mut plain_server.reader)
+            .relay_plain_to_encrypted(context, &mut plain_server.reader)
             .await
             .unwrap();
         println!("relay plain_to_encrypted size: {}", n);
         assert!(n > 0);
         let n = server_read
-            .relay_encrypted_to_plain(controller, &mut plain_server.writer)
+            .relay_encrypted_to_plain(context, &mut plain_server.writer)
             .await
             .unwrap();
         println!("relay encrypted_to_plain size: {}", n);
         assert!(n > 0);
         let mut recv = BytesMut::with_capacity(buf.len());
         recv.resize(buf.len(), 0);
-        plain_client
-            .reader
-            .read(controller, &mut recv)
-            .await
-            .unwrap();
+        plain_client.reader.read(context, &mut recv).await.unwrap();
         assert_eq!(buf.as_ref(), recv.as_ref());
 
         // server write -> client read
         plain_server
             .writer
-            .write_all(controller, &buf[..])
+            .write_all(context, &buf[..])
             .await
             .unwrap();
         println!("plain write done: {}", buf.len());
         let n = server_write
-            .relay_plain_to_encrypted(controller, &mut plain_client.reader)
+            .relay_plain_to_encrypted(context, &mut plain_client.reader)
             .await
             .unwrap();
         println!("relay plain_to_encrypted size: {}", n);
         assert!(n > 0);
         let n = client_read
-            .relay_encrypted_to_plain(controller, &mut plain_client.writer)
+            .relay_encrypted_to_plain(context, &mut plain_client.writer)
             .await
             .unwrap();
         println!("relay encrypted_to_plain size: {}", n);
         assert!(n > 0);
         let mut recv = BytesMut::with_capacity(buf.len());
         recv.resize(buf.len(), 0);
-        plain_server
-            .reader
-            .read(controller, &mut recv)
-            .await
-            .unwrap();
+        plain_server.reader.read(context, &mut recv).await.unwrap();
         assert_eq!(buf.as_ref(), recv.as_ref());
     }
 
@@ -1625,7 +1548,7 @@ mod tests {
         let client_verifier = &server_key.verifier();
         let server_singer = &server_key.signer();
         let server_verifier = &client_key.verifier();
-        let controller = &Context::default();
+        let context = &Context::default();
         let (sender, mut receiver) = channel(2);
         let sender = &sender;
         let address = Address::from_string("tcp://127.0.0.1:8080").unwrap();
@@ -1633,7 +1556,7 @@ mod tests {
         tokio::join!(
             async move {
                 let (mut read_half, mut write_half) = client_handshake(
-                    controller,
+                    context,
                     client.reader,
                     client.writer,
                     client_singer,
@@ -1643,14 +1566,14 @@ mod tests {
                 .unwrap();
                 println!("Client handshake done");
                 read_half
-                    .wait_connect_message(controller, &mut write_half)
+                    .wait_connect_message(context, &mut write_half)
                     .await
                     .unwrap();
                 println!("Client read connect message done");
                 tokio::join!(
                     async move {
                         let e = copy_encrypted_bidirectional(
-                            controller,
+                            context,
                             read_half,
                             write_half,
                             local_server.reader,
@@ -1666,13 +1589,13 @@ mod tests {
                             const EXPECTED: &[u8] = b"Hello world";
                             local_client
                                 .writer
-                                .write_all(controller, EXPECTED)
+                                .write_all(context, EXPECTED)
                                 .await
                                 .unwrap();
                             let mut buf = [0u8; EXPECTED.len()];
                             peer_client
                                 .reader
-                                .read_exact(controller, &mut buf)
+                                .read_exact(context, &mut buf)
                                 .await
                                 .unwrap();
                             assert_eq!(EXPECTED, &buf);
@@ -1687,7 +1610,7 @@ mod tests {
             },
             async move {
                 let (read_half, mut write_half) = server_handshake(
-                    controller,
+                    context,
                     server.reader,
                     server.writer,
                     server_singer,
@@ -1697,14 +1620,14 @@ mod tests {
                 .unwrap();
                 println!("Server handshake done");
                 write_half
-                    .write_connect_message(controller, &address)
+                    .write_connect_message(context, &address)
                     .await
                     .unwrap();
                 println!("Server write connect message done");
                 tokio::join!(
                     async move {
                         let e = copy_encrypted_bidirectional(
-                            controller,
+                            context,
                             read_half,
                             write_half,
                             peer_server.reader,
@@ -1720,13 +1643,13 @@ mod tests {
                             const EXPECTED: &[u8] = b"Hello world";
                             peer_client
                                 .writer
-                                .write_all(controller, EXPECTED)
+                                .write_all(context, EXPECTED)
                                 .await
                                 .unwrap();
                             let mut buf = [0u8; EXPECTED.len()];
                             local_client
                                 .reader
-                                .read_exact(controller, &mut buf)
+                                .read_exact(context, &mut buf)
                                 .await
                                 .unwrap();
                             assert_eq!(EXPECTED, &buf);
@@ -1744,9 +1667,9 @@ mod tests {
                     receiver.recv().await.unwrap();
                 }
                 println!("task done");
-                controller.cancel();
+                context.cancel();
             },
         );
-        controller.wait().await;
+        context.wait().await;
     }
 }

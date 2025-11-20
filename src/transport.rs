@@ -18,7 +18,7 @@ use crate::errors::{Error, Result, whatever};
 /// Reader for reading data from network streams.
 ///
 /// This struct provides async methods for reading data from network connections,
-/// with support for cancellation through the controller.
+/// with support for cancellation through the context.
 pub struct Reader {
     inner: ReadInner,
     display: String,
@@ -32,18 +32,18 @@ impl fmt::Display for Reader {
 
 impl Reader {
     #[inline]
-    pub async fn read(&mut self, controller: &Context, buf: &mut [u8]) -> Result<usize> {
+    pub async fn read(&mut self, context: &Context, buf: &mut [u8]) -> Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
-            _ = controller.wait_cancel() => Err(Error::cancel()),
+            _ = context.wait_cancel() => Err(Error::cancel()),
             r = self.inner.read(buf) => Ok(r?),
         }
     }
     #[inline]
-    pub async fn read_exact(&mut self, controller: &Context, buf: &mut [u8]) -> Result<usize> {
+    pub async fn read_exact(&mut self, context: &Context, buf: &mut [u8]) -> Result<usize> {
         assert_ne!(buf.len(), 0);
         tokio::select! {
-            _ = controller.wait_cancel() => Err(Error::cancel()),
+            _ = context.wait_cancel() => Err(Error::cancel()),
             r = self.inner.read_exact(buf) => Ok(r?),
         }
     }
@@ -52,7 +52,7 @@ impl Reader {
 /// Writer for writing data to network streams.
 ///
 /// This struct provides async methods for writing data to network connections,
-/// with support for cancellation through the controller.
+/// with support for cancellation through the context.
 pub struct Writer {
     inner: WriteInner,
     display: String,
@@ -186,9 +186,9 @@ impl fmt::Display for Listener {
 }
 
 impl Listener {
-    pub async fn accept(&mut self, controller: &Context) -> Result<Stream> {
+    pub async fn accept(&mut self, context: &Context) -> Result<Stream> {
         tokio::select! {
-            _ = controller.wait_cancel() => Err(Error::cancel()),
+            _ = context.wait_cancel() => Err(Error::cancel()),
             r = self.accept_impl() => r,
         }
     }
@@ -251,9 +251,9 @@ impl Address {
         Ok(Address::Tcp(addr))
     }
 
-    pub async fn connect_to(&self, controller: &Context) -> Result<Stream> {
+    pub async fn connect_to(&self, context: &Context) -> Result<Stream> {
         tokio::select! {
-            _ = controller.wait_cancel() => Err(Error::cancel()),
+            _ = context.wait_cancel() => Err(Error::cancel()),
             r = self.connect_to_impl() => r,
         }
     }
@@ -268,9 +268,9 @@ impl Address {
         }
     }
 
-    pub async fn listen_to(&self, controller: &Context) -> Result<Listener> {
+    pub async fn listen_to(&self, context: &Context) -> Result<Listener> {
         tokio::select! {
-            _ = controller.wait_cancel() => Err(Error::cancel()),
+            _ = context.wait_cancel() => Err(Error::cancel()),
             r = self.listen_to_impl() => r
         }
     }
@@ -335,7 +335,7 @@ impl<'de> Deserialize<'de> for Address {
 ///
 /// This struct provides facilities for spawning tasks, managing their lifecycle,
 /// and coordinating cancellation across a hierarchy of tasks. It supports creating
-/// child controllers that can be cancelled independently or as part of a parent.
+/// child context that can be cancelled independently or as part of a parent.
 pub struct Context {
     cancel_token: CancellationToken,
     tracker: TaskTracker,
@@ -444,22 +444,6 @@ impl Context {
 }
 
 /// Executes a future with a timeout.
-///
-/// This function wraps a future and returns an error if it doesn't complete
-/// within the specified duration.
-///
-/// # Arguments
-///
-/// * `duration` - The maximum time to wait for the future to complete
-/// * `f` - The future to execute
-///
-/// # Returns
-///
-/// Returns the result of the future if it completes within the timeout.
-///
-/// # Errors
-///
-/// Returns a timeout error if the future doesn't complete within the specified duration.
 pub async fn timeout<T, F>(duration: Duration, f: F) -> Result<T>
 where
     F: IntoFuture<Output = Result<T>>,
@@ -479,7 +463,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_controller_children_wait() {
+    async fn test_context_children_wait() {
         let father = Context::default();
         let children = father.children();
         let grandson = children.children();
@@ -543,7 +527,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_controller_cancel() {
+    async fn test_context_cancel() {
         let context = Context::default();
         let children = context.children();
 
@@ -560,21 +544,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_controller_cancel_children() {
-        let controller = Context::default();
-        let children = controller.children();
+    async fn test_context_cancel_children() {
+        let context = Context::default();
+        let children = context.children();
 
-        controller.cancel();
-        assert!(controller.has_cancel());
+        context.cancel();
+        assert!(context.has_cancel());
         assert!(children.has_cancel());
         children.wait().await;
-        controller.wait().await;
+        context.wait().await;
     }
 
     #[tokio::test]
-    async fn test_controller_timeout() {
-        let controller = Context::default();
-        let err = controller
+    async fn test_context_timeout() {
+        let context = Context::default();
+        let err = context
             .timeout(Duration::from_secs(1), async {
                 sleep(Duration::from_secs(2)).await;
                 Ok(())

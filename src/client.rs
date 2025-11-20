@@ -57,45 +57,41 @@ pub async fn start_client(context: &Context, cfg: &ClientConfig) -> Result<()> {
     Ok(())
 }
 
-async fn start_client_sentry(
-    controller: Context,
-    options: ClientOptionsRef,
-    receiver: Receiver<()>,
-) {
-    keep_client_connections(&controller, &options, receiver).await;
-    controller.cancel_all();
+async fn start_client_sentry(context: Context, options: ClientOptionsRef, receiver: Receiver<()>) {
+    keep_client_connections(&context, &options, receiver).await;
+    context.cancel_all();
     debug!("client sentry exiting, {}", options.address);
-    controller.wait().await;
+    context.wait().await;
     debug!("client sentry exited, {}", options.address);
 }
 
 async fn keep_client_connections(
-    controller: &Context,
+    context: &Context,
     options: &ClientOptionsRef,
     mut receiver: Receiver<()>,
 ) {
     let max_idle = options.idle_connections;
     for _ in 0..max_idle {
-        if controller.has_cancel() {
+        if context.has_cancel() {
             return;
         }
-        controller.spawn(build_tunnel(controller.clone(), options.clone()));
+        context.spawn(build_tunnel(context.clone(), options.clone()));
     }
-    while !controller.has_cancel() {
+    while !context.has_cancel() {
         select! {
             _ = receiver.recv() => {
-                controller.spawn(build_tunnel(controller.clone(), options.clone()));
+                context.spawn(build_tunnel(context.clone(), options.clone()));
             },
-            _ = controller.wait_cancel() => break,
+            _ = context.wait_cancel() => break,
         };
     }
 }
 
-async fn build_tunnel(controller: Context, options: ClientOptionsRef) {
-    if controller.has_cancel() {
+async fn build_tunnel(context: Context, options: ClientOptionsRef) {
+    if context.has_cancel() {
         return;
     }
-    match build_tunnel_impl(&controller, &options).await {
+    match build_tunnel_impl(&context, &options).await {
         Ok(_) => {}
         Err(e) => {
             error!("tunnel relay fail: {:#}", e);
@@ -104,9 +100,9 @@ async fn build_tunnel(controller: Context, options: ClientOptionsRef) {
     }
 }
 
-async fn build_tunnel_impl(controller: &Context, options: &ClientOptionsRef) -> Result<()> {
-    let (read_half, write_half) = connect_to_server(controller, options).await?;
-    wait_relay(controller, read_half, write_half, options).await
+async fn build_tunnel_impl(context: &Context, options: &ClientOptionsRef) -> Result<()> {
+    let (read_half, write_half) = connect_to_server(context, options).await?;
+    wait_relay(context, read_half, write_half, options).await
 }
 
 async fn first_connect(context: Context, options: ClientOptionsRef) -> Result<()> {
@@ -126,18 +122,18 @@ async fn first_connect(context: Context, options: ClientOptionsRef) -> Result<()
 }
 
 async fn wait_relay(
-    controller: &Context,
+    context: &Context,
     mut read_half: ReadSession,
     mut write_half: WriteSession,
     options: &ClientOptionsRef,
 ) -> Result<()> {
     let addr: Address = read_half
-        .wait_connect_message(controller, &mut write_half)
+        .wait_connect_message(context, &mut write_half)
         .await
         .with_context(|| format!("Failed to wait connect message: {}", read_half))?;
     let debug = format!("{}->{}", read_half, addr);
     options.notify_for_new_tunnel().await;
-    match handle_relay(controller, read_half, write_half, options, &addr).await {
+    match handle_relay(context, read_half, write_half, options, &addr).await {
         Ok((read, write)) => {
             info!(
                 "stream {} disconnected and has read {} bytes and wrote {}",
@@ -156,17 +152,17 @@ async fn wait_relay(
 }
 
 async fn connect_to_server(
-    controller: &Context,
+    context: &Context,
     options: &ClientOptionsRef,
 ) -> Result<(ReadSession, WriteSession)> {
     let conn = options
         .address
-        .connect_to(controller)
+        .connect_to(context)
         .await
         .context("Failed to connect to tunnel server")?;
     debug!("connected to server: {}", conn);
     let (read_half, write_half) = client_handshake(
-        controller,
+        context,
         conn.reader,
         conn.writer,
         &options.signer,
@@ -178,7 +174,7 @@ async fn connect_to_server(
 }
 
 async fn handle_relay(
-    controller: &Context,
+    context: &Context,
     read_half: ReadSession,
     mut write_half: WriteSession,
     options: &ClientOptionsRef,
@@ -189,10 +185,10 @@ async fn handle_relay(
         return Err(whatever!("Address not allowed: {}", addr));
     }
     let conn = addr
-        .connect_to(controller)
+        .connect_to(context)
         .await
         .context("Failed to connect to local service")?;
-    write_half.write_connect_message(controller, addr).await?;
+    write_half.write_connect_message(context, addr).await?;
     debug!("tunnel relay started: {}->{}", &read_half, addr);
-    copy_encrypted_bidirectional(controller, read_half, write_half, conn.reader, conn.writer).await
+    copy_encrypted_bidirectional(context, read_half, write_half, conn.reader, conn.writer).await
 }

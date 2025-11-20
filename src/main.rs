@@ -8,10 +8,10 @@ use rtunnel::setup_logger;
 use rtunnel::{Arguments, run};
 
 fn main() {
-    let controller = Context::new();
+    let context = Context::new();
     let options = Arguments::parse();
     setup_logger(options.log_level, false);
-    let res = block_on(run(&controller, options));
+    let res = block_on(run(&context, options));
     process::exit(res);
 }
 

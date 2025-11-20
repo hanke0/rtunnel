@@ -24,7 +24,7 @@ pub use crate::transport::Context;
 ///
 /// This function handles the main command-line interface and dispatches to
 /// the appropriate handler based on the selected command.
-pub async fn run(controller: &Context, args: Arguments) -> i32 {
+pub async fn run(context: &Context, args: Arguments) -> i32 {
     match args.command {
         Commands::GenerateKey {} => {
             let pair = KeyPair::random();
@@ -38,12 +38,12 @@ pub async fn run(controller: &Context, args: Arguments) -> i32 {
         Commands::Client { config } => {
             info!("starting client, loading config from {}", config);
             let configs = ClientConfig::from_file(&config).expect("Failed to load config");
-            run_client(controller, configs).await
+            run_client(context, configs).await
         }
         Commands::Server { config } => {
             info!("starting server, loading config from {}", config);
             let configs = ServerConfig::from_file(&config).expect("Failed to load config");
-            run_server(controller, configs).await
+            run_server(context, configs).await
         }
     }
 }
@@ -53,15 +53,15 @@ pub async fn run(controller: &Context, args: Arguments) -> i32 {
 /// This function starts one or more client connections based on the provided
 /// configurations. Each client connects to a tunnel server and manages
 /// connections for relaying traffic.
-pub async fn run_client(controller: &Context, configs: Vec<ClientConfig>) -> i32 {
+pub async fn run_client(context: &Context, configs: Vec<ClientConfig>) -> i32 {
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
-        let err = client::start_client(controller, cfg).await;
+        let err = client::start_client(context, cfg).await;
         match err {
             Ok(_) => continue,
             Err(e) => {
                 error!("connect to {} failed, exiting: {:#}", cfg.server_address, e);
-                graceful_exit(controller, "client").await;
+                graceful_exit(context, "client").await;
                 return 1;
             }
         }
@@ -69,10 +69,10 @@ pub async fn run_client(controller: &Context, configs: Vec<ClientConfig>) -> i32
     info!("all clients started, client is ready");
     select! {
             _ = wait_exit_signal() => {},
-            _ = controller.wait_cancel() => {}
+            _ = context.wait_cancel() => {}
     }
     info!("client is shutting down");
-    graceful_exit(controller, "client").await;
+    graceful_exit(context, "client").await;
     0
 }
 
@@ -81,24 +81,15 @@ pub async fn run_client(controller: &Context, configs: Vec<ClientConfig>) -> i32
 /// This function starts one or more server instances based on the provided
 /// configurations. Each server listens for tunnel connections and manages
 /// services that forward traffic to backend services.
-///
-/// # Arguments
-///
-/// * `controller` - The controller for managing async tasks and cancellation
-/// * `configs` - A vector of server configurations to start
-///
-/// # Returns
-///
-/// Returns an exit code: 0 for success, 1 for failure
-pub async fn run_server(controller: &Context, configs: Vec<ServerConfig>) -> i32 {
+pub async fn run_server(context: &Context, configs: Vec<ServerConfig>) -> i32 {
     debug!("starting {} server", configs.len());
     for cfg in configs.iter() {
-        let err = server::start_server(controller, cfg).await;
+        let err = server::start_server(context, cfg).await;
         match err {
             Ok(_) => continue,
             Err(e) => {
                 error!("start server {} failed, exiting: {:#}", cfg.listen, e);
-                graceful_exit(controller, "server").await;
+                graceful_exit(context, "server").await;
                 return 1;
             }
         }
@@ -106,10 +97,10 @@ pub async fn run_server(controller: &Context, configs: Vec<ServerConfig>) -> i32
     info!("all service started, server is ready");
     select! {
             _ = wait_exit_signal() => {},
-            _ = controller.wait_cancel() => {}
+            _ = context.wait_cancel() => {}
     }
     info!("server is shutting down");
-    graceful_exit(controller, "server").await;
+    graceful_exit(context, "server").await;
     0
 }
 
@@ -154,15 +145,15 @@ async fn wait_exit_signal() {
     }
 }
 
-async fn graceful_exit(controller: &Context, side: &str) {
-    controller.cancel_all();
+async fn graceful_exit(context: &Context, side: &str) {
+    context.cancel_all();
     loop {
         select! {
-            _ = controller.wait() => {
+            _ = context.wait() => {
                 break;
             }
             _ = sleep(Duration::from_millis(1000)) => {
-                debug!("{side} is still shutting down, task count {}", controller.task_count());
+                debug!("{side} is still shutting down, task count {}", context.task_count());
             }
         }
     }

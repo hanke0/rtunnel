@@ -31,8 +31,8 @@ impl ServerOptions {
     }
 
     #[inline]
-    async fn push_stream(&self, controller: Context, reader: ReadSession, writer: WriteSession) {
-        self.pool.clone().add(controller, reader, writer).await
+    async fn push_stream(&self, context: Context, reader: ReadSession, writer: WriteSession) {
+        self.pool.clone().add(context, reader, writer).await
     }
 }
 
@@ -89,7 +89,7 @@ impl Session {
 }
 
 async fn keep_alive(
-    controller: Context,
+    context: Context,
     stopped: CancellationToken,
     mut reader: ReadSession,
     mut writer: WriteSession,
@@ -98,14 +98,14 @@ async fn keep_alive(
     interval.reset();
     while !stopped.is_cancelled() {
         tokio::select! {
-            _ = controller.wait_cancel() => {
+            _ = context.wait_cancel() => {
                 return Err(Error::cancel());
             },
             _ = stopped.cancelled() => {
                 break;
             }
             _ = interval.tick() => {
-                encryption::keep_alive(&controller,&mut reader, &mut writer).await?;
+                encryption::keep_alive(&context,&mut reader, &mut writer).await?;
                 interval.reset();
             }
         }
@@ -134,7 +134,7 @@ impl TunnelPool {
         }))
     }
 
-    async fn add(self, controller: Context, reader: ReadSession, writer: WriteSession) {
+    async fn add(self, context: Context, reader: ReadSession, writer: WriteSession) {
         let cancel_token = CancellationToken::new();
         let id = format!("{}", reader);
         let (sender, receiver) = mpsc::channel(1);
@@ -147,7 +147,7 @@ impl TunnelPool {
         self.0.sessions.lock().await.insert(id.clone(), session);
         self.0.notify.notify_last();
         tokio::spawn(async move {
-            let r = keep_alive(controller, sender_token, reader, writer).await;
+            let r = keep_alive(context, sender_token, reader, writer).await;
             match r {
                 Ok(_) => {
                     sender.send(r).await.unwrap();
@@ -191,46 +191,24 @@ type ServerOptionsRef = Arc<ServerOptions>;
 ///
 /// This function sets up listeners for tunnel connections and service endpoints,
 /// manages the tunnel connection pool, and handles incoming connections.
-///
-/// # Arguments
-///
-/// * `controller` - The controller for managing async tasks and cancellation
-/// * `cfg` - The server configuration
-///
-/// # Returns
-///
-/// Returns `Ok(())` if the server starts successfully.
-///
-/// # Errors
-///
-/// Returns an error if the configuration is invalid, listeners cannot be bound,
-/// or cryptographic keys are invalid.
-pub async fn start_server(controller: &Context, cfg: &ServerConfig) -> Result<()> {
+pub async fn start_server(context: &Context, cfg: &ServerConfig) -> Result<()> {
     let verifier = decode_verifying_key(&cfg.client_public_key)?;
     let signer = decode_signing_key(&cfg.private_key)?;
 
-    let listener = cfg.listen.listen_to(controller).await?;
+    let listener = cfg.listen.listen_to(context).await?;
     info!("server listening on {}", cfg.listen);
     let options = &Arc::new(ServerOptions {
         verifier,
         signer,
         pool: TunnelPool::new(),
     });
-    controller.spawn(tunnel_timer(
-        controller.clone(),
-        options.clone(),
-        cfg.listen,
-    ));
-    controller.spawn(start_tunnel(
-        controller.children(),
-        listener,
-        options.clone(),
-    ));
+    context.spawn(tunnel_timer(context.clone(), options.clone(), cfg.listen));
+    context.spawn(start_tunnel(context.children(), listener, options.clone()));
     for s in cfg.services.iter() {
-        let listener = s.bind_to.listen_to(controller).await?;
+        let listener = s.bind_to.listen_to(context).await?;
         info!("service starting, listening on {}", s.bind_to);
-        controller.spawn(start_service(
-            controller.children(),
+        context.spawn(start_service(
+            context.children(),
             listener,
             s.connect_to,
             options.clone(),
@@ -239,13 +217,13 @@ pub async fn start_server(controller: &Context, cfg: &ServerConfig) -> Result<()
     Ok(())
 }
 
-async fn tunnel_timer(controller: Context, options: ServerOptionsRef, address: Address) {
+async fn tunnel_timer(context: Context, options: ServerOptionsRef, address: Address) {
     if !log::log_enabled!(log::Level::Info) {
         return;
     }
     loop {
         tokio::select! {
-            _ = controller.wait_cancel() => {
+            _ = context.wait_cancel() => {
                 return;
             },
             _ = time::sleep(Duration::from_secs(60)) => {
@@ -255,33 +233,33 @@ async fn tunnel_timer(controller: Context, options: ServerOptionsRef, address: A
     }
 }
 
-async fn start_tunnel(controller: Context, mut listener: Listener, options: ServerOptionsRef) {
-    let controller = &controller;
+async fn start_tunnel(context: Context, mut listener: Listener, options: ServerOptionsRef) {
+    let context = &context;
     loop {
-        match listener.accept(controller).await {
+        match listener.accept(context).await {
             Ok(stream) => {
-                controller.spawn(handle_tunnel(controller.clone(), stream, options.clone()));
+                context.spawn(handle_tunnel(context.clone(), stream, options.clone()));
             }
             Err(e) => {
                 if e.is_accept_critical() {
-                    if controller.has_cancel() {
+                    if context.has_cancel() {
                         return;
                     }
                     error!("listener accept error: {:#}", e);
-                    controller.cancel_all();
+                    context.cancel_all();
                     break;
                 }
                 info!("listener accept error, retrying: {:#}", e);
             }
         }
     }
-    controller.cancel_all();
-    controller.wait().await;
+    context.cancel_all();
+    context.wait().await;
 }
 
-async fn handle_tunnel(controller: Context, stream: Stream, options: ServerOptionsRef) {
+async fn handle_tunnel(context: Context, stream: Stream, options: ServerOptionsRef) {
     let addr = format!("{}", stream);
-    match handle_tunnel_impl(&controller, stream, &options).await {
+    match handle_tunnel_impl(&context, stream, &options).await {
         Ok(_) => {
             debug!("new tunnel session created: {}", addr);
         }
@@ -292,36 +270,34 @@ async fn handle_tunnel(controller: Context, stream: Stream, options: ServerOptio
 }
 
 async fn handle_tunnel_impl(
-    controller: &Context,
+    context: &Context,
     stream: Stream,
     options: &ServerOptionsRef,
 ) -> Result<()> {
     let (reader, writer) = server_handshake(
-        controller,
+        context,
         stream.reader,
         stream.writer,
         &options.signer,
         &options.verifier,
     )
     .await?;
-    options
-        .push_stream(controller.clone(), reader, writer)
-        .await;
+    options.push_stream(context.clone(), reader, writer).await;
     Ok(())
 }
 
 async fn start_service(
-    controller: Context,
+    context: Context,
     mut listener: Listener,
     connect_to: Address,
     options: ServerOptionsRef,
 ) {
-    let controller = &controller;
+    let context = &context;
     loop {
-        match listener.accept(controller).await {
+        match listener.accept(context).await {
             Ok(stream) => {
-                controller.spawn(handle_service_stream(
-                    controller.clone(),
+                context.spawn(handle_service_stream(
+                    context.clone(),
                     stream,
                     options.clone(),
                     connect_to,
@@ -329,7 +305,7 @@ async fn start_service(
             }
             Err(e) => {
                 if e.is_accept_critical() {
-                    if !controller.has_cancel() {
+                    if !context.has_cancel() {
                         error!("listener accept error: {:#}", e);
                     }
                     break;
@@ -338,19 +314,19 @@ async fn start_service(
             }
         }
     }
-    controller.cancel_all();
-    controller.wait().await;
+    context.cancel_all();
+    context.wait().await;
 }
 
 async fn handle_service_stream(
-    controller: Context,
+    context: Context,
     stream: Stream,
     options: ServerOptionsRef,
     connect_to: Address,
 ) {
     let debug = format!("{}", stream);
     debug!("new service stream connected: {}", debug);
-    match handle_service_stream_impl(&controller, stream, &options, &connect_to).await {
+    match handle_service_stream_impl(&context, stream, &options, &connect_to).await {
         Ok((read, write)) => {
             info!(
                 "Stream {} closed and has read {} bytes and wrote {} bytes",
@@ -359,7 +335,7 @@ async fn handle_service_stream(
         }
         Err(e) => {
             if e.is_relay_critical() {
-                if controller.has_cancel() {
+                if context.has_cancel() {
                     return;
                 }
                 error!("Stream {} relay critical error: {:#}", debug, e);
@@ -371,46 +347,39 @@ async fn handle_service_stream(
 }
 
 async fn handle_service_stream_impl(
-    controller: &Context,
+    context: &Context,
     mut stream: Stream,
     options: &ServerOptionsRef,
     connect_to: &Address,
 ) -> Result<(usize, usize)> {
     let (read_half, write_half) =
-        get_a_useable_connection(controller, options, &mut stream, connect_to).await?;
+        get_a_useable_connection(context, options, &mut stream, connect_to).await?;
 
-    copy_encrypted_bidirectional(
-        controller,
-        read_half,
-        write_half,
-        stream.reader,
-        stream.writer,
-    )
-    .await
+    copy_encrypted_bidirectional(context, read_half, write_half, stream.reader, stream.writer).await
 }
 
 async fn get_a_useable_connection(
-    controller: &Context,
+    context: &Context,
     options: &ServerOptionsRef,
     stream: &mut Stream,
     connect_to: &Address,
 ) -> Result<(ReadSession, WriteSession)> {
-    let (mut read_half, mut write_half) = controller
+    let (mut read_half, mut write_half) = context
         .timeout_default(options.pop_stream())
         .await
         .context("Failed to get a tunnel from pool")?;
     trace!("Stream got a tunnel: {}->{}", stream, read_half);
 
-    controller
-        .timeout_default(write_half.write_connect_message(controller, connect_to))
+    context
+        .timeout_default(write_half.write_connect_message(context, connect_to))
         .await
         .context("Failed to write connect message")?;
     trace!(
         "tunnel connect message has sent, wait connect message reply: {}->{}",
         stream, read_half,
     );
-    controller
-        .timeout_default(read_half.wait_connect_message(controller, &mut write_half))
+    context
+        .timeout_default(read_half.wait_connect_message(context, &mut write_half))
         .await
         .context("Failed to wait connect message")?;
     trace!(

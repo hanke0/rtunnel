@@ -81,7 +81,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     let throughout = metrics.transfer_bytes.load(Ordering::SeqCst) as f64
         / (metrics.transfer_spend_ns.load(Ordering::SeqCst) as f64)
-        * 1000_000_000.
+        * 1_000_000_000.
         / 1024.;
 
     println!("Throughput: {:.3}KB/s", throughout);

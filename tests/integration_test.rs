@@ -30,7 +30,7 @@ async fn test_integration() {
     }
 
     let context = Context::new();
-    let server_controller = context.children();
+    let server_context = context.children();
     let server_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
@@ -39,12 +39,12 @@ async fn test_integration() {
             "rtunnel.toml".into(),
         ];
         let options = Arguments::parse_from(args);
-        let code = run(&server_controller, options).await;
+        let code = run(&server_context, options).await;
         assert_eq!(code, 0);
     });
 
     sleep(Duration::from_secs(1)).await;
-    let client_controller = context.children();
+    let client_context = context.children();
     let client_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
@@ -53,14 +53,14 @@ async fn test_integration() {
             "rtunnel.toml".into(),
         ];
         let options = Arguments::parse_from(args);
-        let code = run(&client_controller, options).await;
+        let code = run(&client_context, options).await;
         assert_eq!(code, 0);
     });
 
     sleep(Duration::from_secs(1)).await;
 
     let listener = TcpListener::bind("127.0.0.1:2335").await.unwrap();
-    let listen_controller = context.children();
+    let listen_context = context.children();
     let listen_handle = spawn(async move {
         loop {
             tokio::select! {
@@ -79,7 +79,7 @@ async fn test_integration() {
                         Err(e) => error!("Failed to accept: {e}"),
                     };
                 },
-                _ = listen_controller.wait_cancel() => return
+                _ = listen_context.wait_cancel() => return
             }
         }
     });
@@ -106,7 +106,7 @@ async fn test_integration() {
     context.wait().await;
 }
 
-async fn connect_to_echo(controller: Context) {
+async fn connect_to_echo(context: Context) {
     let stream = TcpStream::connect("127.0.0.1:2334").await.unwrap();
     let expect = generate_random_bytes::<65535>().unwrap();
     let mut got = [0u8; 65535];
@@ -118,7 +118,7 @@ async fn connect_to_echo(controller: Context) {
     );
     let (mut reader, mut writer) = stream.into_split();
     const TIMEOUT: Duration = Duration::from_secs(100);
-    controller
+    context
         .timeout(TIMEOUT, async move {
             Ok(writer.write_all(expect.as_ref()).await?)
         })
@@ -126,7 +126,7 @@ async fn connect_to_echo(controller: Context) {
         .with_context(|| format!("fail to write: {}", addr))
         .unwrap();
     info!("echo client {} write {} bytes", addr, expect.len());
-    controller
+    context
         .timeout(
             TIMEOUT,
             async move { Ok(reader.read_exact(mut_got).await?) },
