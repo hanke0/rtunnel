@@ -3,13 +3,16 @@ use std::fmt;
 use std::sync::Arc;
 
 use log::{debug, error, info, trace};
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::io::copy_bidirectional;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{ConnectTo, ServerConfig};
+use crate::config::ServerConfig;
 use crate::errors::{Error, Result, ResultExt};
 use crate::transport::{Context, Listener, Message, MessageType, Stream, build_listener};
 use crate::whatever;
@@ -99,8 +102,8 @@ async fn keep_alive(
                 break;
             }
             _ = interval.tick() => {
-                stream.writer.write_all(&context, message.as_ref()).await?;
-                message.read_from_inplace(&context, &mut stream.reader).await?;
+                stream.write_all(message.as_ref()).await?;
+                message.read_from_inplace(&context, &mut stream).await?;
                 if message.get_type() != MessageType::Ping {
                     return Err(whatever!("Invalid message type: {:?}", message.get_type()));
                 }
@@ -319,11 +322,10 @@ async fn handle_service_stream_impl(
     mut stream: Stream,
     options: &ServerOptionsRef,
     connect_to: &str,
-) -> Result<(usize, usize)> {
-    let (read_half, write_half) =
-        get_a_useable_connection(context, options, &mut stream, connect_to).await?;
-
-    copy_encrypted_bidirectional(context, read_half, write_half, stream.reader, stream.writer).await
+) -> Result<(u64, u64)> {
+    let mut remote = get_a_useable_connection(context, options, &mut stream, connect_to).await?;
+    let r = copy_bidirectional(&mut stream, &mut remote).await?;
+    Ok(r)
 }
 
 async fn get_a_useable_connection(
@@ -339,7 +341,7 @@ async fn get_a_useable_connection(
     trace!("Stream got a tunnel: {}->{}", stream, connect_to);
     let message = Message::connect(connect_to);
     context
-        .timeout_default(stream.writer.write_all(context, message.as_ref()))
+        .timeout_default(stream.write_all(context, message.as_ref()))
         .await
         .context("Failed to write connect message")?;
     trace!(
@@ -347,7 +349,7 @@ async fn get_a_useable_connection(
         stream, connect_to,
     );
     context
-        .timeout_default(read_half.wait_connect_message(context, &mut write_half))
+        .timeout_default(stream.wait_connect_message(context, &mut write_half))
         .await
         .context("Failed to wait connect message")?;
     trace!(

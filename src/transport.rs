@@ -1,6 +1,9 @@
+use core::task::{self, Poll};
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::pin::pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +12,8 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
 use socket2::TcpKeepalive;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{ReadBuf, WriteBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -176,38 +180,72 @@ impl Writer {
 ///
 /// This struct represents a network connection with separate reader and writer halves,
 /// allowing for concurrent reading and writing operations.
-pub struct Stream {
-    pub reader: Reader,
-    pub writer: Writer,
+pub enum Stream {
+    Tcp(TcpStream, String),
+    Tls(TlsStream<TcpStream>, String),
 }
 
 impl fmt::Display for Stream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.reader.fmt(f)
+        match self {
+            Stream::Tcp(_, s) => f.write_str(s),
+            Stream::Tls(_, s) => f.write_str(s),
+        }
     }
 }
+
+impl AsyncRead for Stream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(s, _) => pin!(s).poll_read(cx, buf),
+            Stream::Tls(s, _) => pin!(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for Stream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Stream::Tcp(s, _) => pin!(s).poll_write(cx, buf),
+            Stream::Tls(s, _) => pin!(s).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(s, _) => pin!(s).poll_flush(cx),
+            Stream::Tls(s, _) => pin!(s).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Stream::Tcp(s, _) => pin!(s).poll_shutdown(cx),
+            Stream::Tls(s, _) => pin!(s).poll_shutdown(cx),
+        }
+    }
+}
+
 
 impl Stream {
     pub fn from_tls_stream(stream: TlsStream<TcpStream>) -> Self {
         let local_addr = stream.get_ref().0.local_addr().unwrap();
         let peer_addr = stream.get_ref().0.peer_addr().unwrap();
         let display = format!("{}-{}", local_addr, peer_addr);
-        let (r, w) = tokio::io::split(stream);
-        Stream {
-            reader: Reader::Tls(r, display.clone()),
-            writer: Writer::Tls(w, display),
-        }
+        Stream::Tls(stream, display)
     }
 
     pub fn from_tcp_stream(stream: TcpStream) -> Self {
         let local_addr = stream.local_addr().unwrap();
         let peer_addr = stream.peer_addr().unwrap();
         let display = format!("{}-{}", local_addr, peer_addr);
-        let (r, w) = stream.into_split();
-        Stream {
-            reader: Reader::Tcp(r, display.clone()),
-            writer: Writer::Tcp(w, display),
-        }
+        Stream::Tcp(stream, display)
     }
 }
 
