@@ -1,20 +1,21 @@
 use std::collections::HashSet;
+use std::fmt::{self, Display};
 use std::fs::{self, File};
 use std::io::Read;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::string::String;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
-use crate::errors::{Error, Result, ResultExt as _};
+use crate::errors::{Result, ResultExt as _};
 use crate::whatever;
 
 /// Root configuration structure that can contain both server and client configurations.
 ///
 /// This is the top-level configuration structure that is deserialized from TOML files.
 /// It may contain either server configurations, client configurations, or both.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Config {
     pub servers: Option<ServerConfigList>,
     pub clients: Option<ClientConfigList>,
@@ -27,63 +28,77 @@ pub type ClientConfigList = Vec<ClientConfig>;
 ///
 /// This struct contains all the settings needed to run a tunnel server,
 /// including the listening address, cryptographic keys, and service definitions.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ServerConfig {
-    pub private_key: String,
-    pub client_public_key: String,
-    pub services: Vec<Service>,
     pub listen_to: ListenTo,
+    pub services: Vec<Service>,
 }
 
 /// Client configuration for rtunnel.
 ///
 /// This struct contains all the settings needed to run a tunnel client,
 /// including the server address, cryptographic keys, and connection limits.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct ClientConfig {
-    pub private_key: String,
-    pub server_public_key: String,
-    #[serde(default)]
-    pub idle_connections: i32,
     pub connect_to: ConnectTo,
     pub allowed_addresses: HashSet<String>,
+    #[serde(default)]
+    pub idle_connections: i32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum ConnectTo {
     #[serde(rename = "tcp")]
     Tcp { addr: SocketAddr },
     #[serde(rename = "tls")]
     Tls {
+        subject: String,
+        addr: SocketAddr,
         client_cert: String,
         client_key: String,
         server_ca: String,
-        subject: String,
-        addr: SocketAddr,
     },
 }
 
-#[derive(Deserialize)]
+impl Display for ConnectTo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp { addr } => write!(f, "tcp://{}", addr),
+            Self::Tls { addr, .. } => write!(f, "tls://{}", addr),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum ListenTo {
     #[serde(rename = "tcp")]
     Tcp { addr: SocketAddr },
     #[serde(rename = "tls")]
     Tls {
+        subject: String,
+        addr: SocketAddr,
         server_cert: String,
         server_key: String,
         client_ca: String,
-        subject: String,
-        addr: SocketAddr,
     },
+}
+
+impl Display for ListenTo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp { addr } => write!(f, "tcp://{}", addr),
+            Self::Tls { addr, .. } => write!(f, "tls://{}", addr),
+        }
+    }
 }
 
 /// Service definition for a tunnel server.
 ///
 /// A service maps an external listening address to an internal destination address,
 /// allowing the server to forward traffic from the public interface to backend services.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct Service {
     pub listen_to: String,
     pub connect_to: String,
@@ -91,37 +106,11 @@ pub struct Service {
 
 impl ServerConfig {
     /// Loads server configurations from a TOML file.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the configuration file
-    ///
-    /// # Returns
-    ///
-    /// Returns a list of server configurations parsed from the file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be read, parsed, or if no server
-    /// configurations are found in the file.
     pub fn from_file(path: &str) -> Result<ServerConfigList> {
         let content = read_config_file(path)?;
         Self::from_string(&content)
     }
     /// Parses server configurations from a TOML string.
-    ///
-    /// # Arguments
-    ///
-    /// * `contents` - The TOML configuration string
-    ///
-    /// # Returns
-    ///
-    /// Returns a list of server configurations parsed from the string.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the string cannot be parsed or if no server
-    /// configurations are found.
     pub fn from_string(contents: &str) -> Result<ServerConfigList> {
         let cfg = from_string::<Config>(contents)?;
         let servers = cfg.servers.ok_or(whatever!("No server config found"))?;
@@ -134,39 +123,11 @@ impl ServerConfig {
 
 impl ClientConfig {
     /// Loads client configurations from a TOML file.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the configuration file
-    ///
-    /// # Returns
-    ///
-    /// Returns a list of client configurations parsed from the file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be read, parsed, or if no client
-    /// configurations are found in the file.
     pub fn from_file(path: &str) -> Result<ClientConfigList> {
         let content = read_config_file(path)?;
         Self::from_string(&content)
     }
     /// Parses client configurations from a TOML string.
-    ///
-    /// # Arguments
-    ///
-    /// * `contents` - The TOML configuration string
-    ///
-    /// # Returns
-    ///
-    /// Returns a list of client configurations parsed from the string.
-    /// Default values are applied for `max_connections` (2048) and
-    /// `idle_connections` (8) if not specified.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the string cannot be parsed or if no client
-    /// configurations are found.
     pub fn from_string(contents: &str) -> Result<ClientConfigList> {
         let cfg = from_string::<Config>(contents)?;
         let mut clients = cfg.clients.ok_or(whatever!("No client config found"))?;

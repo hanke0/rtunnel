@@ -1,5 +1,6 @@
 use core::panic;
 use std::fs;
+use std::io::Write;
 use std::string::String;
 use std::time::Duration;
 
@@ -7,6 +8,7 @@ use clap::Parser;
 use log::LevelFilter;
 use log::{error, info};
 use rtunnel::errors::ResultExt;
+use tempfile::NamedTempFile;
 use tokio::io;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -15,28 +17,31 @@ use tokio::net::TcpStream;
 use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
 
-use rtunnel::generate_random_bytes;
-use rtunnel::{Arguments, Context, run, setup_logger};
+use rtunnel::{Arguments, Context, build_example_config, run, setup_logger};
 
 #[tokio::test]
 async fn test_integration() {
     setup_logger(LevelFilter::Trace, true);
+    let config = build_example_config("example.com");
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(config.as_bytes()).unwrap();
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perm = fs::Permissions::from_mode(0o600);
-        fs::set_permissions("rtunnel.toml", perm).unwrap();
+        fs::set_permissions(file.path().display().to_string(), perm).unwrap();
     }
 
     let context = Context::new();
     let server_context = context.children();
+    let file_path = file.path().display().to_string();
     let server_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
             "server".into(),
             "--config".into(),
-            "rtunnel.toml".into(),
+            file_path,
         ];
         let options = Arguments::parse_from(args);
         let code = run(&server_context, options).await;
@@ -45,12 +50,13 @@ async fn test_integration() {
 
     sleep(Duration::from_secs(1)).await;
     let client_context = context.children();
+    let file_path = file.path().display().to_string();
     let client_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
             "client".into(),
             "--config".into(),
-            "rtunnel.toml".into(),
+            file_path,
         ];
         let options = Arguments::parse_from(args);
         let code = run(&client_context, options).await;
@@ -104,11 +110,13 @@ async fn test_integration() {
     server_handle.await.unwrap();
     client_handle.await.unwrap();
     context.wait().await;
+
+    let _ = file.path();
 }
 
 async fn connect_to_echo(context: Context) {
     let stream = TcpStream::connect("127.0.0.1:2334").await.unwrap();
-    let expect = generate_random_bytes::<65535>().unwrap();
+    let expect = [1u8; 65535];
     let mut got = [0u8; 65535];
     let mut_got = &mut got;
     let addr = format!(
@@ -119,18 +127,16 @@ async fn connect_to_echo(context: Context) {
     let (mut reader, mut writer) = stream.into_split();
     const TIMEOUT: Duration = Duration::from_secs(100);
     context
-        .timeout(TIMEOUT, async move {
-            Ok(writer.write_all(expect.as_ref()).await?)
-        })
+        .timeout(
+            TIMEOUT,
+            async move { writer.write_all(expect.as_ref()).await },
+        )
         .await
         .with_context(|| format!("fail to write: {}", addr))
         .unwrap();
     info!("echo client {} write {} bytes", addr, expect.len());
     context
-        .timeout(
-            TIMEOUT,
-            async move { Ok(reader.read_exact(mut_got).await?) },
-        )
+        .timeout(TIMEOUT, async move { reader.read_exact(mut_got).await })
         .await
         .with_context(|| format!("fail to read: {}", addr))
         .unwrap();

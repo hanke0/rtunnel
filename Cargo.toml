@@ -2,6 +2,7 @@
 name = "rtunnel"
 version = "0.8.0"
 edition = "2024"
+default-run = "rtunnel"
 
 [dependencies]
 tokio = { version = "1.48.0", features = ["full"] }
@@ -28,6 +29,7 @@ rcgen = "0.14.5"
 
 [dev-dependencies]
 ntest = "0.9.3"
+tempfile = "3.23.0"
 
 [[bin]]
 name = "echo-bench"

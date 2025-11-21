@@ -13,9 +13,8 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
 use socket2::TcpKeepalive;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio::io::{ReadBuf, WriteBuf};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::ReadBuf;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
@@ -48,11 +47,11 @@ pub async fn build_listener(config: config::ListenTo) -> Result<Listener> {
     match config {
         config::ListenTo::Tcp { addr } => Ok(Listener::Tcp(TcpListener::bind(addr).await?)),
         config::ListenTo::Tls {
+            subject,
             addr,
             server_cert,
             server_key,
             client_ca,
-            subject,
         } => Ok(Listener::Tls(
             TlsListener::listen(server_cert, server_key, client_ca, subject, addr).await?,
         )),
@@ -62,7 +61,7 @@ pub async fn build_listener(config: config::ListenTo) -> Result<Listener> {
 /// A bidirectional network stream.
 pub enum Stream {
     Tcp(TcpStream, String),
-    Tls(TlsStream<TcpStream>, String),
+    Tls(Box<TlsStream<TcpStream>>, String),
 }
 
 impl fmt::Display for Stream {
@@ -116,8 +115,8 @@ impl Stream {
     pub fn from_tls_stream(stream: TlsStream<TcpStream>) -> Self {
         let local_addr = stream.get_ref().0.local_addr().unwrap();
         let peer_addr = stream.get_ref().0.peer_addr().unwrap();
-        let display = format!("{}-{}", local_addr, peer_addr);
-        Stream::Tls(stream, display)
+        let display: String = format!("{}-{}", local_addr, peer_addr);
+        Stream::Tls(Box::new(stream), display)
     }
 
     pub fn from_tcp_stream(stream: TcpStream) -> Self {
@@ -155,7 +154,7 @@ impl Listener {
     pub async fn bind(addr: &str) -> Result<Self> {
         let (typ, addr) = parse_address(addr)?;
         match typ {
-            AddrKind::TCP => Ok(Self::Tcp(TcpListener::bind(addr).await?)),
+            AddrKind::Tcp => Ok(Self::Tcp(TcpListener::bind(addr).await?)),
         }
     }
 
@@ -185,6 +184,7 @@ pub struct TlsListener {
     acceptor: TlsAcceptor,
     listener: TcpListener,
     addr: SocketAddr,
+    #[allow(unused)]
     subject: String,
 }
 
@@ -229,15 +229,23 @@ pub enum Connector {
     Tcp(TcpConnectTo),
 }
 
+impl fmt::Display for Connector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Connector::Tls(s) => write!(f, "tls://{}", s.addr),
+            Connector::Tcp(s) => write!(f, "tcp://{}", s.addr),
+        }
+    }
+}
 enum AddrKind {
-    TCP,
+    Tcp,
 }
 
 fn parse_address(value: &str) -> Result<(AddrKind, SocketAddr)> {
     let (typ, addr) = if value.starts_with("tcp://") {
-        (AddrKind::TCP, value.strip_prefix("tcp://").unwrap())
+        (AddrKind::Tcp, value.strip_prefix("tcp://").unwrap())
     } else {
-        (AddrKind::TCP, value)
+        (AddrKind::Tcp, value)
     };
     let addr = addr
         .to_socket_addrs()?
@@ -249,9 +257,16 @@ fn parse_address(value: &str) -> Result<(AddrKind, SocketAddr)> {
 impl TryFrom<String> for Connector {
     type Error = Error;
     fn try_from(value: String) -> Result<Self> {
-        let (typ, addr) = parse_address(&value)?;
+        Self::try_from(value.as_str())
+    }
+}
+
+impl TryFrom<&str> for Connector {
+    type Error = Error;
+    fn try_from(value: &str) -> Result<Self> {
+        let (typ, addr) = parse_address(value)?;
         match typ {
-            AddrKind::TCP => Ok(Self::Tcp(TcpConnectTo::new(addr))),
+            AddrKind::Tcp => Ok(Self::Tcp(TcpConnectTo::new(addr))),
         }
     }
 }
@@ -316,7 +331,7 @@ impl TlsConnectTo {
     }
 }
 
-struct TcpConnectTo {
+pub struct TcpConnectTo {
     addr: SocketAddr,
 }
 
@@ -440,6 +455,7 @@ impl Context {
     pub async fn timeout<T, E, F>(&self, duration: Duration, f: F) -> Result<T>
     where
         F: IntoFuture<Output = StdResult<T, E>>,
+        E: Into<Error>,
     {
         timeout(duration, f).await
     }
@@ -448,6 +464,7 @@ impl Context {
     pub async fn timeout_default<T, E, F>(&self, f: F) -> Result<T>
     where
         F: IntoFuture<Output = StdResult<T, E>>,
+        E: Into<Error>,
     {
         timeout(Self::DEFAULT_TIMEOUT, f).await
     }
@@ -457,9 +474,13 @@ impl Context {
 pub async fn timeout<T, E, F>(duration: Duration, f: F) -> Result<T>
 where
     F: IntoFuture<Output = StdResult<T, E>>,
+    E: Into<Error>,
 {
     match tokio::time::timeout(duration, f).await {
-        Ok(r) => Ok(r?),
+        Ok(r) => match r {
+            Ok(r) => Ok(r),
+            Err(e) => Err(e.into()),
+        },
         Err(_) => Err(Error::from_timeout(duration)),
     }
 }
@@ -529,10 +550,14 @@ impl Message {
 
     pub fn connect(addr: &str) -> Self {
         let mut message = Self::with_capacity(addr.len());
-        message.fill(MessageType::Connect, |buf| {
+        message.connect_inplace(addr);
+        message
+    }
+
+    pub fn connect_inplace(&mut self, addr: &str) {
+        self.fill(MessageType::Connect, |buf| {
             buf.extend_from_slice(addr.as_bytes());
         });
-        message
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
@@ -587,17 +612,13 @@ impl Message {
         output
     }
 
-    pub async fn read_from(context: &Context, reader: &mut Stream) -> Result<Self> {
+    pub async fn read_from(reader: &mut Stream) -> Result<Self> {
         let mut msg = Self::default();
-        msg.read_from_inplace(context, reader).await?;
+        msg.read_from_inplace(reader).await?;
         Ok(msg)
     }
 
-    pub async fn read_from_inplace(
-        &mut self,
-        context: &Context,
-        reader: &mut Stream,
-    ) -> Result<()> {
+    pub async fn read_from_inplace(&mut self, reader: &mut Stream) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
         reader
             .read_exact(&mut self.0)
@@ -618,9 +639,16 @@ impl Message {
         &mut self,
         context: &Context,
         reader: &mut Stream,
-    ) -> Result<Connector> {
+    ) -> Result<String> {
         loop {
-            self.read_from_inplace(context, reader).await?;
+            tokio::select! {
+                _ = context.wait_cancel() => {
+                    return Err(Error::cancel());
+                }
+                r = self.read_from_inplace(reader) => {
+                    r?;
+                }
+            }
             match self.get_type() {
                 MessageType::Ping => continue,
                 MessageType::Connect => break,
@@ -628,7 +656,7 @@ impl Message {
             }
         }
         let addr = String::from_utf8(self.get_payload().to_vec()).context("Invalid address")?;
-        Ok(addr.try_into()?)
+        Ok(addr)
     }
 }
 
@@ -751,7 +779,7 @@ mod tests {
         let err = context
             .timeout(Duration::from_secs(1), async {
                 sleep(Duration::from_secs(2)).await;
-                Ok(())
+                Result::<()>::Err(Error::cancel())
             })
             .await
             .unwrap_err();

@@ -3,7 +3,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use log::{debug, error, info, trace};
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::io::copy_bidirectional;
 use tokio::sync::Mutex;
@@ -103,7 +102,7 @@ async fn keep_alive(
             }
             _ = interval.tick() => {
                 stream.write_all(message.as_ref()).await?;
-                message.read_from_inplace(&context, &mut stream).await?;
+                message.read_from_inplace(&mut stream).await?;
                 if message.get_type() != MessageType::Ping {
                     return Err(whatever!("Invalid message type: {:?}", message.get_type()));
                 }
@@ -193,7 +192,7 @@ type ServerOptionsRef = Arc<ServerOptions>;
 /// This function sets up listeners for tunnel connections and service endpoints,
 /// manages the tunnel connection pool, and handles incoming connections.
 pub async fn start_server(context: &Context, cfg: &ServerConfig) -> Result<()> {
-    let listener = build_listener(cfg.listen_to).await?;
+    let listener = build_listener(cfg.listen_to.clone()).await?;
     info!("server listening on {}", listener);
     let options = &Arc::new(ServerOptions {
         pool: TunnelPool::new(),
@@ -201,7 +200,7 @@ pub async fn start_server(context: &Context, cfg: &ServerConfig) -> Result<()> {
     context.spawn(tunnel_timer(
         context.clone(),
         options.clone(),
-        cfg.listen_to,
+        cfg.listen_to.to_string(),
     ));
     context.spawn(start_tunnel(context.children(), listener, options.clone()));
     for s in cfg.services.iter() {
@@ -210,14 +209,14 @@ pub async fn start_server(context: &Context, cfg: &ServerConfig) -> Result<()> {
         context.spawn(start_service(
             context.children(),
             listener,
-            s.connect_to,
+            s.connect_to.clone(),
             options.clone(),
         ));
     }
     Ok(())
 }
 
-async fn tunnel_timer(context: Context, options: ServerOptionsRef, address: Address) {
+async fn tunnel_timer(context: Context, options: ServerOptionsRef, addr: String) {
     if !log::log_enabled!(log::Level::Info) {
         return;
     }
@@ -227,7 +226,7 @@ async fn tunnel_timer(context: Context, options: ServerOptionsRef, address: Addr
                 return;
             },
             _ = time::sleep(Duration::from_secs(60)) => {
-                info!("{} alive tunnel count: {}", address, options.pool.len().await);
+                info!("{} alive tunnel count: {}", addr, options.pool.len().await);
             },
         }
     }
@@ -271,7 +270,7 @@ async fn start_service(
                     context.clone(),
                     stream,
                     options.clone(),
-                    connect_to,
+                    connect_to.clone(),
                 ));
             }
             Err(e) => {
@@ -339,7 +338,7 @@ async fn get_a_useable_connection(
         .await
         .context("Failed to get a tunnel from pool")?;
     trace!("Stream got a tunnel: {}->{}", stream, connect_to);
-    let message = Message::connect(connect_to);
+    let mut message = Message::connect(connect_to);
     context
         .timeout_default(remote.write_all(message.as_ref()))
         .await
@@ -356,5 +355,5 @@ async fn get_a_useable_connection(
         "Tunnel connect message has received, relay started: {}->{}",
         stream, remote,
     );
-    Ok(stream)
+    Ok(remote)
 }

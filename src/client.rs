@@ -2,12 +2,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use log::{debug, error, info, trace};
+use tokio::io::AsyncWriteExt;
+use tokio::io::copy_bidirectional;
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::config::ClientConfig;
 use crate::errors::{Result, ResultExt as _, whatever};
-use crate::transport::{Connector, Context, Message, MessageType, Stream, build_connector};
+use crate::transport::{Connector, Context, Message, Stream, build_connector};
 
 struct ClientOptions {
     connector: Connector,
@@ -33,7 +35,7 @@ type ClientOptionsRef = Arc<ClientOptions>;
 /// handshake, and begins managing tunnel connections. It spawns a background
 /// task to maintain the connection pool and handle reconnections.
 pub async fn start_client(context: &Context, cfg: &ClientConfig) -> Result<()> {
-    let connector = build_connector(&cfg.connect_to).await?;
+    let connector = build_connector(cfg.connect_to.clone())?;
     let (sender, receiver) = mpsc::channel(cfg.idle_connections as usize);
     let options = Arc::new(ClientOptions {
         connector,
@@ -41,7 +43,7 @@ pub async fn start_client(context: &Context, cfg: &ClientConfig) -> Result<()> {
         idle_connections: cfg.idle_connections,
         notify: sender,
     });
-    first_connect(context.clone(), options.clone()).await?;
+    first_connect(context, options.clone()).await?;
     context.spawn(start_client_sentry(context.children(), options, receiver));
     Ok(())
 }
@@ -90,17 +92,16 @@ async fn build_tunnel(context: Context, options: ClientOptionsRef) {
 }
 
 async fn build_tunnel_impl(context: &Context, options: &ClientOptionsRef) -> Result<()> {
-    let (read_half, write_half) = connect_to_server(context, options).await?;
-    wait_relay(context, read_half, write_half, options).await
+    let stream = options.connector.connect(context).await?;
+    wait_relay(context, stream, options).await
 }
 
-async fn first_connect(context: Context, options: ClientOptionsRef) -> Result<()> {
-    let (r, w) = connect_to_server(&context, &options).await?;
-    let c = context.clone();
+async fn first_connect(context: &Context, options: ClientOptionsRef) -> Result<()> {
+    let stream = options.connector.connect(context).await?;
+    let new_ctx = context.clone();
     context.spawn(async move {
-        let context = c;
         let options = options;
-        match wait_relay(&context, r, w, &options).await {
+        match wait_relay(&new_ctx, stream, &options).await {
             Ok(_) => {}
             Err(e) => {
                 error!("tunnel relay fail: {:#}", e);
@@ -112,17 +113,17 @@ async fn first_connect(context: Context, options: ClientOptionsRef) -> Result<()
 
 async fn wait_relay(
     context: &Context,
-    mut read_half: ReadSession,
-    mut write_half: WriteSession,
+    mut stream: Stream,
     options: &ClientOptionsRef,
 ) -> Result<()> {
-    let addr: Address = read_half
-        .wait_connect_message(context, &mut write_half)
+    let mut message = Message::default();
+    let addr = message
+        .wait_connect_message(context, &mut stream)
         .await
-        .with_context(|| format!("Failed to wait connect message: {}", read_half))?;
-    let debug = format!("{}->{}", read_half, addr);
+        .with_context(|| format!("Failed to wait connect message: {}", stream))?;
+    let debug = format!("{}->{}", stream, addr);
     options.notify_for_new_tunnel().await;
-    match handle_relay(context, read_half, write_half, options, &addr).await {
+    match handle_relay(context, stream, options, &addr, &mut message).await {
         Ok((read, write)) => {
             info!(
                 "stream {} disconnected and has read {} bytes and wrote {}",
@@ -140,44 +141,23 @@ async fn wait_relay(
     Ok(())
 }
 
-async fn connect_to_server(
-    context: &Context,
-    options: &ClientOptionsRef,
-) -> Result<(ReadSession, WriteSession)> {
-    let conn = options
-        .address
-        .connect_to(context)
-        .await
-        .context("Failed to connect to tunnel server")?;
-    debug!("connected to server: {}", conn);
-    let (read_half, write_half) = client_handshake(
-        context,
-        conn.reader,
-        conn.writer,
-        &options.signer,
-        &options.verifier,
-    )
-    .await?;
-    debug!("handshake success, tunnel established: {}", read_half);
-    Ok((read_half, write_half))
-}
-
 async fn handle_relay(
     context: &Context,
-    read_half: ReadSession,
-    mut write_half: WriteSession,
+    mut stream: Stream,
     options: &ClientOptionsRef,
-    addr: &Address,
-) -> Result<(usize, usize)> {
+    addr: &String,
+    message: &mut Message,
+) -> Result<(u64, u64)> {
     trace!("tunnel connect message has read: {}", addr);
     if !options.allows.contains(addr) {
         return Err(whatever!("Address not allowed: {}", addr));
     }
-    let conn = addr
-        .connect_to(context)
+    let mut conn = Connector::try_from(addr.as_str())?
+        .connect(context)
         .await
         .context("Failed to connect to local service")?;
-    write_half.write_connect_message(context, addr).await?;
-    debug!("tunnel relay started: {}->{}", &read_half, addr);
-    copy_encrypted_bidirectional(context, read_half, write_half, conn.reader, conn.writer).await
+    message.connect_inplace("");
+    stream.write_all(message.as_ref()).await?;
+    debug!("tunnel relay started: {}->{}", &stream, addr);
+    Ok(copy_bidirectional(&mut stream, &mut conn).await?)
 }
