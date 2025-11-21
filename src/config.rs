@@ -46,6 +46,7 @@ pub struct ClientConfig {
     #[serde(default)]
     pub idle_connections: i32,
     pub connect_to: ConnectTo,
+    pub allowed_addresses: HashSet<String>,
 }
 
 #[derive(Deserialize)]

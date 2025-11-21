@@ -1,20 +1,17 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use ed25519_dalek::{SigningKey, VerifyingKey};
 use log::{debug, error, info, trace};
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::config::ClientConfig;
 use crate::errors::{Result, ResultExt as _, whatever};
-use crate::transport::{ Context};
+use crate::transport::{Connector, Context, Message, MessageType, Stream, build_connector};
 
 struct ClientOptions {
-    address: Address,
-    verifier: VerifyingKey,
-    signer: SigningKey,
-    allows: HashSet<Address>,
+    connector: Connector,
+    allows: HashSet<String>,
     idle_connections: i32,
     notify: Sender<()>,
 }
@@ -36,14 +33,10 @@ type ClientOptionsRef = Arc<ClientOptions>;
 /// handshake, and begins managing tunnel connections. It spawns a background
 /// task to maintain the connection pool and handle reconnections.
 pub async fn start_client(context: &Context, cfg: &ClientConfig) -> Result<()> {
-    let verifier = decode_verifying_key(&cfg.server_public_key)?;
-    let signer = decode_signing_key(&cfg.private_key)?;
-
+    let connector = build_connector(&cfg.connect_to).await?;
     let (sender, receiver) = mpsc::channel(cfg.idle_connections as usize);
     let options = Arc::new(ClientOptions {
-        address: cfg.server_address,
-        verifier,
-        signer,
+        connector,
         allows: cfg.allowed_addresses.clone(),
         idle_connections: cfg.idle_connections,
         notify: sender,
@@ -56,9 +49,9 @@ pub async fn start_client(context: &Context, cfg: &ClientConfig) -> Result<()> {
 async fn start_client_sentry(context: Context, options: ClientOptionsRef, receiver: Receiver<()>) {
     keep_client_connections(&context, &options, receiver).await;
     context.cancel_all();
-    debug!("client sentry exiting, {}", options.address);
+    debug!("client sentry exiting, {}", options.connector);
     context.wait().await;
-    debug!("client sentry exited, {}", options.address);
+    debug!("client sentry exited, {}", options.connector);
 }
 
 async fn keep_client_connections(
