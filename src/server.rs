@@ -205,7 +205,7 @@ pub async fn start_server(context: &Context, cfg: &ServerConfig) -> Result<()> {
     ));
     context.spawn(start_tunnel(context.children(), listener, options.clone()));
     for s in cfg.services.iter() {
-        let listener = build_listener(s.listen_to.try_into()?).await?;
+        let listener = Listener::bind(&s.listen_to).await?;
         info!("service starting, listening on {}", listener);
         context.spawn(start_service(
             context.children(),
@@ -334,14 +334,14 @@ async fn get_a_useable_connection(
     stream: &mut Stream,
     connect_to: &str,
 ) -> Result<Stream> {
-    let mut stream = context
+    let mut remote = context
         .timeout_default(options.pop_stream())
         .await
         .context("Failed to get a tunnel from pool")?;
     trace!("Stream got a tunnel: {}->{}", stream, connect_to);
     let message = Message::connect(connect_to);
     context
-        .timeout_default(stream.write_all(context, message.as_ref()))
+        .timeout_default(remote.write_all(message.as_ref()))
         .await
         .context("Failed to write connect message")?;
     trace!(
@@ -349,12 +349,12 @@ async fn get_a_useable_connection(
         stream, connect_to,
     );
     context
-        .timeout_default(stream.wait_connect_message(context, &mut write_half))
+        .timeout_default(message.wait_connect_message(context, &mut remote))
         .await
         .context("Failed to wait connect message")?;
     trace!(
         "Tunnel connect message has received, relay started: {}->{}",
-        stream, read_half,
+        stream, remote,
     );
-    Ok((read_half, write_half))
+    Ok(stream)
 }

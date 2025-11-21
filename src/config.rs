@@ -63,27 +63,6 @@ pub enum ConnectTo {
     },
 }
 
-fn parse_address(value: &str) -> Result<SocketAddr> {
-    let addr = if value.starts_with("tcp://") {
-        value.strip_prefix("tcp://").unwrap()
-    } else {
-        value
-    }
-    .to_socket_addrs()?
-    .next()
-    .ok_or(whatever!("Invalid address"))?;
-    Ok(addr)
-}
-
-impl TryFrom<String> for ConnectTo {
-    type Error = Error;
-    fn try_from(value: String) -> Result<Self> {
-        Ok(Self::Tcp {
-            addr: parse_address(&value)?,
-        })
-    }
-}
-
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 pub enum ListenTo {
@@ -97,15 +76,6 @@ pub enum ListenTo {
         subject: String,
         addr: SocketAddr,
     },
-}
-
-impl TryFrom<String> for ListenTo {
-    type Error = Error;
-    fn try_from(value: String) -> Result<Self> {
-        Ok(Self::Tcp {
-            addr: parse_address(&value)?,
-        })
-    }
 }
 
 /// Service definition for a tunnel server.

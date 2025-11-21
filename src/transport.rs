@@ -1,9 +1,10 @@
 use core::task::{self, Poll};
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::pin::pin;
+use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,128 +59,7 @@ pub async fn build_listener(config: config::ListenTo) -> Result<Listener> {
     }
 }
 
-/// Reader for reading data from network streams.
-///
-/// This struct provides async methods for reading data from network connections,
-/// with support for cancellation through the context.
-pub enum Reader {
-    Tcp(OwnedReadHalf, String),
-    Tls(ReadHalf<TlsStream<TcpStream>>, String),
-}
-
-impl fmt::Display for Reader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Reader::Tcp(_, s) => f.write_str(s),
-            Reader::Tls(_, s) => f.write_str(s),
-        }
-    }
-}
-
-impl Reader {
-    #[inline]
-    pub async fn read(&mut self, context: &Context, buf: &mut [u8]) -> Result<usize> {
-        assert_ne!(buf.len(), 0);
-        tokio::select! {
-            _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.read_impl(buf) => Ok(r?),
-        }
-    }
-
-    async fn read_impl(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Reader::Tcp(s, _) => s.read(buf).await,
-            Reader::Tls(s, _) => s.read(buf).await,
-        }
-    }
-
-    #[inline]
-    pub async fn read_exact(&mut self, context: &Context, buf: &mut [u8]) -> Result<usize> {
-        assert_ne!(buf.len(), 0);
-        tokio::select! {
-            _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.read_exact_impl(buf) => Ok(r?),
-        }
-    }
-
-    async fn read_exact_impl(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Reader::Tcp(s, _) => s.read_exact(buf).await,
-            Reader::Tls(s, _) => s.read_exact(buf).await,
-        }
-    }
-}
-
-/// Writer for writing data to network streams.
-///
-/// This struct provides async methods for writing data to network connections,
-/// with support for cancellation through the context.
-pub enum Writer {
-    Tcp(OwnedWriteHalf, String),
-    Tls(WriteHalf<TlsStream<TcpStream>>, String),
-}
-
-impl fmt::Display for Writer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Writer::Tcp(_, s) => f.write_str(s),
-            Writer::Tls(_, s) => f.write_str(s),
-        }
-    }
-}
-
-impl Writer {
-    #[inline]
-    pub async fn write_all(&mut self, context: &Context, data: &[u8]) -> Result<()> {
-        assert_ne!(data.len(), 0);
-        tokio::select! {
-            _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.write_all_impl(data) => Ok(r?),
-        }
-    }
-
-    async fn write_all_impl(&mut self, data: &[u8]) -> io::Result<()> {
-        match self {
-            Writer::Tcp(s, _) => s.write_all(data).await,
-            Writer::Tls(s, _) => s.write_all(data).await,
-        }
-    }
-
-    #[inline]
-    pub async fn shutdown(&mut self, context: &Context) -> Result<()> {
-        tokio::select! {
-            _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.shutdown_impl() => Ok(r?),
-        }
-    }
-
-    async fn shutdown_impl(&mut self) -> io::Result<()> {
-        match self {
-            Writer::Tcp(s, _) => s.shutdown().await,
-            Writer::Tls(s, _) => s.shutdown().await,
-        }
-    }
-
-    #[inline]
-    pub async fn flush(&mut self, context: &Context) -> Result<()> {
-        tokio::select! {
-            _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.flush_impl() => Ok(r?),
-        }
-    }
-
-    async fn flush_impl(&mut self) -> io::Result<()> {
-        match self {
-            Writer::Tcp(s, _) => s.flush().await,
-            Writer::Tls(s, _) => s.flush().await,
-        }
-    }
-}
-
 /// A bidirectional network stream.
-///
-/// This struct represents a network connection with separate reader and writer halves,
-/// allowing for concurrent reading and writing operations.
 pub enum Stream {
     Tcp(TcpStream, String),
     Tls(TlsStream<TcpStream>, String),
@@ -232,7 +112,6 @@ impl AsyncWrite for Stream {
     }
 }
 
-
 impl Stream {
     pub fn from_tls_stream(stream: TlsStream<TcpStream>) -> Self {
         let local_addr = stream.get_ref().0.local_addr().unwrap();
@@ -273,6 +152,13 @@ impl fmt::Display for Listener {
 }
 
 impl Listener {
+    pub async fn bind(addr: &str) -> Result<Self> {
+        let (typ, addr) = parse_address(addr)?;
+        match typ {
+            AddrKind::TCP => Ok(Self::Tcp(TcpListener::bind(addr).await?)),
+        }
+    }
+
     pub async fn accept(&mut self, context: &Context) -> Result<Stream> {
         tokio::select! {
             _ = context.wait_cancel() => Err(Error::cancel()),
@@ -341,6 +227,33 @@ impl TlsListener {
 pub enum Connector {
     Tls(TlsConnectTo),
     Tcp(TcpConnectTo),
+}
+
+enum AddrKind {
+    TCP,
+}
+
+fn parse_address(value: &str) -> Result<(AddrKind, SocketAddr)> {
+    let (typ, addr) = if value.starts_with("tcp://") {
+        (AddrKind::TCP, value.strip_prefix("tcp://").unwrap())
+    } else {
+        (AddrKind::TCP, value)
+    };
+    let addr = addr
+        .to_socket_addrs()?
+        .next()
+        .ok_or(whatever!("Invalid address"))?;
+    Ok((typ, addr))
+}
+
+impl TryFrom<String> for Connector {
+    type Error = Error;
+    fn try_from(value: String) -> Result<Self> {
+        let (typ, addr) = parse_address(&value)?;
+        match typ {
+            AddrKind::TCP => Ok(Self::Tcp(TcpConnectTo::new(addr))),
+        }
+    }
 }
 
 impl Connector {
@@ -524,29 +437,29 @@ impl Context {
         children
     }
 
-    pub async fn timeout<T, F>(&self, duration: Duration, f: F) -> Result<T>
+    pub async fn timeout<T, E, F>(&self, duration: Duration, f: F) -> Result<T>
     where
-        F: IntoFuture<Output = Result<T>>,
+        F: IntoFuture<Output = StdResult<T, E>>,
     {
         timeout(duration, f).await
     }
 
     const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
-    pub async fn timeout_default<T, F>(&self, f: F) -> Result<T>
+    pub async fn timeout_default<T, E, F>(&self, f: F) -> Result<T>
     where
-        F: IntoFuture<Output = Result<T>>,
+        F: IntoFuture<Output = StdResult<T, E>>,
     {
         timeout(Self::DEFAULT_TIMEOUT, f).await
     }
 }
 
 /// Executes a future with a timeout.
-pub async fn timeout<T, F>(duration: Duration, f: F) -> Result<T>
+pub async fn timeout<T, E, F>(duration: Duration, f: F) -> Result<T>
 where
-    F: IntoFuture<Output = Result<T>>,
+    F: IntoFuture<Output = StdResult<T, E>>,
 {
     match tokio::time::timeout(duration, f).await {
-        Ok(r) => r,
+        Ok(r) => Ok(r?),
         Err(_) => Err(Error::from_timeout(duration)),
     }
 }
@@ -674,7 +587,7 @@ impl Message {
         output
     }
 
-    pub async fn read_from(context: &Context, reader: &mut Reader) -> Result<Self> {
+    pub async fn read_from(context: &Context, reader: &mut Stream) -> Result<Self> {
         let mut msg = Self::default();
         msg.read_from_inplace(context, reader).await?;
         Ok(msg)
@@ -683,22 +596,39 @@ impl Message {
     pub async fn read_from_inplace(
         &mut self,
         context: &Context,
-        reader: &mut Reader,
+        reader: &mut Stream,
     ) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
         reader
-            .read_exact(context, &mut self.0)
+            .read_exact(&mut self.0)
             .await
             .context("Failed to read message header from stream")?;
         self.get_unchecked_type()?;
         let mut payload = self.0.split_off(Self::HEADER_SIZE);
         payload.resize(self.get_payload_size(), 0);
         reader
-            .read_exact(context, &mut payload)
+            .read_exact(&mut payload)
             .await
             .context("Failed to read message from stream")?;
         self.0.unsplit(payload);
         Ok(())
+    }
+
+    pub async fn wait_connect_message(
+        &mut self,
+        context: &Context,
+        reader: &mut Stream,
+    ) -> Result<Connector> {
+        loop {
+            self.read_from_inplace(context, reader).await?;
+            match self.get_type() {
+                MessageType::Ping => continue,
+                MessageType::Connect => break,
+                _ => return Err(whatever!("Invalid message type: {:?}", self.get_type())),
+            }
+        }
+        let addr = String::from_utf8(self.get_payload().to_vec()).context("Invalid address")?;
+        Ok(addr.try_into()?)
     }
 }
 
