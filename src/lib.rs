@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use log::{debug, error, info};
-use rcgen::generate_simple_self_signed;
 use tokio::select;
 use tokio::time::sleep;
 
@@ -28,8 +27,15 @@ pub use crate::transport::Context;
 /// the appropriate handler based on the selected command.
 pub async fn run(context: &Context, args: Arguments) -> i32 {
     match args.command {
-        Commands::ExampleConfig { subject } => {
-            println!("{}", build_example_config(&subject));
+        Commands::ExampleConfig { subject, typ } => {
+            match typ {
+                ExampleConfigType::Tls => {
+                    println!("{}", build_example_tls_config(&subject));
+                }
+                ExampleConfigType::Tcp => {
+                    println!("{}", build_example_tcp_config());
+                }
+            }
             0
         }
         Commands::Client { config } => {
@@ -41,10 +47,6 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
             info!("starting server, loading config from {}", config);
             let configs = ServerConfig::from_file(&config).expect("Failed to load config");
             run_server(context, configs).await
-        }
-        Commands::SignCert { subject } => {
-            generate_certs(&subject);
-            0
         }
     }
 }
@@ -187,6 +189,12 @@ pub struct Arguments {
     pub log_level: log::LevelFilter,
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ExampleConfigType {
+    Tls,
+    Tcp,
+}
+
 /// Available commands for the rtunnel CLI.
 ///
 /// This enum represents all the subcommands that can be executed by rtunnel.
@@ -196,7 +204,18 @@ pub enum Commands {
         about = "Generate example config to stdout",
         arg_required_else_help = false
     )]
-    ExampleConfig { subject: String },
+    ExampleConfig {
+        #[arg(help = "subject name for the certificate")]
+        subject: String,
+        #[arg(
+            short = 't',
+            long = "type",
+            help = "config type",
+            default_value = "tls"
+        )]
+        #[clap(value_enum)]
+        typ: ExampleConfigType,
+    },
     #[command(
         about = "Run the client to route traffic between the local machine and the tunnel",
         arg_required_else_help = false
@@ -225,24 +244,44 @@ pub enum Commands {
         )]
         config: String,
     },
-    #[command(
-        about = "Generate self-signed certificate",
-        arg_required_else_help = false
-    )]
-    SignCert { subject: String },
 }
 
-pub fn build_example_config(subject: &str) -> String {
-    let server_key = generate_simple_self_signed(vec![subject.to_string()]).unwrap();
-    let client_key = generate_simple_self_signed(vec![subject.to_string()]).unwrap();
+pub fn build_example_tls_config(subject: &str) -> String {
+    let cert = config::SelfSignedCert::new(subject);
 
     let config = Config {
         servers: Some(vec![ServerConfig {
             listen_to: config::ListenTo::Tls {
-                server_cert: server_key.cert.pem(),
-                server_key: server_key.signing_key.serialize_pem(),
-                client_ca: client_key.signing_key.public_key_pem(),
+                server_cert: cert.server_cert.clone(),
+                server_key: cert.server_key,
+                client_cert: cert.client_cert.clone(),
                 subject: subject.to_string(),
+                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+            },
+            services: vec![config::Service {
+                listen_to: "tcp://0.0.0.0:2334".to_string(),
+                connect_to: "tcp://127.0.0.1:2335".to_string(),
+            }],
+        }]),
+        clients: Some(vec![ClientConfig {
+            connect_to: config::ConnectTo::Tls {
+                client_cert: cert.client_cert,
+                client_key: cert.client_key,
+                server_cert: cert.server_cert,
+                subject: subject.to_string(),
+                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+            },
+            idle_connections: 10,
+            allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
+        }]),
+    };
+    toml::to_string(&config).unwrap()
+}
+
+pub fn build_example_tcp_config() -> String {
+    let config = Config {
+        servers: Some(vec![ServerConfig {
+            listen_to: config::ListenTo::Tcp {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
             },
             services: vec![config::Service {
@@ -251,11 +290,7 @@ pub fn build_example_config(subject: &str) -> String {
             }],
         }]),
         clients: Some(vec![ClientConfig {
-            connect_to: config::ConnectTo::Tls {
-                client_cert: client_key.cert.pem(),
-                client_key: client_key.signing_key.serialize_pem(),
-                server_ca: server_key.signing_key.public_key_pem(),
-                subject: subject.to_string(),
+            connect_to: config::ConnectTo::Tcp {
                 addr: SocketAddr::from_str("127.0.0.1:2334").unwrap(),
             },
             idle_connections: 10,
@@ -265,37 +300,13 @@ pub fn build_example_config(subject: &str) -> String {
     toml::to_string(&config).unwrap()
 }
 
-fn generate_certs(subject: &str) {
-    let server_key = generate_simple_self_signed(vec![subject.to_string()]).unwrap();
-    let client_key = generate_simple_self_signed(vec![subject.to_string()]).unwrap();
-    println!("server_cert = \"\"\"\n{}\"\"\"", server_key.cert.pem());
-    println!(
-        "server_key = \"\"\"\n{}\"\"\"",
-        server_key.signing_key.serialize_pem()
-    );
-    println!(
-        "client_ca = \"\"\"\n{}\"\"\"",
-        client_key.signing_key.public_key_pem()
-    );
-    println!("\n");
-    println!("client_cert = \"\"\"\n{}\"\"\"", client_key.cert.pem());
-    println!(
-        "client_key = \"\"\"\n{}\"\"\"",
-        client_key.signing_key.serialize_pem()
-    );
-    println!(
-        "server_ca = \"\"\"\n{}\"\"\"",
-        server_key.signing_key.public_key_pem()
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn example_config() {
-        let cfg = build_example_config("example.com");
+        let cfg = build_example_tls_config("example.com");
         assert!(!cfg.is_empty());
         ServerConfig::from_string(&cfg).unwrap();
         ClientConfig::from_string(&cfg).unwrap();

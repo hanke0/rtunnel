@@ -7,8 +7,12 @@ use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::task::JoinSet;
+
+mod common;
+
+use crate::common::run_echo_server;
 
 #[derive(Default)]
 struct Metrics {
@@ -31,7 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let times = env::args().nth(4).unwrap().parse::<usize>().unwrap();
     let bytes = env::args().nth(5).unwrap().parse::<usize>().unwrap();
     let loops = env::args().nth(6).unwrap().parse::<usize>().unwrap();
-    run_server(&listen_addr).await?;
+    run_echo_server(&listen_addr, false).await?;
 
     let metrics = Arc::new(Metrics::default());
     let mut set = JoinSet::new();
@@ -61,7 +65,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!(
         "connect_spend_ns: {}",
         metrics.connect_spend_ns.load(Ordering::SeqCst)
-            / metrics.connect_success.load(Ordering::SeqCst)
+            / metrics.connect_success.load(Ordering::SeqCst).max(1)
     );
     println!(
         "transfer_success: {}",
@@ -93,22 +97,25 @@ async fn client_task(addr: String, times: usize, bytes: usize, loops: usize, met
         let start = Instant::now();
         let mut stream = match TcpStream::connect(&addr).await {
             Ok(s) => s,
-            Err(_) => {
+            Err(err) => {
                 metrics.connect_failed.fetch_add(1, Ordering::SeqCst);
+                eprintln!("connect failed: {:#}", err);
                 return;
             }
         };
         match stream.write_i8(1).await {
             Ok(_) => {}
-            Err(_) => {
+            Err(err) => {
                 metrics.connect_failed.fetch_add(1, Ordering::SeqCst);
+                eprintln!("write when connect failed: {:#}", err);
                 return;
             }
         };
         match stream.read_i8().await {
             Ok(_) => {}
-            Err(_) => {
+            Err(err) => {
                 metrics.connect_failed.fetch_add(1, Ordering::SeqCst);
+                eprintln!("read when connect failed: {:#}", err);
                 return;
             }
         };
@@ -127,8 +134,9 @@ async fn client_task(addr: String, times: usize, bytes: usize, loops: usize, met
             let start = Instant::now();
             match writer.write_all(&buf).await {
                 Ok(_) => {}
-                Err(_) => {
+                Err(err) => {
                     metrics.transfer_failed.fetch_add(1, Ordering::SeqCst);
+                    eprintln!("write when transfer failed: {:#}", err);
                     return;
                 }
             };
@@ -143,38 +151,12 @@ async fn client_task(addr: String, times: usize, bytes: usize, loops: usize, met
                         .transfer_bytes
                         .fetch_add(bytes as i64, Ordering::SeqCst);
                 }
-                Err(_) => {
+                Err(err) => {
                     metrics.transfer_failed.fetch_add(1, Ordering::SeqCst);
+                    eprintln!("read when transfer failed: {:#}", err);
                     return;
                 }
             };
         }
-    }
-}
-
-async fn run_server(addr: &str) -> Result<(), Box<dyn Error>> {
-    let listener = TcpListener::bind(addr).await?;
-    eprintln!("Listening on: {addr}");
-    tokio::spawn(async move {
-        loop {
-            let (socket, _) = listener.accept().await.unwrap();
-            tokio::spawn(async move {
-                if let Err(e) = handle_server_stream(socket).await {
-                    eprintln!("server task failed: {:#}", e)
-                }
-            });
-        }
-    });
-    Ok(())
-}
-
-async fn handle_server_stream(mut socket: TcpStream) -> Result<(), Box<dyn Error>> {
-    let mut buf = vec![0; 1024];
-    loop {
-        let n = socket.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        socket.write_all(&buf[0..n]).await?;
     }
 }

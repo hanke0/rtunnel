@@ -12,8 +12,9 @@ use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ServerConfig;
+use crate::config::build_listener;
 use crate::errors::{Error, Result, ResultExt};
-use crate::transport::{Context, Listener, Message, MessageType, Stream, build_listener};
+use crate::transport::{Context, Listener, Message, MessageKind, Stream};
 use crate::whatever;
 
 struct ServerOptions {
@@ -101,11 +102,14 @@ async fn keep_alive(
                 break;
             }
             _ = interval.tick() => {
+                trace!("keep alive ping sending: {}", stream);
                 stream.write_all(message.as_ref()).await?;
+                trace!("keep alive ping receiving: {}", stream);
                 message.read_from_inplace(&mut stream).await?;
-                if message.get_type() != MessageType::Ping {
+                if message.get_type() != MessageKind::Ping {
                     return Err(whatever!("Invalid message type: {:?}", message.get_type()));
                 }
+                trace!("keep alive success: {}", stream);
                 interval.reset();
             }
         }
@@ -176,7 +180,10 @@ impl TunnelPool {
     pub async fn pop(&self) -> Result<Stream> {
         loop {
             match self.0.sessions.lock().await.pop_first() {
-                Some((_, session)) => return session.join().await,
+                Some((_, session)) => {
+                    trace!("pop a session: {}", session);
+                    return session.join().await;
+                }
                 None => {
                     self.0.notify.notified().await;
                 }
@@ -237,6 +244,7 @@ async fn start_tunnel(context: Context, mut listener: Listener, options: ServerO
     loop {
         match listener.accept(context).await {
             Ok(stream) => {
+                debug!("new tunnel client connected: {}", stream);
                 options.push_stream(context.clone(), stream).await;
             }
             Err(e) => {

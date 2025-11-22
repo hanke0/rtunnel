@@ -5,11 +5,45 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::string::String;
 
+use rcgen::generate_simple_self_signed;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, ResultExt as _};
+use crate::transport::{Connector, Listener, TcpConnectTo, TcpListener, TlsConnectTo, TlsListener};
 use crate::whatever;
+
+pub fn build_connector(config: ConnectTo) -> Result<Connector> {
+    match config {
+        ConnectTo::Tcp { addr } => Ok(Connector::Tcp(TcpConnectTo::new(addr))),
+        ConnectTo::Tls {
+            addr,
+            client_cert,
+            client_key,
+            server_cert,
+            subject,
+        } => {
+            let connector =
+                TlsConnectTo::try_from_pem(client_cert, client_key, server_cert, subject, addr)?;
+            Ok(Connector::Tls(connector))
+        }
+    }
+}
+
+pub async fn build_listener(config: ListenTo) -> Result<Listener> {
+    match config {
+        ListenTo::Tcp { addr } => Ok(Listener::Tcp(TcpListener::bind(addr).await?)),
+        ListenTo::Tls {
+            subject,
+            addr,
+            server_cert,
+            server_key,
+            client_cert,
+        } => Ok(Listener::Tls(
+            TlsListener::listen(server_cert, server_key, client_cert, subject, addr).await?,
+        )),
+    }
+}
 
 /// Root configuration structure that can contain both server and client configurations.
 ///
@@ -57,7 +91,7 @@ pub enum ConnectTo {
         addr: SocketAddr,
         client_cert: String,
         client_key: String,
-        server_ca: String,
+        server_cert: String,
     },
 }
 
@@ -81,8 +115,31 @@ pub enum ListenTo {
         addr: SocketAddr,
         server_cert: String,
         server_key: String,
-        client_ca: String,
+        client_cert: String,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SelfSignedCert {
+    pub server_cert: String,
+    pub server_key: String,
+    pub client_cert: String,
+    pub client_key: String,
+    pub subject: String,
+}
+
+impl SelfSignedCert {
+    pub fn new(subject: &str) -> Self {
+        let server_key = generate_simple_self_signed(vec![subject.to_string()]).unwrap();
+        let client_key = generate_simple_self_signed(vec![subject.to_string()]).unwrap();
+        Self {
+            server_cert: server_key.cert.pem(),
+            server_key: server_key.signing_key.serialize_pem(),
+            client_cert: client_key.cert.pem(),
+            client_key: client_key.signing_key.serialize_pem(),
+            subject: subject.to_string(),
+        }
+    }
 }
 
 impl Display for ListenTo {
@@ -138,6 +195,13 @@ impl ClientConfig {
             if client.idle_connections <= 0 {
                 client.idle_connections = 8;
             }
+            let mut allowed_addresses = HashSet::new();
+            for allowed_address in client.allowed_addresses.iter() {
+                let connector = Connector::parse_address(allowed_address)
+                    .context("Failed to parse allowed address")?;
+                allowed_addresses.insert(connector.to_string());
+            }
+            client.allowed_addresses = allowed_addresses;
         }
         Ok(clients)
     }

@@ -88,7 +88,7 @@ run_server() {
 		;;
 	*)
 		chmod 600 rtunnel.toml
-		target/release/rtunnel -l error server >"${severlog}" 2>&1 &
+		target/release/rtunnel -l error server -c tmp/rtunnel.toml >"${severlog}" 2>&1 &
 		;;
 	esac
 	server_pid=$!
@@ -103,7 +103,7 @@ run_client() {
 		tmp/frpc -c tmp/frpc.toml >${clientlog} 2>&1 &
 		;;
 	*)
-		target/release/rtunnel -l error client >${clientlog} 2>&1 &
+		target/release/rtunnel -l error client -c tmp/rtunnel.toml >${clientlog} 2>&1 &
 		;;
 	esac
 	client_pid=$!

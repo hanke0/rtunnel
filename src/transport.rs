@@ -13,9 +13,10 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
 use socket2::TcpKeepalive;
+use tokio::io::AsyncWriteExt;
 use tokio::io::ReadBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::TlsStream;
@@ -23,42 +24,12 @@ use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::config;
 use crate::errors::{Error, Result, ResultExt as _, whatever};
 
-pub fn build_connector(config: config::ConnectTo) -> Result<Connector> {
-    match config {
-        config::ConnectTo::Tcp { addr } => Ok(Connector::Tcp(TcpConnectTo::new(addr))),
-        config::ConnectTo::Tls {
-            addr,
-            client_cert,
-            client_key,
-            server_ca,
-            subject,
-        } => {
-            let connector =
-                TlsConnectTo::try_from_pem(client_cert, client_key, server_ca, subject, addr)?;
-            Ok(Connector::Tls(connector))
-        }
-    }
-}
-
-pub async fn build_listener(config: config::ListenTo) -> Result<Listener> {
-    match config {
-        config::ListenTo::Tcp { addr } => Ok(Listener::Tcp(TcpListener::bind(addr).await?)),
-        config::ListenTo::Tls {
-            subject,
-            addr,
-            server_cert,
-            server_key,
-            client_ca,
-        } => Ok(Listener::Tls(
-            TlsListener::listen(server_cert, server_key, client_ca, subject, addr).await?,
-        )),
-    }
-}
+pub use tokio::net::TcpListener;
 
 /// A bidirectional network stream.
+#[derive(Debug)]
 pub enum Stream {
     Tcp(TcpStream, String),
     Tls(Box<TlsStream<TcpStream>>, String),
@@ -144,7 +115,8 @@ impl fmt::Display for Listener {
                 write!(f, "{}", addr)
             }
             Listener::Tls(s) => {
-                write!(f, "{}", s.addr)
+                let addr = s.listener.local_addr().unwrap();
+                write!(f, "{}", addr)
             }
         }
     }
@@ -183,7 +155,6 @@ impl Listener {
 pub struct TlsListener {
     acceptor: TlsAcceptor,
     listener: TcpListener,
-    addr: SocketAddr,
     #[allow(unused)]
     subject: String,
 }
@@ -192,26 +163,36 @@ impl TlsListener {
     pub async fn listen(
         server_cert: String,
         server_key: String,
-        client_ca: String,
+        client_cert: String,
         subject: String,
         addr: SocketAddr,
     ) -> Result<Self> {
-        let cert_chain = CertificateDer::from_pem_slice(server_cert.as_bytes())?;
-        let key_der = PrivateKeyDer::from_pem_slice(server_key.as_bytes())?;
-        let client_ca = CertificateDer::from_pem_slice(client_ca.as_bytes())?;
+        let cert_chain = CertificateDer::from_pem_slice(server_cert.as_bytes())
+            .context("Failed to parse server cert")?;
+        let key_der = PrivateKeyDer::from_pem_slice(server_key.as_bytes())
+            .context("Failed to parse server key")?;
+        let client_ca = CertificateDer::from_pem_slice(client_cert.as_bytes())
+            .context("Failed to parse client ca")?;
         let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(client_ca)?;
-        let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(root_store)).build()?;
-        let config =
+        root_store
+            .add(client_ca)
+            .context("failed to add client ca to root store")?;
+        let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+            .build()
+            .context("Failed to build client cert verifier")?;
+        debug_assert!(client_cert_verifier.client_auth_mandatory());
+        debug_assert!(client_cert_verifier.offer_client_auth());
+        let mut config =
             rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_client_cert_verifier(client_cert_verifier)
-                .with_single_cert(vec![cert_chain], key_der)?;
+                .with_single_cert(vec![cert_chain], key_der)
+                .context("Failed to build server tls config")?;
+        config.ignore_client_order = true;
         let acceptor = TlsAcceptor::from(Arc::new(config));
         let listener = TcpListener::bind(addr).await?;
         Ok(Self {
             acceptor,
             listener,
-            addr,
             subject,
         })
     }
@@ -254,24 +235,14 @@ fn parse_address(value: &str) -> Result<(AddrKind, SocketAddr)> {
     Ok((typ, addr))
 }
 
-impl TryFrom<String> for Connector {
-    type Error = Error;
-    fn try_from(value: String) -> Result<Self> {
-        Self::try_from(value.as_str())
-    }
-}
-
-impl TryFrom<&str> for Connector {
-    type Error = Error;
-    fn try_from(value: &str) -> Result<Self> {
-        let (typ, addr) = parse_address(value)?;
+impl Connector {
+    pub fn parse_address<T: AsRef<str>>(value: T) -> Result<Self> {
+        let (typ, addr) = parse_address(value.as_ref())?;
         match typ {
             AddrKind::Tcp => Ok(Self::Tcp(TcpConnectTo::new(addr))),
         }
     }
-}
 
-impl Connector {
     pub async fn connect(&self, context: &Context) -> Result<Stream> {
         tokio::select! {
             _ = context.wait_cancel() => Err(Error::cancel()),
@@ -297,21 +268,28 @@ impl TlsConnectTo {
     pub fn try_from_pem(
         client_cert: String,
         client_key: String,
-        server_ca: String,
+        server_cert: String,
         subject: String,
         addr: SocketAddr,
     ) -> Result<Self> {
-        let cert_chain = CertificateDer::from_pem_slice(client_cert.as_bytes())?;
-        let key_der = PrivateKeyDer::from_pem_slice(client_key.as_bytes())?;
-        let server_ca = CertificateDer::from_pem_slice(server_ca.as_bytes())?;
+        let cert_chain = CertificateDer::from_pem_slice(client_cert.as_bytes())
+            .context("Failed to parse client cert")?;
+        let key_der = PrivateKeyDer::from_pem_slice(client_key.as_bytes())
+            .context("Failed to parse client key")?;
+        let server_cert = CertificateDer::from_pem_slice(server_cert.as_bytes())
+            .context("Failed to parse server cert")?;
         let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(server_ca)?;
-        let server_name = ServerName::try_from(subject)?;
+        root_store
+            .add(server_cert)
+            .context("Failed to add server cert to root store")?;
+        let server_name = ServerName::try_from(subject).context("Failed to parse server name")?;
 
-        let config =
+        let mut config =
             rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_root_certificates(root_store)
-                .with_client_auth_cert(vec![cert_chain], key_der)?;
+                .with_client_auth_cert(vec![cert_chain], key_der)
+                .context("Failed to build client tls config")?;
+        config.enable_sni = false;
         let connector = TlsConnector::from(Arc::new(config));
         Ok(Self {
             connector,
@@ -490,14 +468,14 @@ where
 /// This enum represents the different types of messages that can be sent
 /// over the encrypted tunnel connection.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub enum MessageType {
+pub enum MessageKind {
     HandshakeData,
     HandshakeCtrl,
     Connect,
     Ping,
 }
 
-impl MessageType {
+impl MessageKind {
     const HANDSHAKE_DATA: u8 = 0b01000000;
     const HANDSHAKE_CTRL: u8 = 0b10000000;
     const CONNECT: u8 = 0b11000000;
@@ -509,21 +487,47 @@ impl MessageType {
 
     fn from_u8(msg_type: u8) -> Result<Self> {
         match msg_type {
-            Self::HANDSHAKE_DATA => Ok(MessageType::HandshakeData),
-            Self::CONNECT => Ok(MessageType::Connect),
-            Self::HANDSHAKE_CTRL => Ok(MessageType::HandshakeCtrl),
-            Self::PING => Ok(MessageType::Ping),
+            Self::HANDSHAKE_DATA => Ok(MessageKind::HandshakeData),
+            Self::CONNECT => Ok(MessageKind::Connect),
+            Self::HANDSHAKE_CTRL => Ok(MessageKind::HandshakeCtrl),
+            Self::PING => Ok(MessageKind::Ping),
             _ => Err(whatever!("Invalid message type: {}", msg_type)),
         }
     }
 
     fn as_u8(&self) -> u8 {
         match self {
-            MessageType::HandshakeData => Self::HANDSHAKE_DATA,
-            MessageType::Connect => Self::HANDSHAKE_CTRL,
-            MessageType::HandshakeCtrl => Self::HANDSHAKE_CTRL,
-            MessageType::Ping => Self::PING,
+            MessageKind::HandshakeData => Self::HANDSHAKE_DATA,
+            MessageKind::Connect => Self::CONNECT,
+            MessageKind::HandshakeCtrl => Self::HANDSHAKE_CTRL,
+            MessageKind::Ping => Self::PING,
         }
+    }
+}
+
+#[cfg(test)]
+mod test_message_kind {
+    use super::MessageKind;
+
+    #[test]
+    fn test_message_kind() {
+        macro_rules! ensure_exhaustive {
+            ($E:path, $($variant:ident),*) => {
+                {
+                    use $E as E;
+                    let variants = [$(E::$variant),*];
+                    for variant in variants {
+                        match variant {
+                            $(E::$variant => {
+                                let got = E::from_u8(E::$variant.as_u8()).unwrap();
+                                assert_eq!(got, E::$variant);
+                            }),*
+                        }
+                    }
+                }
+            }
+        }
+        ensure_exhaustive!(MessageKind, HandshakeData, HandshakeCtrl, Connect, Ping);
     }
 }
 
@@ -544,7 +548,7 @@ impl Message {
 
     pub fn ping() -> Self {
         let mut message = Self::with_capacity(0);
-        message.set_header(MessageType::Ping, 0);
+        message.set_header(MessageKind::Ping, 0);
         message
     }
 
@@ -555,7 +559,7 @@ impl Message {
     }
 
     pub fn connect_inplace(&mut self, addr: &str) {
-        self.fill(MessageType::Connect, |buf| {
+        self.fill(MessageKind::Connect, |buf| {
             buf.extend_from_slice(addr.as_bytes());
         });
     }
@@ -564,16 +568,16 @@ impl Message {
         let mut buf = BytesMut::with_capacity(capacity + Self::HEADER_SIZE);
         buf.resize(Self::HEADER_SIZE, 0);
         let mut message = Message(buf);
-        message.set_header(MessageType::Ping, 0);
+        message.set_header(MessageKind::Ping, 0);
         message
     }
 
-    pub fn get_type(&self) -> MessageType {
-        MessageType::from_checked_u8(self.0[0] & Self::MSG_TYPE_FLAG)
+    pub fn get_type(&self) -> MessageKind {
+        MessageKind::from_checked_u8(self.0[0] & Self::MSG_TYPE_FLAG)
     }
 
-    fn get_unchecked_type(&self) -> Result<MessageType> {
-        MessageType::from_u8(self.0[0] & Self::MSG_TYPE_FLAG)
+    fn get_unchecked_type(&self) -> Result<MessageKind> {
+        MessageKind::from_u8(self.0[0] & Self::MSG_TYPE_FLAG)
     }
 
     pub fn get_payload_size(&self) -> usize {
@@ -584,7 +588,7 @@ impl Message {
         &self.0[Self::HEADER_SIZE..]
     }
 
-    fn set_header(&mut self, msg_type: MessageType, body_size: usize) {
+    fn set_header(&mut self, msg_type: MessageKind, body_size: usize) {
         let high = (body_size >> 8) as u8;
         let low = (body_size & 0xff) as u8;
         let buf = &mut self.0;
@@ -593,7 +597,7 @@ impl Message {
         buf[1] = low;
     }
 
-    pub fn fill<O, F: FnOnce(&mut BytesMut) -> O>(&mut self, message_type: MessageType, f: F) -> O {
+    pub fn fill<O, F: FnOnce(&mut BytesMut) -> O>(&mut self, message_type: MessageKind, f: F) -> O {
         debug_assert!(
             self.0.len() >= Self::HEADER_SIZE,
             "Invalid message size: {}",
@@ -612,22 +616,25 @@ impl Message {
         output
     }
 
-    pub async fn read_from(reader: &mut Stream) -> Result<Self> {
+    pub async fn read_from(stream: &mut Stream) -> Result<Self> {
         let mut msg = Self::default();
-        msg.read_from_inplace(reader).await?;
+        msg.read_from_inplace(stream).await?;
         Ok(msg)
     }
 
-    pub async fn read_from_inplace(&mut self, reader: &mut Stream) -> Result<()> {
+    pub async fn read_from_inplace(&mut self, stream: &mut Stream) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
-        reader
+        stream
             .read_exact(&mut self.0)
             .await
             .context("Failed to read message header from stream")?;
         self.get_unchecked_type()?;
         let mut payload = self.0.split_off(Self::HEADER_SIZE);
         payload.resize(self.get_payload_size(), 0);
-        reader
+        if payload.is_empty() {
+            return Ok(());
+        }
+        stream
             .read_exact(&mut payload)
             .await
             .context("Failed to read message from stream")?;
@@ -638,20 +645,23 @@ impl Message {
     pub async fn wait_connect_message(
         &mut self,
         context: &Context,
-        reader: &mut Stream,
+        stream: &mut Stream,
     ) -> Result<String> {
         loop {
             tokio::select! {
                 _ = context.wait_cancel() => {
                     return Err(Error::cancel());
                 }
-                r = self.read_from_inplace(reader) => {
+                r = self.read_from_inplace(stream) => {
                     r?;
                 }
             }
             match self.get_type() {
-                MessageType::Ping => continue,
-                MessageType::Connect => break,
+                MessageKind::Ping => {
+                    stream.write_all(self.as_ref()).await?;
+                    continue;
+                }
+                MessageKind::Connect => break,
                 _ => return Err(whatever!("Invalid message type: {:?}", self.get_type())),
             }
         }
@@ -675,8 +685,12 @@ impl AsRef<[u8]> for Message {
 #[cfg(test)]
 mod tests {
 
+    use std::str::FromStr;
+
     use tokio::sync::oneshot;
     use tokio::time::{sleep, timeout};
+
+    use crate::logger;
 
     use super::*;
 
@@ -784,5 +798,127 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.is_timeout());
+    }
+
+    use crate::config::{self, build_connector, build_listener};
+    use log::trace;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn test_tls_stream() {
+        logger::setup_logger(log::LevelFilter::Trace, true);
+        let cert = config::SelfSignedCert::new("example.com");
+        trace!("cert: {:?}", cert);
+        let mut listener = build_listener(config::ListenTo::Tls {
+            subject: cert.subject.clone(),
+            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            server_cert: cert.server_cert.clone(),
+            server_key: cert.server_key,
+            client_cert: cert.client_cert.clone(),
+        })
+        .await
+        .unwrap();
+        let connector = build_connector(config::ConnectTo::Tls {
+            subject: cert.subject,
+            addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
+            client_cert: cert.client_cert,
+            client_key: cert.client_key,
+            server_cert: cert.server_cert,
+        })
+        .unwrap();
+
+        let context = Context::default();
+        let (send, recv) = tokio::join!(connector.connect(&context), listener.accept(&context),);
+        let (mut send, mut recv) = (send.unwrap(), recv.unwrap());
+        send.write_all(b"hello").await.unwrap();
+        let mut buf = [0; b"hello".len()];
+        recv.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf[..], b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_tls_stream_client_auth_fail() {
+        logger::setup_logger(log::LevelFilter::Trace, true);
+        let cert = config::SelfSignedCert::new("example.com");
+        let cert1 = config::SelfSignedCert::new("example.com");
+        trace!("cert: {:?}", cert);
+        let mut listener = build_listener(config::ListenTo::Tls {
+            subject: cert.subject.clone(),
+            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            server_cert: cert.server_cert.clone(),
+            server_key: cert.server_key,
+            client_cert: cert1.client_cert.clone(),
+        })
+        .await
+        .unwrap();
+        let connector = build_connector(config::ConnectTo::Tls {
+            subject: cert.subject,
+            addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
+            client_cert: cert.client_cert,
+            client_key: cert.client_key,
+            server_cert: cert.server_cert,
+        })
+        .unwrap();
+
+        let context = Context::default();
+        let (client, server) = tokio::join!(connector.connect(&context), listener.accept(&context));
+        let server_msg = server.expect_err("server should be error").to_string();
+        trace!("server fail message: {:?}", server_msg);
+        assert!(
+            server_msg.contains("invalid peer certificate"),
+            "{}",
+            server_msg
+        );
+        // With a TLS 1.3 handshake connector.connect(..).await returns Ok
+        // when the server aborts the connection with a fatal alert
+        // after the client's Finished message.
+        // The handshake failure error is only surfaced after a subsequent
+        // read on the returned TlsStream.
+        // With a TLS 1.2 handshake, connector.connect(..).await
+        // returns Err when the server aborts the connection with the same alert.
+        // https://github.com/rustls/rustls/issues/1707
+        client.unwrap().read(&mut [0u8, 1]).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn test_tls_stream_bad_server_cert() {
+        logger::setup_logger(log::LevelFilter::Trace, true);
+        let cert = config::SelfSignedCert::new("example.com");
+        let cert1 = config::SelfSignedCert::new("example.com");
+        trace!("cert: {:?}", cert);
+        let mut listener = build_listener(config::ListenTo::Tls {
+            subject: cert.subject.clone(),
+            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            server_cert: cert.server_cert.clone(),
+            server_key: cert.server_key,
+            client_cert: cert.client_cert.clone(),
+        })
+        .await
+        .unwrap();
+        let connector = build_connector(config::ConnectTo::Tls {
+            subject: cert.subject,
+            addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
+            client_cert: cert.client_cert,
+            client_key: cert.client_key,
+            server_cert: cert1.server_cert,
+        })
+        .unwrap();
+
+        let context = Context::default();
+        let (client, server) = tokio::join!(connector.connect(&context), listener.accept(&context));
+        let server_msg = server.expect_err("server should be error").to_string();
+        let client_msg = client.expect_err("client should be error").to_string();
+        trace!("server fail message: {:?}", server_msg);
+        trace!("client fail message: {:?}", client_msg);
+        assert!(
+            server_msg.contains("received fatal alert: DecryptError"),
+            "{}",
+            server_msg
+        );
+        assert!(
+            client_msg.contains("invalid peer certificate: BadSignature"),
+            "{}",
+            client_msg
+        );
     }
 }

@@ -24,7 +24,7 @@ socket2 = "0.6.1"
 clap = { version = "4.5.52", features = ["derive"] }
 env_logger = "0.11.8"
 chrono = "0.4.42"
-tokio-rustls = "0.26.4"
+tokio-rustls = { version = "0.26.4" }
 rcgen = "0.14.5"
 
 [dev-dependencies]
@@ -34,3 +34,11 @@ tempfile = "3.23.0"
 [[bin]]
 name = "echo-bench"
 path = "benchmark/echo-bench.rs"
+
+[[bin]]
+name = "echo-server"
+path = "benchmark/echo-server.rs"
+
+[[bin]]
+name = "echo-client"
+path = "benchmark/echo-client.rs"

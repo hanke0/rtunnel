@@ -52,3 +52,6 @@ write_tmp_config frps.toml <<__EOF__
 bindPort = 2333
 log.level = "error"
 __EOF__
+
+cargo run -- example-config example.com >tmp/rtunnel.toml
+chmod 600 tmp/rtunnel.toml

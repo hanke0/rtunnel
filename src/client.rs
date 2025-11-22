@@ -8,8 +8,9 @@ use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::config::ClientConfig;
+use crate::config::build_connector;
 use crate::errors::{Result, ResultExt as _, whatever};
-use crate::transport::{Connector, Context, Message, Stream, build_connector};
+use crate::transport::{Connector, Context, Message, Stream};
 
 struct ClientOptions {
     connector: Connector,
@@ -116,12 +117,14 @@ async fn wait_relay(
     mut stream: Stream,
     options: &ClientOptionsRef,
 ) -> Result<()> {
+    debug!("tunnel established, wait connect message: {}", stream);
     let mut message = Message::default();
     let addr = message
         .wait_connect_message(context, &mut stream)
         .await
-        .with_context(|| format!("Failed to wait connect message: {}", stream))?;
+        .context("Failed to wait connect message")?;
     let debug = format!("{}->{}", stream, addr);
+    trace!("tunnel connect message has received: {}", debug);
     options.notify_for_new_tunnel().await;
     match handle_relay(context, stream, options, &addr, &mut message).await {
         Ok((read, write)) => {
@@ -152,7 +155,7 @@ async fn handle_relay(
     if !options.allows.contains(addr) {
         return Err(whatever!("Address not allowed: {}", addr));
     }
-    let mut conn = Connector::try_from(addr.as_str())?
+    let mut conn = Connector::parse_address(addr)?
         .connect(context)
         .await
         .context("Failed to connect to local service")?;

@@ -17,12 +17,12 @@ use tokio::net::TcpStream;
 use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
 
-use rtunnel::{Arguments, Context, build_example_config, run, setup_logger};
+use rtunnel::{Arguments, Context, build_example_tls_config, run, setup_logger};
 
 #[tokio::test]
 async fn test_integration() {
     setup_logger(LevelFilter::Trace, true);
-    let config = build_example_config("example.com");
+    let config = build_example_tls_config("example.com");
     let mut file = NamedTempFile::new().unwrap();
     file.write_all(config.as_bytes()).unwrap();
 
@@ -104,6 +104,10 @@ async fn test_integration() {
     concurrent_test(context.clone(), 8).await;
     // TODO: no more tunnel available. Should we support create tunnel from server side?
     // concurrent_test(context.clone(), 100).await;
+
+    // wait for keep alive ping to be sent
+    sleep(Duration::from_secs(10)).await;
+    concurrent_test(context.clone(), 1).await;
 
     context.cancel();
     listen_handle.await.unwrap();
