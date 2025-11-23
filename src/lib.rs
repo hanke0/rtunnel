@@ -1,3 +1,5 @@
+use std::fs;
+use std::path::PathBuf;
 use std::string::String;
 use std::time::Duration;
 
@@ -32,6 +34,22 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
                     println!("{}", config::build_tcp_example());
                 }
             }
+            0
+        }
+        Commands::SelfSignedCert { subject, output } => {
+            let cert = config::SelfSignedCert::new(&subject);
+            fs::write(output.join("server.crt"), cert.server_cert.clone())
+                .expect("Failed to write server cert");
+            fs::write(output.join("server.key"), cert.server_key)
+                .expect("Failed to write server key");
+            fs::write(output.join("server_ca.crt"), cert.client_cert.clone())
+                .expect("Failed to write server ca cert");
+            fs::write(output.join("client.crt"), cert.client_cert)
+                .expect("Failed to write client cert");
+            fs::write(output.join("client.key"), cert.client_key)
+                .expect("Failed to write client key");
+            fs::write(output.join("client_ca.crt"), cert.server_cert)
+                .expect("Failed to write client ca cert");
             0
         }
         Commands::Client { config } => {
@@ -211,6 +229,17 @@ pub enum Commands {
         )]
         #[clap(value_enum)]
         kind: ExampleConfigKind,
+    },
+    SelfSignedCert {
+        #[arg(help = "subject name for the certificate")]
+        subject: String,
+        #[arg(
+            short = 'o',
+            long = "output",
+            default_value = ".",
+            help = "output directory for the certificate"
+        )]
+        output: PathBuf,
     },
     #[command(
         about = "Run the client to route traffic between the local machine and the tunnel",

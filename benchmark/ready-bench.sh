@@ -48,10 +48,43 @@ localPort = 2335
 remotePort = 2334
 __EOF__
 
+
+write_tmp_config frpc-tls.toml <<__EOF__
+serverAddr = "127.0.0.1"
+serverPort = 2333
+log.level = "error"
+transport.tls.enable = true
+transport.tls.certFile = "tmp/client.crt"
+transport.tls.keyFile = "tmp/client.key"
+transport.tls.trustedCaFile = "tmp/client_ca.crt"
+transport.tls.serverName = "example.com"
+
+
+[[proxies]]
+name = "test-tcp"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 2335
+remotePort = 2334
+
+__EOF__
+
 write_tmp_config frps.toml <<__EOF__
 bindPort = 2333
 log.level = "error"
 __EOF__
 
+write_tmp_config frps-tls.toml <<__EOF__
+bindPort = 2333
+log.level = "error"
+transport.tls.force = true
+transport.tls.certFile = "tmp/server.crt"
+transport.tls.keyFile = "tmp/server.key"
+transport.tls.trustedCaFile = "tmp/server_ca.crt"
+__EOF__
+
 cargo run -- example-config example.com >tmp/rtunnel.toml
-chmod 600 tmp/rtunnel.toml
+cargo run -- example-config --kind tls example.com >tmp/rtunnel-tls.toml
+cargo run -- self-signed-cert example.com -o tmp
+chmod 600 tmp/rtunnel.toml tmp/rtunnel-tls.toml
+chmod 600 tmp/client.key tmp/server.key

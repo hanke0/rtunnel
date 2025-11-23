@@ -35,12 +35,48 @@ run_echo() {
 	echo "echo log: ${echolog}"
 }
 
+run_http() {
+	echo '
+
+worker_processes 1;
+error_log /dev/stderr info;
+pid nginx.pid;
+
+events {
+    worker_connections   2000;
+}
+
+http {
+    server {
+        listen 2335;
+		access_log off;
+
+        location / {
+				return 200 "Hello, World!\n";
+        }
+    }
+}	
+
+' > tmp/nginx.conf
+	nginx -g "daemon off;" -p tmp -c nginx.conf >${echolog} 2>&1 &
+	echopid=$!
+	echo "http log: ${echolog}"
+}
+
 case "$runmode" in
 s | server | serve)
 	run_server
 	;;
 c | client)
 	run_client
+	;;
+http)
+	run_server
+	sleep 1
+	run_client
+	sleep 1
+	run_http
+	sleep 1
 	;;
 *)
 	run_server
@@ -64,7 +100,9 @@ is_alive() {
 	kill -0 $1 >/dev/null 2>&1
 }
 
-test_port() {
+case "$2" in
+test)
+	test_port() {
 	local port=$1
 	data=$(echo "hello" | cargo run --bin echo-client -- 127.0.0.1:$port)
 	echo >&2 "recv data: $data"
@@ -75,3 +113,24 @@ test_port() {
 
 test_port 2335
 test_port 2334
+	;;
+*)
+	while :; do
+		if ! is_alive $server_pid; then
+			echo "server process died"
+			break
+		fi
+		if ! is_alive $client_pid; then
+			echo "client process died"
+			break
+		fi
+		if ! is_alive $echopid; then
+			echo "echo process died"
+			break
+		fi
+		sleep 1
+	done
+	;;
+esac
+
+

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 usage() {
-	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--frp] [--direct] [--tcp]"
+	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--frp] [--direct] [--tcp] [--frp-tls] [--http-rps]"
 	exit 1
 }
 
@@ -17,6 +17,9 @@ bytes=1024
 loops=100
 runmode=rtunnel
 config=tmp/rtunnel.toml
+frpsconfig=tmp/frps.toml
+frpcconfig=tmp/frpc.toml
+http_rps=false
 
 echolistento=127.0.0.1:2335
 echoconnectto=127.0.0.1:2334
@@ -46,6 +49,12 @@ while [ "$#" -gt 0 ]; do
 		runmode=frp
 		shift
 		;;
+	--frp-tls)
+		runmode=frp-tls
+		frpsconfig=tmp/frps-tls.toml
+		frpcconfig=tmp/frpc-tls.toml
+		shift
+		;;
 	--direct)
 		runmode=direct
 		echoconnectto=127.0.0.1:2335
@@ -54,6 +63,10 @@ while [ "$#" -gt 0 ]; do
 	--tcp)
 		runmode=rtunnel-tcp
 		config=tmp/rtunnel-tcp.toml
+		shift
+		;;
+	--http-rps)
+		http_rps=true
 		shift
 		;;
 	*)
@@ -93,10 +106,12 @@ run_server() {
 	direct)
 		return
 		;;
-	frp)
-		tmp/frps -c tmp/frps.toml >"${severlog}" 2>&1 &
+	frp|frp-tls)
+		echo >&2 "frps config: ${frpsconfig}"
+		tmp/frps -c "${frpsconfig}" >"${severlog}" 2>&1 &
 		;;
 	*)
+		echo >&2 "rtunnel config: ${config}"
 		target/release/rtunnel -l error server -c "$config" >"${severlog}" 2>&1 &
 		;;
 	esac
@@ -108,10 +123,12 @@ run_client() {
 	direct)
 		return
 		;;
-	frp)
-		tmp/frpc -c tmp/frpc.toml >${clientlog} 2>&1 &
+	frp|frp-tls)
+		echo >&2 "frpc config: ${frpcconfig}"
+		tmp/frpc -c "${frpcconfig}" >${clientlog} 2>&1 &
 		;;
 	*)
+		echo >&2 "rtunnel config: ${config}"
 		target/release/rtunnel -l error client -c "${config}" >${clientlog} 2>&1 &
 		;;
 	esac
@@ -123,7 +140,7 @@ get_version() {
 	direct)
 		return
 		;;
-	frp)
+	frp|frp-tls)
 		echo "frp" "$(tmp/frpc --version)"
 		;;
 	*)
@@ -132,9 +149,41 @@ get_version() {
 	esac
 }
 
-run_echo_bench() {
-	target/release/echo-bench $echoconnectto $echolistento "$concurrent" "$times" "$bytes" "$loops" 2>${echolog} &
-	echopid=$!
+run_bench() {
+	case "$http_rps" in
+	true)
+		echo '
+
+worker_processes 1;
+error_log /dev/stderr info;
+pid nginx.pid;
+
+events {
+    worker_connections   2000;
+}
+
+http {
+    server {
+        listen 2335;
+		access_log off;
+
+        location / {
+				return 200 "Hello, World!\n";
+        }
+    }
+}	
+
+' > tmp/nginx.conf
+		nginx -g "daemon off;" -c tmp/nginx.conf >${severlog} 2>&1 &
+		echopid=$!
+		ab -n 1000 -c 1 -k -r http://127.0.0.1:2334/
+		kill $echopid
+		;;
+	*)
+		target/release/echo-bench $echoconnectto $echolistento "$concurrent" "$times" "$bytes" "$loops" 2>${echolog} &
+		echopid=$!
+		;;
+	esac
 }
 
 is_alive() {
@@ -166,7 +215,7 @@ sleep 10
 client_cpu=$(get_cpu $client_pid)
 server_cpu=$(get_cpu $server_pid)
 uptime=$(get_uptime)
-run_echo_bench
+run_bench
 sleep 10
 
 echo >&2 "server pid: $server_pid"
