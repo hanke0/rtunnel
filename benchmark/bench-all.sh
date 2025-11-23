@@ -49,5 +49,7 @@ echo "run direct"
 ./benchmark/bench.sh --direct --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
 echo "run rtunnel"
 ./benchmark/bench.sh --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
+echo "run rtunnel-tcp"
+./benchmark/bench.sh --tcp --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
 echo "run frp"
 ./benchmark/bench.sh --frp --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt

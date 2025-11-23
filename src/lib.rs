@@ -1,6 +1,3 @@
-use std::collections::HashSet;
-use std::net::SocketAddr;
-use std::str::FromStr;
 use std::string::String;
 use std::time::Duration;
 
@@ -16,7 +13,6 @@ pub mod logger;
 pub mod server;
 pub mod transport;
 
-use crate::config::Config;
 pub use crate::config::{ClientConfig, ServerConfig};
 pub use crate::logger::setup_logger;
 pub use crate::transport::Context;
@@ -27,13 +23,13 @@ pub use crate::transport::Context;
 /// the appropriate handler based on the selected command.
 pub async fn run(context: &Context, args: Arguments) -> i32 {
     match args.command {
-        Commands::ExampleConfig { subject, typ } => {
+        Commands::ExampleConfig { subject, kind: typ } => {
             match typ {
-                ExampleConfigType::Tls => {
-                    println!("{}", build_example_tls_config(&subject));
+                ExampleConfigKind::Tls => {
+                    println!("{}", config::build_tls_example(&subject));
                 }
-                ExampleConfigType::Tcp => {
-                    println!("{}", build_example_tcp_config());
+                ExampleConfigKind::Tcp => {
+                    println!("{}", config::build_tcp_example());
                 }
             }
             0
@@ -190,7 +186,7 @@ pub struct Arguments {
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum ExampleConfigType {
+pub enum ExampleConfigKind {
     Tls,
     Tcp,
 }
@@ -208,13 +204,13 @@ pub enum Commands {
         #[arg(help = "subject name for the certificate")]
         subject: String,
         #[arg(
-            short = 't',
-            long = "type",
-            help = "config type",
+            short = 'k',
+            long = "kind",
+            help = "transport kind of config",
             default_value = "tls"
         )]
         #[clap(value_enum)]
-        typ: ExampleConfigType,
+        kind: ExampleConfigKind,
     },
     #[command(
         about = "Run the client to route traffic between the local machine and the tunnel",
@@ -244,71 +240,4 @@ pub enum Commands {
         )]
         config: String,
     },
-}
-
-pub fn build_example_tls_config(subject: &str) -> String {
-    let cert = config::SelfSignedCert::new(subject);
-
-    let config = Config {
-        servers: Some(vec![ServerConfig {
-            listen_to: config::ListenTo::Tls {
-                server_cert: cert.server_cert.clone(),
-                server_key: cert.server_key,
-                client_cert: cert.client_cert.clone(),
-                subject: subject.to_string(),
-                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
-            },
-            services: vec![config::Service {
-                listen_to: "tcp://0.0.0.0:2334".to_string(),
-                connect_to: "tcp://127.0.0.1:2335".to_string(),
-            }],
-        }]),
-        clients: Some(vec![ClientConfig {
-            connect_to: config::ConnectTo::Tls {
-                client_cert: cert.client_cert,
-                client_key: cert.client_key,
-                server_cert: cert.server_cert,
-                subject: subject.to_string(),
-                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
-            },
-            idle_connections: 10,
-            allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
-        }]),
-    };
-    toml::to_string(&config).unwrap()
-}
-
-pub fn build_example_tcp_config() -> String {
-    let config = Config {
-        servers: Some(vec![ServerConfig {
-            listen_to: config::ListenTo::Tcp {
-                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
-            },
-            services: vec![config::Service {
-                listen_to: "tcp://0.0.0.0:8001".to_string(),
-                connect_to: "tcp://127.0.0.1:80".to_string(),
-            }],
-        }]),
-        clients: Some(vec![ClientConfig {
-            connect_to: config::ConnectTo::Tcp {
-                addr: SocketAddr::from_str("127.0.0.1:2334").unwrap(),
-            },
-            idle_connections: 10,
-            allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
-        }]),
-    };
-    toml::to_string(&config).unwrap()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn example_config() {
-        let cfg = build_example_tls_config("example.com");
-        assert!(!cfg.is_empty());
-        ServerConfig::from_string(&cfg).unwrap();
-        ClientConfig::from_string(&cfg).unwrap();
-    }
 }

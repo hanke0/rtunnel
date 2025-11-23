@@ -1,7 +1,7 @@
 #!/bin/bash
 
 usage() {
-	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--frp] [--direct]"
+	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--frp] [--direct] [--tcp]"
 	exit 1
 }
 
@@ -16,6 +16,8 @@ concurrent=10
 bytes=1024
 loops=100
 runmode=rtunnel
+config=tmp/rtunnel.toml
+
 echolistento=127.0.0.1:2335
 echoconnectto=127.0.0.1:2334
 while [ "$#" -gt 0 ]; do
@@ -49,6 +51,11 @@ while [ "$#" -gt 0 ]; do
 		echoconnectto=127.0.0.1:2335
 		shift
 		;;
+	--tcp)
+		runmode=rtunnel-tcp
+		config=tmp/rtunnel-tcp.toml
+		shift
+		;;
 	*)
 		usage
 		;;
@@ -73,8 +80,11 @@ trap 'cleanup' EXIT
 
 cargo build --quiet --release --bin echo-bench || exit 1
 case "$runmode" in
-rtunnel)
+rtunnel|rtunnel-tcp)
 	cargo build --quiet --release --bin rtunnel || exit 1
+	cargo run -- example-config example.com >tmp/rtunnel.toml || exit 1
+	cargo run -- example-config --kind tcp example.com >tmp/rtunnel-tcp.toml || exit 1
+	chmod 600 tmp/rtunnel.toml tmp/rtunnel-tcp.toml
 	;;
 esac
 
@@ -87,8 +97,7 @@ run_server() {
 		tmp/frps -c tmp/frps.toml >"${severlog}" 2>&1 &
 		;;
 	*)
-		chmod 600 rtunnel.toml
-		target/release/rtunnel -l error server -c tmp/rtunnel.toml >"${severlog}" 2>&1 &
+		target/release/rtunnel -l error server -c "$config" >"${severlog}" 2>&1 &
 		;;
 	esac
 	server_pid=$!
@@ -103,7 +112,7 @@ run_client() {
 		tmp/frpc -c tmp/frpc.toml >${clientlog} 2>&1 &
 		;;
 	*)
-		target/release/rtunnel -l error client -c tmp/rtunnel.toml >${clientlog} 2>&1 &
+		target/release/rtunnel -l error client -c "${config}" >${clientlog} 2>&1 &
 		;;
 	esac
 	client_pid=$!

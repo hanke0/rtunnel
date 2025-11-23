@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::Parser;
 use log::LevelFilter;
 use log::{error, info};
-use rtunnel::errors::ResultExt;
+use serial_test::serial;
 use tempfile::NamedTempFile;
 use tokio::io;
 use tokio::io::AsyncReadExt;
@@ -17,12 +17,27 @@ use tokio::net::TcpStream;
 use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
 
-use rtunnel::{Arguments, Context, build_example_tls_config, run, setup_logger};
+use rtunnel::errors::ResultExt;
+use rtunnel::{
+    Arguments, Context, config::build_tcp_example, config::build_tls_example, run, setup_logger,
+};
 
 #[tokio::test]
-async fn test_integration() {
+#[serial]
+async fn test_tls_transport() {
+    let config = build_tls_example("example.com");
+    test_integration(&config).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_tcp_transport() {
+    let config = build_tcp_example();
+    test_integration(&config).await;
+}
+
+async fn test_integration(config: &str) {
     setup_logger(LevelFilter::Trace, true);
-    let config = build_example_tls_config("example.com");
     let mut file = NamedTempFile::new().unwrap();
     file.write_all(config.as_bytes()).unwrap();
 

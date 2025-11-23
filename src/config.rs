@@ -3,6 +3,7 @@ use std::fmt::{self, Display};
 use std::fs::{self, File};
 use std::io::Read;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::string::String;
 
 use rcgen::generate_simple_self_signed;
@@ -207,6 +208,60 @@ impl ClientConfig {
     }
 }
 
+pub fn build_tls_example(subject: &str) -> String {
+    let cert = SelfSignedCert::new(subject);
+
+    let config = Config {
+        servers: Some(vec![ServerConfig {
+            listen_to: ListenTo::Tls {
+                server_cert: cert.server_cert.clone(),
+                server_key: cert.server_key,
+                client_cert: cert.client_cert.clone(),
+                subject: subject.to_string(),
+                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+            },
+            services: vec![Service {
+                listen_to: "tcp://0.0.0.0:2334".to_string(),
+                connect_to: "tcp://127.0.0.1:2335".to_string(),
+            }],
+        }]),
+        clients: Some(vec![ClientConfig {
+            connect_to: ConnectTo::Tls {
+                client_cert: cert.client_cert,
+                client_key: cert.client_key,
+                server_cert: cert.server_cert,
+                subject: subject.to_string(),
+                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+            },
+            idle_connections: 10,
+            allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
+        }]),
+    };
+    toml::to_string(&config).unwrap()
+}
+
+pub fn build_tcp_example() -> String {
+    let config = Config {
+        servers: Some(vec![ServerConfig {
+            listen_to: ListenTo::Tcp {
+                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+            },
+            services: vec![Service {
+                listen_to: "tcp://0.0.0.0:2334".to_string(),
+                connect_to: "tcp://127.0.0.1:2335".to_string(),
+            }],
+        }]),
+        clients: Some(vec![ClientConfig {
+            connect_to: ConnectTo::Tcp {
+                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+            },
+            idle_connections: 10,
+            allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
+        }]),
+    };
+    toml::to_string(&config).unwrap()
+}
+
 fn read_config_file(path: &str) -> Result<String> {
     check_config_perm(path).with_context(|| format!("Failed to get file permissions {}", path))?;
     let mut file = File::open(path).with_context(|| format!("Failed to open {}", path))?;
@@ -245,5 +300,25 @@ fn check_config_perm(path: &str) -> Result<()> {
     {
         _ = permissions;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn example_tls_config() {
+        let cfg = build_tls_example("example.com");
+        assert!(!cfg.is_empty());
+        ServerConfig::from_string(&cfg).unwrap();
+        ClientConfig::from_string(&cfg).unwrap();
+    }
+    #[test]
+    fn example_tcp_config() {
+        let cfg = build_tcp_example();
+        assert!(!cfg.is_empty());
+        ServerConfig::from_string(&cfg).unwrap();
+        ClientConfig::from_string(&cfg).unwrap();
     }
 }
