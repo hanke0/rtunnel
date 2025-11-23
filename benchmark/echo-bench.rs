@@ -64,9 +64,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         metrics.connect_failed.load(Ordering::SeqCst)
     );
     println!(
-        "connect_spend_ns: {}",
-        metrics.connect_spend_ns.load(Ordering::SeqCst)
-            / metrics.connect_success.load(Ordering::SeqCst).max(1)
+        "connect_spend: {:?}",
+        Duration::from_nanos(
+            (metrics.connect_spend_ns.load(Ordering::SeqCst)
+                / metrics.connect_success.load(Ordering::SeqCst).max(1)) as u64
+        )
     );
     println!(
         "transfer_success: {}",
@@ -77,7 +79,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         metrics.transfer_failed.load(Ordering::SeqCst)
     );
     println!(
-        "transfer_spend_ns: {:?}",
+        "transfer_spend: {:?}",
         Duration::from_nanos(metrics.transfer_spend_ns.load(Ordering::SeqCst) as u64)
     );
     println!(
