@@ -11,12 +11,11 @@ use tokio::time::sleep;
 pub mod client;
 pub mod config;
 pub mod errors;
-pub mod logger;
+pub mod observe;
 pub mod server;
 pub mod transport;
 
 pub use crate::config::{ClientConfig, ServerConfig};
-pub use crate::logger::setup_logger;
 pub use crate::transport::Context;
 
 /// Runs the rtunnel application based on the provided CLI options.

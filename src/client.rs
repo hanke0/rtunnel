@@ -7,18 +7,17 @@ use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::config::ClientConfig;
-use crate::config::build_connector;
 use crate::errors::{Result, ResultExt as _, whatever};
-use crate::transport::{Connector, Context, Message, Stream, copy_bidirectional_flush};
+use crate::transport::{Connector, Context, Message, copy_bidirectional_flush};
 
-struct ClientOptions {
-    connector: Connector,
+struct ClientOptions<T: Connector> {
+    connector: T,
     allows: HashSet<String>,
     idle_connections: i32,
     notify: Sender<()>,
 }
 
-impl ClientOptions {
+impl<T: Connector> ClientOptions<T> {
     async fn notify_for_new_tunnel(&self) {
         match self.notify.send(()).await {
             Ok(_) => {}

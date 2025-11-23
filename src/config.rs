@@ -11,40 +11,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, ResultExt as _};
-use crate::transport::{Connector, Listener, TcpConnectTo, TcpListener, TlsConnectTo, TlsListener};
+use crate::transport::{
+    Connector, Listener, PlainTcpConnector, PlainTcpConnectorConfig, PlainTcpListener,
+    PlainTcpListenerConfig, TlsConnector, TlsConnector, TlsConnectorConfig, TlsListenerConfig,
+    Transport,
+};
 use crate::whatever;
-
-pub fn build_connector(config: ConnectTo) -> Result<Connector> {
-    match config {
-        ConnectTo::Tcp { addr } => Ok(Connector::Tcp(TcpConnectTo::new(addr))),
-        ConnectTo::Tls {
-            addr,
-            client_cert,
-            client_key,
-            server_cert,
-            subject,
-        } => {
-            let connector =
-                TlsConnectTo::try_from_pem(client_cert, client_key, server_cert, subject, addr)?;
-            Ok(Connector::Tls(connector))
-        }
-    }
-}
-
-pub async fn build_listener(config: ListenTo) -> Result<Listener> {
-    match config {
-        ListenTo::Tcp { addr } => Ok(Listener::Tcp(TcpListener::bind(addr).await?)),
-        ListenTo::Tls {
-            subject,
-            addr,
-            server_cert,
-            server_key,
-            client_cert,
-        } => Ok(Listener::Tls(
-            TlsListener::listen(server_cert, server_key, client_cert, subject, addr).await?,
-        )),
-    }
-}
 
 /// Root configuration structure that can contain both server and client configurations.
 ///
@@ -85,22 +57,16 @@ pub struct ClientConfig {
 #[serde(tag = "type")]
 pub enum ConnectTo {
     #[serde(rename = "tcp")]
-    Tcp { addr: SocketAddr },
+    Tcp(PlainTcpConnectorConfig),
     #[serde(rename = "tls")]
-    Tls {
-        subject: String,
-        addr: SocketAddr,
-        client_cert: String,
-        client_key: String,
-        server_cert: String,
-    },
+    Tls(TlsConnectorConfig),
 }
 
 impl Display for ConnectTo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tcp { addr } => write!(f, "tcp://{}", addr),
-            Self::Tls { addr, .. } => write!(f, "tls://{}", addr),
+            Self::Tcp(config) => write!(f, "tcp://{}", config.addr),
+            Self::Tls(config) => write!(f, "tls://{}", config.addr),
         }
     }
 }
@@ -109,15 +75,9 @@ impl Display for ConnectTo {
 #[serde(tag = "type")]
 pub enum ListenTo {
     #[serde(rename = "tcp")]
-    Tcp { addr: SocketAddr },
+    Tcp(PlainTcpListenerConfig),
     #[serde(rename = "tls")]
-    Tls {
-        subject: String,
-        addr: SocketAddr,
-        server_cert: String,
-        server_key: String,
-        client_cert: String,
-    },
+    Tls(TlsListenerConfig),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -146,8 +106,8 @@ impl SelfSignedCert {
 impl Display for ListenTo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tcp { addr } => write!(f, "tcp://{}", addr),
-            Self::Tls { addr, .. } => write!(f, "tls://{}", addr),
+            Self::Tcp(config) => write!(f, "tcp://{}", config.addr),
+            Self::Tls(config) => write!(f, "tls://{}", config.addr),
         }
     }
 }
@@ -198,9 +158,9 @@ impl ClientConfig {
             }
             let mut allowed_addresses = HashSet::new();
             for allowed_address in client.allowed_addresses.iter() {
-                let connector = Connector::parse_address(allowed_address)
+                let transport = Transport::from_str(allowed_address)
                     .context("Failed to parse allowed address")?;
-                allowed_addresses.insert(connector.to_string());
+                allowed_addresses.insert(transport.to_string());
             }
             client.allowed_addresses = allowed_addresses;
         }
@@ -213,26 +173,26 @@ pub fn build_tls_example(subject: &str) -> String {
 
     let config = Config {
         servers: Some(vec![ServerConfig {
-            listen_to: ListenTo::Tls {
+            listen_to: ListenTo::Tls(TlsListenerConfig {
                 server_cert: cert.server_cert.clone(),
                 server_key: cert.server_key,
                 client_cert: cert.client_cert.clone(),
                 subject: subject.to_string(),
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
-            },
+            }),
             services: vec![Service {
                 listen_to: "tcp://0.0.0.0:2334".to_string(),
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
             }],
         }]),
         clients: Some(vec![ClientConfig {
-            connect_to: ConnectTo::Tls {
+            connect_to: ConnectTo::Tls(TlsConnectorConfig {
                 client_cert: cert.client_cert,
                 client_key: cert.client_key,
                 server_cert: cert.server_cert,
                 subject: subject.to_string(),
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
-            },
+            }),
             idle_connections: 10,
             allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
         }]),
@@ -243,18 +203,18 @@ pub fn build_tls_example(subject: &str) -> String {
 pub fn build_tcp_example() -> String {
     let config = Config {
         servers: Some(vec![ServerConfig {
-            listen_to: ListenTo::Tcp {
+            listen_to: ListenTo::Tcp(PlainTcpListenerConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
-            },
+            }),
             services: vec![Service {
                 listen_to: "tcp://0.0.0.0:2334".to_string(),
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
             }],
         }]),
         clients: Some(vec![ClientConfig {
-            connect_to: ConnectTo::Tcp {
+            connect_to: ConnectTo::Tcp(PlainTcpConnectorConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
-            },
+            }),
             idle_connections: 10,
             allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
         }]),

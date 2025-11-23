@@ -20,7 +20,7 @@ use tokio::time::sleep;
 
 use rtunnel::errors::ResultExt;
 use rtunnel::{
-    Arguments, Context, config::build_tcp_example, config::build_tls_example, run, setup_logger,
+    Arguments, Context, config::build_tcp_example, config::build_tls_example, run, setup,
 };
 
 #[tokio::test]
@@ -38,7 +38,7 @@ async fn test_tcp_transport() {
 }
 
 async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()> {
-    setup_logger(LevelFilter::Trace, true);
+    setup(LevelFilter::Trace, true);
     let mut file = NamedTempFile::new().unwrap();
     file.write_all(config.as_bytes()).unwrap();
 

@@ -1,9 +1,7 @@
-use core::task::{self, Poll};
 use std::fmt;
-use std::io;
+use std::fmt::Display;
+use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::pin::Pin;
-use std::pin::pin;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,175 +10,80 @@ use bytes::BytesMut;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::server::WebPkiClientVerifier;
+use serde::{Deserialize, Serialize};
 use socket2::TcpKeepalive;
 use tokio::io::AsyncWriteExt;
-use tokio::io::ReadBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::TlsStream;
+use tokio_rustls::TlsConnector as TokioTlsConnector;
+use tokio_rustls::client::TlsStream as TlsClientStream;
+use tokio_rustls::server::TlsStream as TlsServerStream;
 use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::Instrument;
 
 use crate::errors::{Error, Result, ResultExt as _, whatever};
 
 pub use tokio::net::TcpListener;
 
-/// A bidirectional network stream.
-#[derive(Debug)]
-pub enum Stream {
-    Tcp(TcpStream, String),
-    Tls(Box<TlsStream<TcpStream>>, String),
-}
-
-impl fmt::Display for Stream {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Stream::Tcp(_, s) => f.write_str(s),
-            Stream::Tls(_, s) => f.write_str(s),
-        }
-    }
-}
-
-impl AsyncRead for Stream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut task::Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(s, _) => pin!(s).poll_read(cx, buf),
-            Stream::Tls(s, _) => pin!(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for Stream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut task::Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Stream::Tcp(s, _) => pin!(s).poll_write(cx, buf),
-            Stream::Tls(s, _) => pin!(s).poll_write(cx, buf),
-        }
-    }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(s, _) => pin!(s).poll_flush(cx),
-            Stream::Tls(s, _) => pin!(s).poll_flush(cx),
-        }
-    }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(s, _) => pin!(s).poll_shutdown(cx),
-            Stream::Tls(s, _) => pin!(s).poll_shutdown(cx),
-        }
-    }
-}
-
-impl Stream {
-    pub fn from_tls_stream(stream: TlsStream<TcpStream>) -> Self {
-        let local_addr = stream.get_ref().0.local_addr().unwrap();
-        let peer_addr = stream.get_ref().0.peer_addr().unwrap();
-        let display: String = format!("{}-{}", local_addr, peer_addr);
-        Stream::Tls(Box::new(stream), display)
-    }
-
-    pub fn from_tcp_stream(stream: TcpStream) -> Self {
-        let local_addr = stream.local_addr().unwrap();
-        let peer_addr = stream.peer_addr().unwrap();
-        let display = format!("{}-{}", local_addr, peer_addr);
-        Stream::Tcp(stream, display)
-    }
-}
-
 #[inline]
-pub async fn copy_bidirectional_flush(mut a: Stream, mut b: Stream) -> Result<(u64, u64)> {
+pub async fn copy_bidirectional_flush<A, B>(mut a: A, mut b: B) -> Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin + Sized,
+    B: AsyncRead + AsyncWrite + Unpin + Sized,
+{
     Ok(tokio::io::copy_bidirectional(&mut a, &mut b).await?)
 }
 
-pub trait Transport {
-    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize>>;
+pub trait Listener: Sized + Send + Sync + Display + 'static {
+    type Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static;
+    type Config;
+
+    fn new(config: Self::Config) -> impl Future<Output = Result<Self>> + Send + Sync;
+    fn accept(&self) -> impl Future<Output = Result<(Self::Stream, String)>> + Send + Sync;
 }
 
-/// Network listener for accepting incoming connections.
-///
-/// This enum represents different types of network listeners that can accept
-/// incoming connections and create streams.
-pub enum Listener {
-    Tcp(TcpListener),
-    Tls(TlsListener),
+pub trait Connector: Sized + Send + Sync + Display + 'static {
+    type Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static;
+    type Config;
+
+    fn new(config: Self::Config) -> impl Future<Output = Result<Self>> + Send;
+    fn connect(&self) -> impl Future<Output = Result<(Self::Stream, String)>> + Send;
 }
 
-impl fmt::Display for Listener {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Listener::Tcp(s) => {
-                let addr = s.local_addr().unwrap();
-                write!(f, "{}", addr)
-            }
-            Listener::Tls(s) => {
-                let addr = s.listener.local_addr().unwrap();
-                write!(f, "{}", addr)
-            }
-        }
-    }
-}
-
-impl Listener {
-    pub async fn bind(addr: &str) -> Result<Self> {
-        let (typ, addr) = parse_address(addr)?;
-        match typ {
-            AddrKind::Tcp => Ok(Self::Tcp(TcpListener::bind(addr).await?)),
-        }
-    }
-
-    pub async fn accept(&mut self, context: &Context) -> Result<Stream> {
-        tokio::select! {
-            _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.accept_impl() => r,
-        }
-    }
-
-    async fn accept_impl(&mut self) -> Result<Stream> {
-        match self {
-            Listener::Tcp(s) => {
-                let (stream, _) = s.accept().await?;
-                set_keep_alive(&stream)?;
-                Ok(Stream::from_tcp_stream(stream))
-            }
-            Listener::Tls(s) => {
-                let stream = s.accept().await?;
-                Ok(Stream::from_tls_stream(stream))
-            }
-        }
-    }
+#[derive(Deserialize, Serialize, Clone)]
+pub struct TlsListenerConfig {
+    pub server_cert: String,
+    pub server_key: String,
+    pub client_cert: String,
+    pub subject: String,
+    pub addr: SocketAddr,
 }
 
 pub struct TlsListener {
     acceptor: TlsAcceptor,
     listener: TcpListener,
-    #[allow(unused)]
-    subject: String,
+    id: String,
 }
 
-impl TlsListener {
-    pub async fn listen(
-        server_cert: String,
-        server_key: String,
-        client_cert: String,
-        subject: String,
-        addr: SocketAddr,
-    ) -> Result<Self> {
-        let cert_chain = CertificateDer::from_pem_slice(server_cert.as_bytes())
+impl fmt::Display for TlsListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.id)
+    }
+}
+
+impl Listener for TlsListener {
+    type Stream = TlsServerStream<TcpStream>;
+    type Config = TlsListenerConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        let cert_chain = CertificateDer::from_pem_slice(config.server_cert.as_bytes())
             .context("Failed to parse server cert")?;
-        let key_der = PrivateKeyDer::from_pem_slice(server_key.as_bytes())
+        let key_der = PrivateKeyDer::from_pem_slice(config.server_key.as_bytes())
             .context("Failed to parse server key")?;
-        let client_ca = CertificateDer::from_pem_slice(client_cert.as_bytes())
+        let client_ca = CertificateDer::from_pem_slice(config.client_cert.as_bytes())
             .context("Failed to parse client ca")?;
         let mut root_store = rustls::RootCertStore::empty();
         root_store
@@ -191,146 +94,199 @@ impl TlsListener {
             .context("Failed to build client cert verifier")?;
         debug_assert!(client_cert_verifier.client_auth_mandatory());
         debug_assert!(client_cert_verifier.offer_client_auth());
-        let mut config =
+        let mut server_config =
             rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_client_cert_verifier(client_cert_verifier)
                 .with_single_cert(vec![cert_chain], key_der)
                 .context("Failed to build server tls config")?;
-        config.ignore_client_order = true;
-        let acceptor = TlsAcceptor::from(Arc::new(config));
-        let listener = TcpListener::bind(addr).await?;
+        server_config.ignore_client_order = true;
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+        let listener = TcpListener::bind(config.addr).await?;
+        let id = format!("tls://{}", listener.local_addr()?);
         Ok(Self {
             acceptor,
             listener,
-            subject,
+            id,
         })
     }
 
-    async fn accept(&self) -> Result<TlsStream<TcpStream>> {
+    async fn accept(&self) -> Result<(Self::Stream, String)> {
         let (stream, _) = self.listener.accept().await?;
         set_keep_alive(&stream)?;
+        let local_addr = stream.local_addr()?.to_string();
+        let peer_addr = stream.peer_addr()?.to_string();
         let r = self.acceptor.accept(stream).await?;
-        Ok(TlsStream::from(r))
+        Ok((r, format!("{}-{}", local_addr, peer_addr)))
     }
 }
 
-pub enum Connector {
-    Tls(TlsConnectTo),
-    Tcp(TcpConnectTo),
+#[derive(Deserialize, Serialize, Clone)]
+pub struct PlainTcpListenerConfig {
+    pub addr: SocketAddr,
 }
 
-impl fmt::Display for Connector {
+pub struct PlainTcpListener {
+    listener: TcpListener,
+    id: String,
+}
+
+impl fmt::Display for PlainTcpListener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Connector::Tls(s) => write!(f, "tls://{}", s.addr),
-            Connector::Tcp(s) => write!(f, "tcp://{}", s.addr),
-        }
-    }
-}
-enum AddrKind {
-    Tcp,
-}
-
-fn parse_address(value: &str) -> Result<(AddrKind, SocketAddr)> {
-    let (typ, addr) = if value.starts_with("tcp://") {
-        (AddrKind::Tcp, value.strip_prefix("tcp://").unwrap())
-    } else {
-        (AddrKind::Tcp, value)
-    };
-    let addr = addr
-        .to_socket_addrs()?
-        .next()
-        .ok_or(whatever!("Invalid address"))?;
-    Ok((typ, addr))
-}
-
-impl Connector {
-    pub fn parse_address<T: AsRef<str>>(value: T) -> Result<Self> {
-        let (typ, addr) = parse_address(value.as_ref())?;
-        match typ {
-            AddrKind::Tcp => Ok(Self::Tcp(TcpConnectTo::new(addr))),
-        }
-    }
-
-    pub async fn connect(&self, context: &Context) -> Result<Stream> {
-        tokio::select! {
-            _ = context.wait_cancel() => Err(Error::cancel()),
-            r = self.connect_impl() => Ok(r?),
-        }
-    }
-
-    async fn connect_impl(&self) -> Result<Stream> {
-        match self {
-            Connector::Tls(s) => s.connect().await,
-            Connector::Tcp(s) => s.connect().await,
-        }
+        f.write_str(&self.id)
     }
 }
 
-pub struct TlsConnectTo {
-    connector: TlsConnector,
+impl Listener for PlainTcpListener {
+    type Stream = TcpStream;
+    type Config = PlainTcpListenerConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        let listener = TcpListener::bind(config.addr).await?;
+        let id = format!("tcp://{}", listener.local_addr()?);
+        Ok(Self { listener, id })
+    }
+
+    async fn accept(&self) -> Result<(Self::Stream, String)> {
+        let (stream, _) = self.listener.accept().await?;
+        set_keep_alive(&stream)?;
+        let local_addr = stream.local_addr()?.to_string();
+        let peer_addr = stream.peer_addr()?.to_string();
+        Ok((stream, format!("{}-{}", local_addr, peer_addr)))
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct TlsConnectorConfig {
+    pub client_cert: String,
+    pub client_key: String,
+    pub server_cert: String,
+    pub subject: String,
+    pub addr: SocketAddr,
+}
+
+pub struct TlsConnector {
+    connector: TokioTlsConnector,
     addr: SocketAddr,
     server_name: ServerName<'static>,
 }
 
-impl TlsConnectTo {
-    pub fn try_from_pem(
-        client_cert: String,
-        client_key: String,
-        server_cert: String,
-        subject: String,
-        addr: SocketAddr,
-    ) -> Result<Self> {
-        let cert_chain = CertificateDer::from_pem_slice(client_cert.as_bytes())
+impl fmt::Display for TlsConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tls://{}", self.addr)
+    }
+}
+
+impl Connector for TlsConnector {
+    type Stream = TlsClientStream<TcpStream>;
+    type Config = TlsConnectorConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        let cert_chain = CertificateDer::from_pem_slice(config.client_cert.as_bytes())
             .context("Failed to parse client cert")?;
-        let key_der = PrivateKeyDer::from_pem_slice(client_key.as_bytes())
+        let key_der = PrivateKeyDer::from_pem_slice(config.client_key.as_bytes())
             .context("Failed to parse client key")?;
-        let server_cert = CertificateDer::from_pem_slice(server_cert.as_bytes())
+        let server_cert = CertificateDer::from_pem_slice(config.server_cert.as_bytes())
             .context("Failed to parse server cert")?;
         let mut root_store = rustls::RootCertStore::empty();
         root_store
             .add(server_cert)
             .context("Failed to add server cert to root store")?;
-        let server_name = ServerName::try_from(subject).context("Failed to parse server name")?;
+        let server_name =
+            ServerName::try_from(config.subject).context("Failed to parse server name")?;
 
-        let mut config =
+        let mut client_config =
             rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
                 .with_root_certificates(root_store)
                 .with_client_auth_cert(vec![cert_chain], key_der)
                 .context("Failed to build client tls config")?;
-        config.enable_sni = false;
-        let connector = TlsConnector::from(Arc::new(config));
+        client_config.enable_sni = false;
+        let connector = TokioTlsConnector::from(Arc::new(client_config));
         Ok(Self {
             connector,
-            addr,
+            addr: config.addr,
             server_name,
         })
     }
 
-    pub async fn connect(&self) -> Result<Stream> {
+    async fn connect(&self) -> Result<(Self::Stream, String)> {
         let stream = TcpStream::connect(self.addr).await?;
+        let local_addr = stream.local_addr()?.to_string();
+        let peer_addr = stream.peer_addr()?.to_string();
         set_keep_alive(&stream)?;
-        let stream = self
+        let addr = stream.local_addr()?.to_string();
+        let r = self
             .connector
             .connect(self.server_name.clone(), stream)
+            .instrument(tracing::info_span!("client {}", addr))
             .await?;
-        Ok(Stream::from_tls_stream(stream.into()))
+        Ok((r, format!("{}-{}", local_addr, peer_addr)))
     }
 }
 
-pub struct TcpConnectTo {
+#[derive(Deserialize, Serialize, Clone)]
+pub struct PlainTcpConnectorConfig {
+    pub addr: SocketAddr,
+}
+
+pub struct PlainTcpConnector {
     addr: SocketAddr,
 }
 
-impl TcpConnectTo {
-    pub fn new(addr: SocketAddr) -> Self {
-        Self { addr }
+impl fmt::Display for PlainTcpConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tcp://{}", self.addr)
+    }
+}
+
+impl Connector for PlainTcpConnector {
+    type Stream = TcpStream;
+    type Config = PlainTcpConnectorConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        Ok(Self { addr: config.addr })
     }
 
-    pub async fn connect(&self) -> Result<Stream> {
+    async fn connect(&self) -> Result<(Self::Stream, String)> {
         let stream = TcpStream::connect(self.addr).await?;
+        let local_addr = stream.local_addr()?.to_string();
+        let peer_addr = stream.peer_addr()?.to_string();
         set_keep_alive(&stream)?;
-        Ok(Stream::from_tcp_stream(stream))
+        Ok((stream, format!("{local_addr}-{peer_addr}")))
+    }
+}
+
+pub enum Transport {
+    Tcp(SocketAddr),
+}
+
+impl Transport {
+    pub fn from_str(value: &str) -> Result<Self> {
+        parse_address(value)
+    }
+}
+
+impl fmt::Display for Transport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Transport::Tcp(addr) => write!(f, "tcp://{}", addr),
+        }
+    }
+}
+
+fn parse_address(value: &str) -> Result<Transport> {
+    if value.starts_with("tcp://") {
+        let addr = value.strip_prefix("tcp://").unwrap();
+        let addr = addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(whatever!("Invalid address"))?;
+        Ok(Transport::Tcp(addr))
+    } else {
+        let addr = value
+            .to_socket_addrs()?
+            .next()
+            .ok_or(whatever!("Invalid address"))?;
+        Ok(Transport::Tcp(addr))
     }
 }
 
@@ -625,13 +581,13 @@ impl Message {
         output
     }
 
-    pub async fn read_from(stream: &mut Stream) -> Result<Self> {
+    pub async fn read_from<T: Listener>(stream: &mut T::Stream) -> Result<Self> {
         let mut msg = Self::default();
-        msg.read_from_inplace(stream).await?;
+        msg.read_from_inplace::<T>(stream).await?;
         Ok(msg)
     }
 
-    pub async fn read_from_inplace(&mut self, stream: &mut Stream) -> Result<()> {
+    pub async fn read_from_inplace<T: Listener>(&mut self, stream: &mut T::Stream) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
         stream
             .read_exact(&mut self.0)
@@ -651,17 +607,17 @@ impl Message {
         Ok(())
     }
 
-    pub async fn wait_connect_message(
+    pub async fn wait_connect_message<T: Listener>(
         &mut self,
         context: &Context,
-        stream: &mut Stream,
+        stream: &mut T::Stream,
     ) -> Result<String> {
         loop {
             tokio::select! {
                 _ = context.wait_cancel() => {
                     return Err(Error::cancel());
                 }
-                r = self.read_from_inplace(stream) => {
+                r = self.read_from_inplace::<T>(stream) => {
                     r?;
                 }
             }
@@ -699,7 +655,7 @@ mod tests {
     use tokio::sync::oneshot;
     use tokio::time::{sleep, timeout};
 
-    use crate::logger;
+    use crate::observe;
 
     use super::*;
 
@@ -809,36 +765,36 @@ mod tests {
         assert!(err.is_timeout());
     }
 
-    use crate::config::{self, build_connector, build_listener};
+    use crate::config;
     use log::trace;
+    use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
     async fn test_tls_stream() {
-        logger::setup_logger(log::LevelFilter::Trace, true);
+        observe::setup_testing();
         let cert = config::SelfSignedCert::new("example.com");
-        trace!("cert: {:?}", cert);
-        let mut listener = build_listener(config::ListenTo::Tls {
-            subject: cert.subject.clone(),
-            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        let listener = TlsListener::new(TlsListenerConfig {
             server_cert: cert.server_cert.clone(),
             server_key: cert.server_key,
             client_cert: cert.client_cert.clone(),
+            subject: cert.subject.clone(),
+            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         })
         .await
         .unwrap();
-        let connector = build_connector(config::ConnectTo::Tls {
+        let connector = TlsConnector::new(TlsConnectorConfig {
             subject: cert.subject,
             addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert.server_cert,
         })
+        .await
         .unwrap();
+        let (client, server) = tokio::join!(connector.connect(), listener.accept(),);
 
-        let context = Context::default();
-        let (send, recv) = tokio::join!(connector.connect(&context), listener.accept(&context),);
-        let (mut send, mut recv) = (send.unwrap(), recv.unwrap());
+        let ((mut send, ..), (mut recv, ..)) = (client.unwrap(), server.unwrap());
         send.write_all(b"hello").await.unwrap();
         let mut buf = [0; b"hello".len()];
         recv.read_exact(&mut buf).await.unwrap();
@@ -847,30 +803,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_tls_stream_client_auth_fail() {
-        logger::setup_logger(log::LevelFilter::Trace, true);
+        observe::setup_testing();
         let cert = config::SelfSignedCert::new("example.com");
         let cert1 = config::SelfSignedCert::new("example.com");
-        trace!("cert: {:?}", cert);
-        let mut listener = build_listener(config::ListenTo::Tls {
-            subject: cert.subject.clone(),
-            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+
+        let listener = TlsListener::new(TlsListenerConfig {
             server_cert: cert.server_cert.clone(),
             server_key: cert.server_key,
             client_cert: cert1.client_cert.clone(),
+            subject: cert.subject.clone(),
+            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         })
         .await
         .unwrap();
-        let connector = build_connector(config::ConnectTo::Tls {
+        let connector = TlsConnector::new(TlsConnectorConfig {
             subject: cert.subject,
             addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert.server_cert,
         })
+        .await
         .unwrap();
+        let (client, server) = tokio::join!(connector.connect(), listener.accept(),);
 
-        let context = Context::default();
-        let (client, server) = tokio::join!(connector.connect(&context), listener.accept(&context));
         let server_msg = server.expect_err("server should be error").to_string();
         trace!("server fail message: {:?}", server_msg);
         assert!(
@@ -878,6 +834,7 @@ mod tests {
             "{}",
             server_msg
         );
+
         // With a TLS 1.3 handshake connector.connect(..).await returns Ok
         // when the server aborts the connection with a fatal alert
         // after the client's Finished message.
@@ -886,35 +843,34 @@ mod tests {
         // With a TLS 1.2 handshake, connector.connect(..).await
         // returns Err when the server aborts the connection with the same alert.
         // https://github.com/rustls/rustls/issues/1707
-        client.unwrap().read(&mut [0u8, 1]).await.unwrap_err();
+        client.unwrap().0.read(&mut [0u8, 1]).await.unwrap_err();
     }
 
     #[tokio::test]
     async fn test_tls_stream_bad_server_cert() {
-        logger::setup_logger(log::LevelFilter::Trace, true);
+        observe::setup_testing();
         let cert = config::SelfSignedCert::new("example.com");
         let cert1 = config::SelfSignedCert::new("example.com");
-        trace!("cert: {:?}", cert);
-        let mut listener = build_listener(config::ListenTo::Tls {
-            subject: cert.subject.clone(),
-            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        let listener = TlsListener::new(TlsListenerConfig {
             server_cert: cert.server_cert.clone(),
             server_key: cert.server_key,
             client_cert: cert.client_cert.clone(),
+            subject: cert.subject.clone(),
+            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
         })
         .await
         .unwrap();
-        let connector = build_connector(config::ConnectTo::Tls {
+        let connector = TlsConnector::new(TlsConnectorConfig {
             subject: cert.subject,
             addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert1.server_cert,
         })
+        .await
         .unwrap();
+        let (client, server) = tokio::join!(connector.connect(), listener.accept(),);
 
-        let context = Context::default();
-        let (client, server) = tokio::join!(connector.connect(&context), listener.accept(&context));
         let server_msg = server.expect_err("server should be error").to_string();
         let client_msg = client.expect_err("client should be error").to_string();
         trace!("server fail message: {:?}", server_msg);
