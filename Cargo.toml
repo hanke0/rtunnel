@@ -4,6 +4,9 @@ version = "0.8.0"
 edition = "2024"
 default-run = "rtunnel"
 
+[features]
+debug = []
+
 [dependencies]
 tokio = { version = "1.48.0", features = ["full"] }
 toml = "0.8.23"

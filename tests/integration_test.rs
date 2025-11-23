@@ -3,10 +3,11 @@ use std::fs;
 use std::io::Write;
 use std::string::String;
 use std::time::Duration;
+use std::time::Instant;
 
 use clap::Parser;
 use log::LevelFilter;
-use log::{error, info};
+use log::{error, info, trace};
 use serial_test::serial;
 use tempfile::NamedTempFile;
 use tokio::io;
@@ -36,7 +37,7 @@ async fn test_tcp_transport() {
     test_integration(&config).await;
 }
 
-async fn test_integration(config: &str) {
+async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()> {
     setup_logger(LevelFilter::Trace, true);
     let mut file = NamedTempFile::new().unwrap();
     file.write_all(config.as_bytes()).unwrap();
@@ -48,7 +49,6 @@ async fn test_integration(config: &str) {
         fs::set_permissions(file.path().display().to_string(), perm).unwrap();
     }
 
-    let context = Context::new();
     let server_context = context.children();
     let file_path = file.path().display().to_string();
     let server_handle = spawn(async move {
@@ -107,6 +107,19 @@ async fn test_integration(config: &str) {
 
     sleep(Duration::from_secs(1)).await;
 
+    async move {
+        context.cancel();
+        listen_handle.await.unwrap();
+        server_handle.await.unwrap();
+        client_handle.await.unwrap();
+        context.wait().await;
+        let _ = file.path();
+    }
+}
+
+async fn test_integration(config: &str) {
+    let context = Context::new();
+    let finish = start_test(&context, config).await;
     let concurrent_test = async |context: Context, n: usize| {
         let mut set = JoinSet::new();
         for _ in 0..n {
@@ -123,14 +136,7 @@ async fn test_integration(config: &str) {
     // wait for keep alive ping to be sent
     sleep(Duration::from_secs(10)).await;
     concurrent_test(context.clone(), 1).await;
-
-    context.cancel();
-    listen_handle.await.unwrap();
-    server_handle.await.unwrap();
-    client_handle.await.unwrap();
-    context.wait().await;
-
-    let _ = file.path();
+    finish.await;
 }
 
 async fn connect_to_echo(context: Context) {
@@ -162,4 +168,41 @@ async fn connect_to_echo(context: Context) {
     info!("echo client {} read {} bytes", addr, got.len());
     assert_eq!(expect.len(), got.len());
     assert_eq!(expect, got);
+}
+
+#[tokio::test]
+#[serial]
+async fn test_connect_spend_time_tls() {
+    let config = build_tls_example("example.com");
+    test_connect_spend_time(&config).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_connect_spend_time_tcp() {
+    let config = build_tcp_example();
+    test_connect_spend_time(&config).await;
+}
+
+async fn test_connect_spend_time(config: &str) {
+    let context = Context::new();
+    let finish = start_test(&context, config).await;
+    let max = Duration::from_millis(1);
+
+    ensure_connect_spend_time("127.0.0.1:2335", max).await;
+    ensure_connect_spend_time("127.0.0.1:2334", max).await;
+    finish.await;
+}
+
+async fn ensure_connect_spend_time(addr: &str, max: Duration) {
+    let start = Instant::now();
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    trace!("connect {} spend: {:?}", addr, start.elapsed());
+    stream.write_i8(1).await.unwrap();
+    stream.read_i8().await.unwrap();
+    let spend = start.elapsed();
+    assert!(
+        spend < max,
+        "assert fail for addr {addr}: {spend:?} < {max:?}"
+    );
 }

@@ -3,14 +3,13 @@ use std::sync::Arc;
 
 use log::{debug, error, info, trace};
 use tokio::io::AsyncWriteExt;
-use tokio::io::copy_bidirectional;
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::config::ClientConfig;
 use crate::config::build_connector;
 use crate::errors::{Result, ResultExt as _, whatever};
-use crate::transport::{Connector, Context, Message, Stream};
+use crate::transport::{Connector, Context, Message, Stream, copy_bidirectional};
 
 struct ClientOptions {
     connector: Connector,
@@ -155,12 +154,12 @@ async fn handle_relay(
     if !options.allows.contains(addr) {
         return Err(whatever!("Address not allowed: {}", addr));
     }
-    let mut conn = Connector::parse_address(addr)?
+    let conn = Connector::parse_address(addr)?
         .connect(context)
         .await
         .context("Failed to connect to local service")?;
     message.connect_inplace("");
     stream.write_all(message.as_ref()).await?;
     debug!("tunnel relay started: {}->{}", &stream, addr);
-    Ok(copy_bidirectional(&mut stream, &mut conn).await?)
+    Ok(copy_bidirectional(stream, conn).await?)
 }

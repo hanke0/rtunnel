@@ -13,7 +13,7 @@ pub fn setup_logger(log_level: log::LevelFilter, testing: bool) {
             writeln!(
                 buf,
                 "{} [{}] [{}:{}] - {}",
-                Local::now().format("%Y-%m-%dT%H:%M:%S%Z"),
+                Local::now().format("%Y-%m-%d %H:%M:%S%.3f%Z"),
                 record.level(),
                 record.file().unwrap_or("-"),
                 record.line().unwrap_or(0),
@@ -25,3 +25,17 @@ pub fn setup_logger(log_level: log::LevelFilter, testing: bool) {
         r.unwrap();
     }
 }
+
+#[macro_export]
+macro_rules! debug_spend {
+    ($s: block, $fmt:expr, $($arg:tt)*) => {{
+        #[cfg(any(feature = "debug", test))]
+        let start = std::time::Instant::now();
+        let result = $s;
+        #[cfg(any(feature = "debug", test))]
+        log::trace!("{}, spend {:?}", format_args!($fmt, $($arg)*), start.elapsed());
+        result
+    }};
+}
+
+pub use debug_spend;

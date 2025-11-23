@@ -1,4 +1,5 @@
 use core::task::{self, Poll};
+use std::ffi::os_str::Display;
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -17,6 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::ReadBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::TlsStream;
@@ -24,6 +26,7 @@ use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::debug_spend;
 use crate::errors::{Error, Result, ResultExt as _, whatever};
 
 pub use tokio::net::TcpListener;
@@ -96,7 +99,128 @@ impl Stream {
         let display = format!("{}-{}", local_addr, peer_addr);
         Stream::Tcp(stream, display)
     }
+
+    pub fn split(self) -> (Reader, Writer) {
+        match self {
+            Stream::Tcp(s, _) => {
+                let (a, b) = s.into_split();
+                (Reader::Tcp(a), Writer::Tcp(b))
+            }
+            Stream::Tls(s, _) => unreachable!(),
+        }
+    }
 }
+
+pub async fn copy_bidirectional(a: Stream, b: Stream) -> Result<(u64, u64)> {
+    let (mut a_reader, mut a_writer) = a.split();
+    let (mut b_reader, mut b_writer) = b.split();
+    let (a, b) = tokio::join!(
+        async move {
+            let r = copy_bidirectional_impl(&mut b_reader, &mut a_writer).await;
+            let _ = a_writer.shutdown().await;
+            r
+        },
+        async move {
+            let r = copy_bidirectional_impl(&mut a_reader, &mut b_writer).await;
+            let _ = b_writer.shutdown().await;
+            r
+        }
+    );
+    Ok((a?, b?))
+}
+
+async fn copy_bidirectional_impl(a: &mut Reader, b: &mut Writer) -> Result<u64> {
+    let mut buffer = [0; 8192];
+    let mut total: u64 = 0;
+    loop {
+        let n = debug_spend!(
+            {
+                let n = a.read(&mut buffer).await?;
+                n
+            },
+            "copy_bidirectional_impl {}->{} read",
+            a,
+            b,
+        );
+        if n == 0 {
+            break;
+        }
+        debug_spend!(
+            {
+                b.write_all(&buffer[0..n]).await?;
+                b.flush().await?;
+            },
+            "copy_bidirectional_impl {}->{} write {}",
+            a,
+            b,
+            n
+        );
+        total += n as u64;
+    }
+    Ok(total)
+}
+
+pub enum Reader {
+    Tcp(OwnedReadHalf),
+}
+
+impl AsyncRead for Reader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Reader::Tcp(s) => pin!(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl fmt::Display for Reader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Reader::Tcp(s) => write!(f, "{}-{}", s.local_addr().unwrap(), s.peer_addr().unwrap()),
+        }
+    }
+}
+
+impl Reader {}
+
+pub enum Writer {
+    Tcp(OwnedWriteHalf),
+}
+
+impl fmt::Display for Writer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Writer::Tcp(s) => write!(f, "{}-{}", s.local_addr().unwrap(), s.peer_addr().unwrap()),
+        }
+    }
+}
+
+impl AsyncWrite for Writer {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Writer::Tcp(s) => pin!(s).poll_write(cx, buf),
+        }
+    }
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Writer::Tcp(s) => pin!(s).poll_flush(cx),
+        }
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Writer::Tcp(s) => pin!(s).poll_shutdown(cx),
+        }
+    }
+}
+
+impl Writer {}
 
 /// Network listener for accepting incoming connections.
 ///

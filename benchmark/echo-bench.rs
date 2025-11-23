@@ -4,6 +4,7 @@ use std::result::Result;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -76,8 +77,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         metrics.transfer_failed.load(Ordering::SeqCst)
     );
     println!(
-        "transfer_spend_ns: {}",
-        metrics.transfer_spend_ns.load(Ordering::SeqCst)
+        "transfer_spend_ns: {:?}",
+        Duration::from_nanos(metrics.transfer_spend_ns.load(Ordering::SeqCst) as u64)
     );
     println!(
         "transfer_bytes: {}",

@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use log::{debug, error, info, trace};
 use tokio::io::AsyncWriteExt;
-use tokio::io::copy_bidirectional;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, Receiver};
@@ -14,7 +13,8 @@ use tokio_util::sync::CancellationToken;
 use crate::config::ServerConfig;
 use crate::config::build_listener;
 use crate::errors::{Error, Result, ResultExt};
-use crate::transport::{Context, Listener, Message, MessageKind, Stream};
+use crate::logger::debug_spend;
+use crate::transport::{Context, Listener, Message, MessageKind, Stream, copy_bidirectional};
 use crate::whatever;
 
 struct ServerOptions {
@@ -80,8 +80,14 @@ impl fmt::Debug for Session {
 
 impl Session {
     async fn join(mut self) -> Result<Stream> {
-        self.cancel_token.cancel();
-        self.receiver.recv().await.unwrap()
+        debug_spend!(
+            {
+                self.cancel_token.cancel();
+                self.receiver.recv().await.unwrap()
+            },
+            "session {} join",
+            self.id
+        )
     }
 }
 
@@ -93,13 +99,10 @@ async fn keep_alive(
     let interval = &mut time::interval(Duration::from_secs(5));
     interval.reset();
     let mut message = Message::ping();
-    while !stopped.is_cancelled() {
+    loop {
         tokio::select! {
-            _ = context.wait_cancel() => {
-                return Err(Error::cancel());
-            },
             _ = stopped.cancelled() => {
-                break;
+                return Ok(stream);
             }
             _ = interval.tick() => {
                 trace!("keep alive ping sending: {}", stream);
@@ -107,14 +110,17 @@ async fn keep_alive(
                 trace!("keep alive ping receiving: {}", stream);
                 message.read_from_inplace(&mut stream).await?;
                 if message.get_type() != MessageKind::Ping {
+                    error!("keep alive ping received invalid message type: {:?}", message.get_type());
                     return Err(whatever!("Invalid message type: {:?}", message.get_type()));
                 }
                 trace!("keep alive success: {}", stream);
                 interval.reset();
-            }
+            },
+            _ = context.wait_cancel() => {
+                return Err(Error::cancel());
+            },
         }
     }
-    Ok(stream)
 }
 
 struct TunnelPool(Arc<TunnelPoolInner>);
@@ -330,8 +336,8 @@ async fn handle_service_stream_impl(
     options: &ServerOptionsRef,
     connect_to: &str,
 ) -> Result<(u64, u64)> {
-    let mut remote = get_a_useable_connection(context, options, &mut stream, connect_to).await?;
-    let r = copy_bidirectional(&mut stream, &mut remote).await?;
+    let remote = get_a_useable_connection(context, options, &mut stream, connect_to).await?;
+    let r = copy_bidirectional(stream, remote).await?;
     Ok(r)
 }
 
