@@ -1,5 +1,4 @@
 use core::task::{self, Poll};
-use std::ffi::os_str::Display;
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -106,7 +105,7 @@ impl Stream {
                 let (a, b) = s.into_split();
                 (Reader::Tcp(a), Writer::Tcp(b))
             }
-            Stream::Tls(s, _) => unreachable!(),
+            Stream::Tls(_, _) => unreachable!(),
         }
     }
 }
@@ -134,10 +133,7 @@ async fn copy_bidirectional_impl(a: &mut Reader, b: &mut Writer) -> Result<u64> 
     let mut total: u64 = 0;
     loop {
         let n = debug_spend!(
-            {
-                let n = a.read(&mut buffer).await?;
-                n
-            },
+            { a.read(&mut buffer).await? },
             "copy_bidirectional_impl {}->{} read",
             a,
             b,

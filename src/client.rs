@@ -161,5 +161,5 @@ async fn handle_relay(
     message.connect_inplace("");
     stream.write_all(message.as_ref()).await?;
     debug!("tunnel relay started: {}->{}", &stream, addr);
-    Ok(copy_bidirectional(stream, conn).await?)
+    copy_bidirectional(stream, conn).await
 }
