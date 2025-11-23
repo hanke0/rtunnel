@@ -14,7 +14,7 @@ use crate::config::ServerConfig;
 use crate::config::build_listener;
 use crate::errors::{Error, Result, ResultExt};
 use crate::logger::debug_spend;
-use crate::transport::{Context, Listener, Message, MessageKind, Stream, copy_bidirectional};
+use crate::transport::{Context, Listener, Message, MessageKind, Stream, copy_bidirectional_flush};
 use crate::whatever;
 
 struct ServerOptions {
@@ -337,7 +337,7 @@ async fn handle_service_stream_impl(
     connect_to: &str,
 ) -> Result<(u64, u64)> {
     let remote = get_a_useable_connection(context, options, &mut stream, connect_to).await?;
-    let r = copy_bidirectional(stream, remote).await?;
+    let r = copy_bidirectional_flush(stream, remote).await?;
     Ok(r)
 }
 

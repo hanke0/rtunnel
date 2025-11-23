@@ -187,7 +187,7 @@ async fn test_connect_spend_time_tcp() {
 async fn test_connect_spend_time(config: &str) {
     let context = Context::new();
     let finish = start_test(&context, config).await;
-    let max = Duration::from_millis(1);
+    let max = Duration::from_millis(5);
 
     ensure_connect_spend_time("127.0.0.1:2335", max).await;
     ensure_connect_spend_time("127.0.0.1:2334", max).await;

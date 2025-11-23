@@ -76,30 +76,33 @@ BEGIN {
     frp_data[0] = "frp"
     frp_tls_data[0] = "frp-tls"
     name=""
+    tunnel_count = 0
 }
 {
-    ($1 == "tunnel") {
+    if ($1 == "tunnel") {
         name = $2
-        data[$name]["tunnel"] = $2
+        data[name, "tunnel"] = $2
+        tunnels[++tunnel_count] = name
     }
-    ($1 == "connect_spend_ns") {
-        data[name]["connect_spend_ns"] = $2
+    if ($1 == "connect_spend") {
+        data[name, "connect_spend"] = $2
     }
-    ($1 == "Throughput") {
-        data[name]["Throughput"] = $2
+    if ($1 == "Throughput") {
+        data[name, "Throughput"] = $2
     }
-    ($1 == "server-cpu") {
-        data[name]["server-cpu"] = $2
+    if ($1 == "server-cpu") {
+        data[name, "server-cpu"] = $2
     }
-    ($1 == "client-cpu") {
-        data[name]["client-cpu"] = $2
+    if ($1 == "client-cpu") {
+        data[name, "client-cpu"] = $2
     }
 }
 END {
-    print "| tunnel | connect_spend_ns | Throughput | server-cpu |client-cpu |"
+    print "| tunnel | connect_spend | Throughput | server-cpu |client-cpu |"
     print "| --- | --- | --- | --- | --- |"
-    for (name in data) {
-        print "| " name " | " data[name]["connect_spend_ns"] " | " data[name]["Throughput"] " | " data[name]["server-cpu"] " | " data[name]["client-cpu"] " |"
+    for (i = 1; i <= tunnel_count; i++) {
+        tunnel_name = tunnels[i]
+        print "| " tunnel_name " | " data[tunnel_name, "connect_spend"] " | " data[tunnel_name, "Throughput"] " | " data[tunnel_name, "server-cpu"] " | " data[tunnel_name, "client-cpu"] " |"
     }
 }
 ' tmp/benchmark.txt

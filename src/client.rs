@@ -9,7 +9,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 use crate::config::ClientConfig;
 use crate::config::build_connector;
 use crate::errors::{Result, ResultExt as _, whatever};
-use crate::transport::{Connector, Context, Message, Stream, copy_bidirectional};
+use crate::transport::{Connector, Context, Message, Stream, copy_bidirectional_flush};
 
 struct ClientOptions {
     connector: Connector,
@@ -161,5 +161,5 @@ async fn handle_relay(
     message.connect_inplace("");
     stream.write_all(message.as_ref()).await?;
     debug!("tunnel relay started: {}->{}", &stream, addr);
-    copy_bidirectional(stream, conn).await
+    copy_bidirectional_flush(stream, conn).await
 }

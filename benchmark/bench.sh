@@ -20,6 +20,8 @@ config=tmp/rtunnel.toml
 frpsconfig=tmp/frps.toml
 frpcconfig=tmp/frpc.toml
 http_rps=false
+extra_options=()
+
 
 echolistento=127.0.0.1:2335
 echoconnectto=127.0.0.1:2334
@@ -94,7 +96,7 @@ trap 'cleanup' EXIT
 cargo build --quiet --release --bin echo-bench || exit 1
 case "$runmode" in
 rtunnel|rtunnel-tcp)
-	cargo build --quiet --release --bin rtunnel || exit 1
+	cargo build "${extra_options[@]}" --quiet --release --bin rtunnel || exit 1
 	cargo run -- example-config example.com >tmp/rtunnel.toml || exit 1
 	cargo run -- example-config --kind tcp example.com >tmp/rtunnel-tcp.toml || exit 1
 	chmod 600 tmp/rtunnel.toml tmp/rtunnel-tcp.toml
