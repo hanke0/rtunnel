@@ -19,6 +19,8 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector as TokioTlsConnector;
 use tokio_rustls::client::TlsStream as TlsClientStream;
+use tokio_rustls::rustls::client::Resumption;
+use tokio_rustls::rustls::server::ServerSessionMemoryCache;
 use tokio_rustls::server::TlsStream as TlsServerStream;
 use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
@@ -115,6 +117,7 @@ impl Listener for TlsListener {
                 .with_single_cert(vec![cert_chain], key_der)
                 .context("Failed to build server tls config")?;
         server_config.ignore_client_order = true;
+        server_config.session_storage = ServerSessionMemoryCache::new(256);
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
         let listener = TcpListener::bind(config.addr).await?;
         let addr = listener.local_addr()?;
@@ -235,6 +238,7 @@ impl Connector for TlsConnector {
                 .with_client_auth_cert(vec![cert_chain], key_der)
                 .context("Failed to build client tls config")?;
         client_config.enable_sni = false;
+        client_config.resumption = Resumption::in_memory_sessions(256);
         let connector = TokioTlsConnector::from(Arc::new(client_config));
         Ok(Self {
             connector,

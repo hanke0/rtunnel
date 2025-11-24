@@ -6,7 +6,9 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use tokio::select;
 use tokio::time::sleep;
+use tokio_rustls::rustls::crypto::aws_lc_rs;
 use tracing::{debug, error, info};
+
 pub mod client;
 pub mod config;
 pub mod errors;
@@ -69,6 +71,7 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
 /// configurations. Each client connects to a tunnel server and manages
 /// connections for relaying traffic.
 pub async fn run_client(context: &Context, configs: Vec<ClientConfig>) -> i32 {
+    warmup_aws_lc_rs();
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
         let err = client::start_client(context, cfg.clone()).await;
@@ -97,6 +100,7 @@ pub async fn run_client(context: &Context, configs: Vec<ClientConfig>) -> i32 {
 /// configurations. Each server listens for tunnel connections and manages
 /// services that forward traffic to backend services.
 pub async fn run_server(context: &Context, configs: Vec<ServerConfig>) -> i32 {
+    warmup_aws_lc_rs();
     debug!("starting {} server", configs.len());
     for cfg in configs.iter() {
         let err = server::start_server(context, cfg.clone()).await;
@@ -267,4 +271,11 @@ pub enum Commands {
         )]
         config: String,
     },
+}
+
+fn warmup_aws_lc_rs() {
+    let provider = aws_lc_rs::default_provider();
+    provider.secure_random.fill(&mut [0u8]).unwrap();
+    // Ignore once value set many times.
+    let _ = provider.clone().install_default();
 }

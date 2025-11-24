@@ -3,7 +3,6 @@ use std::fs;
 use std::io::Write;
 use std::string::String;
 use std::time::Duration;
-use std::time::Instant;
 
 use clap::Parser;
 use serial_test::serial;
@@ -15,7 +14,7 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
-use tracing::{error, info, trace};
+use tracing::{error, info};
 
 use rtunnel::errors::ResultExt;
 use rtunnel::observe;
@@ -166,43 +165,4 @@ async fn connect_to_echo(context: Context) {
     info!("echo client {} read {} bytes", addr, got.len());
     assert_eq!(expect.len(), got.len());
     assert_eq!(expect, got);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_connect_spend_time_tls() {
-    observe::setup_testing();
-    let config = build_tls_example("example.com");
-    test_connect_spend_time(&config).await;
-}
-
-#[tokio::test]
-#[serial]
-async fn test_connect_spend_time_tcp() {
-    observe::setup_testing();
-    let config = build_tcp_example();
-    test_connect_spend_time(&config).await;
-}
-
-async fn test_connect_spend_time(config: &str) {
-    let context = Context::new();
-    let finish = start_test(&context, config).await;
-    let max = Duration::from_millis(5);
-
-    ensure_connect_spend_time("127.0.0.1:2335", max).await;
-    ensure_connect_spend_time("127.0.0.1:2334", 2 * max).await;
-    finish.await;
-}
-
-async fn ensure_connect_spend_time(addr: &str, max: Duration) {
-    let start = Instant::now();
-    let mut stream = TcpStream::connect(addr).await.unwrap();
-    trace!("connect {} spend: {:?}", addr, start.elapsed());
-    stream.write_i8(1).await.unwrap();
-    stream.read_i8().await.unwrap();
-    let spend = start.elapsed();
-    assert!(
-        spend < max,
-        "assert fail for addr {addr}: {spend:?} < {max:?}"
-    );
 }

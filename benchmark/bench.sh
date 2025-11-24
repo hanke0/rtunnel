@@ -15,7 +15,7 @@ times=10
 concurrent=10
 bytes=1024
 loops=100
-runmode=rtunnel
+runmode=rtunnel-tls
 config=tmp/rtunnel.toml
 frpsconfig=tmp/frps.toml
 frpcconfig=tmp/frpc.toml
@@ -95,10 +95,10 @@ trap 'cleanup' EXIT
 
 cargo build --quiet --release --bin echo-bench || exit 1
 case "$runmode" in
-rtunnel|rtunnel-tcp)
+rtunnel*)
 	cargo build "${extra_options[@]}" --quiet --release --bin rtunnel || exit 1
-	cargo run -- example-config example.com >tmp/rtunnel.toml || exit 1
-	cargo run -- example-config --kind tcp example.com >tmp/rtunnel-tcp.toml || exit 1
+	cargo run --quiet -- example-config example.com >tmp/rtunnel.toml || exit 1
+	cargo run --quiet -- example-config --kind tcp example.com >tmp/rtunnel-tcp.toml || exit 1
 	chmod 600 tmp/rtunnel.toml tmp/rtunnel-tcp.toml
 	;;
 esac
@@ -108,7 +108,7 @@ run_server() {
 	direct)
 		return
 		;;
-	frp|frp-tls)
+	frp*)
 		echo >&2 "frps config: ${frpsconfig}"
 		tmp/frps -c "${frpsconfig}" >"${severlog}" 2>&1 &
 		;;
@@ -125,7 +125,7 @@ run_client() {
 	direct)
 		return
 		;;
-	frp|frp-tls)
+	frp*)
 		echo >&2 "frpc config: ${frpcconfig}"
 		tmp/frpc -c "${frpcconfig}" >${clientlog} 2>&1 &
 		;;
@@ -142,7 +142,7 @@ get_version() {
 	direct)
 		return
 		;;
-	frp|frp-tls)
+	frp*)
 		echo "frp" "$(tmp/frpc --version)"
 		;;
 	*)
@@ -178,7 +178,9 @@ http {
 ' > tmp/nginx.conf
 		nginx -g "daemon off;" -c tmp/nginx.conf >${severlog} 2>&1 &
 		echopid=$!
-		ab -n 1000 -c 1 -k -r http://127.0.0.1:2334/
+		n="$((times * concurrent * loops))"
+		echo >&2 "running ab -n $n -c $concurrent -k -r http://127.0.0.1:2334/"
+		ab -n "$n" -c "$concurrent" -k -r http://127.0.0.1:2334/
 		kill $echopid
 		;;
 	*)

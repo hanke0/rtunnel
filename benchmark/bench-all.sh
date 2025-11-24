@@ -44,6 +44,7 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
+echo >tmp/benchmark.txt
 mkdir -p tmp
 echo "run direct"
 ./benchmark/bench.sh --direct --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
@@ -68,41 +69,4 @@ rtunnel_tcp_data=()
 frp_data=()
 frp_tls_data=()
 
-awk -F': ' '
-BEGIN {
-    direct_data[0] = "direct"
-    rtunnel_data[0] = "rtunnel"
-    rtunnel_tcp_data[0] = "rtunnel-tcp"
-    frp_data[0] = "frp"
-    frp_tls_data[0] = "frp-tls"
-    name=""
-    tunnel_count = 0
-}
-{
-    if ($1 == "tunnel") {
-        name = $2
-        data[name, "tunnel"] = $2
-        tunnels[++tunnel_count] = name
-    }
-    if ($1 == "connect_spend") {
-        data[name, "connect_spend"] = $2
-    }
-    if ($1 == "Throughput") {
-        data[name, "Throughput"] = $2
-    }
-    if ($1 == "server-cpu") {
-        data[name, "server-cpu"] = $2
-    }
-    if ($1 == "client-cpu") {
-        data[name, "client-cpu"] = $2
-    }
-}
-END {
-    print "| tunnel | connect_spend | Throughput | server-cpu |client-cpu |"
-    print "| --- | --- | --- | --- | --- |"
-    for (i = 1; i <= tunnel_count; i++) {
-        tunnel_name = tunnels[i]
-        print "| " tunnel_name " | " data[tunnel_name, "connect_spend"] " | " data[tunnel_name, "Throughput"] " | " data[tunnel_name, "server-cpu"] " | " data[tunnel_name, "client-cpu"] " |"
-    }
-}
-' tmp/benchmark.txt
+./benchmark/bench-collect.sh tmp/benchmark.txt

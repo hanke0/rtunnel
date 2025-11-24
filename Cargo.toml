@@ -11,9 +11,6 @@ debug = []
 tokio = { version = "1.48.0", features = ["full"] }
 toml = "0.8.23"
 serde = { version = "1.0", features = ["derive"] }
-ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
-rand_core = { version = "0.6.4", features = ["getrandom", "std"] }
-aes-gcm = { version = "0.10.3", features = ["std"] }
 bytes = "1.11.0"
 tokio-util = { version = "0.7.17", features = ["rt"] }
 socket2 = "0.6.1"
