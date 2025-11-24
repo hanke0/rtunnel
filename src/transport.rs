@@ -502,17 +502,16 @@ where
 /// over the encrypted tunnel connection.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub enum MessageKind {
-    HandshakeData,
-    HandshakeCtrl,
     Connect,
     Ping,
+    Require,
 }
 
 impl MessageKind {
-    const HANDSHAKE_DATA: u8 = 0b01000000;
-    const HANDSHAKE_CTRL: u8 = 0b10000000;
-    const CONNECT: u8 = 0b11000000;
-    const PING: u8 = 0b00000000;
+    const REQUIRE: u8 = 0b01000000;
+    const CONNECT: u8 = 0b10000000;
+    const PING: u8 = 0b11000000;
+    const _RESERVED: u8 = 0b00000000;
 
     fn from_checked_u8(msg_type: u8) -> Self {
         Self::from_u8(msg_type).unwrap()
@@ -520,9 +519,8 @@ impl MessageKind {
 
     fn from_u8(msg_type: u8) -> Result<Self> {
         match msg_type {
-            Self::HANDSHAKE_DATA => Ok(MessageKind::HandshakeData),
+            Self::REQUIRE => Ok(MessageKind::Require),
             Self::CONNECT => Ok(MessageKind::Connect),
-            Self::HANDSHAKE_CTRL => Ok(MessageKind::HandshakeCtrl),
             Self::PING => Ok(MessageKind::Ping),
             _ => Err(whatever!("Invalid message type: {}", msg_type)),
         }
@@ -530,9 +528,8 @@ impl MessageKind {
 
     fn as_u8(&self) -> u8 {
         match self {
-            MessageKind::HandshakeData => Self::HANDSHAKE_DATA,
+            MessageKind::Require => Self::REQUIRE,
             MessageKind::Connect => Self::CONNECT,
-            MessageKind::HandshakeCtrl => Self::HANDSHAKE_CTRL,
             MessageKind::Ping => Self::PING,
         }
     }
@@ -560,7 +557,7 @@ mod test_message_kind {
                 }
             }
         }
-        ensure_exhaustive!(MessageKind, HandshakeData, HandshakeCtrl, Connect, Ping);
+        ensure_exhaustive!(MessageKind, Connect, Ping, Require);
     }
 }
 
@@ -595,6 +592,19 @@ impl Message {
         self.fill(MessageKind::Connect, |buf| {
             buf.extend_from_slice(addr.as_bytes());
         });
+    }
+
+    pub fn require(n: i32) -> Self {
+        let mut message = Self::with_capacity(4);
+        message.fill(MessageKind::Require, |buf| {
+            buf.extend_from_slice(&n.to_be_bytes());
+        });
+        message
+    }
+
+    pub fn parse_require(&self) -> Result<i32> {
+        let bytes = <[u8; 4]>::try_from(self.get_payload()).context("Invalid require message")?;
+        Ok(i32::from_be_bytes(bytes))
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
@@ -655,6 +665,11 @@ impl Message {
         Ok(msg)
     }
 
+    pub async fn write_to<T: Stream>(&self, stream: &mut T) -> Result<()> {
+        stream.write_all(self.as_ref()).await?;
+        Ok(())
+    }
+
     pub async fn read_from_inplace<T: Stream>(&mut self, stream: &mut T) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
         stream
@@ -675,11 +690,15 @@ impl Message {
         Ok(())
     }
 
-    pub async fn wait_connect_message<T: Stream>(
+    pub async fn wait_connect_message<T: Stream, F>(
         &mut self,
         context: &Context,
         stream: &mut T,
-    ) -> Result<String> {
+        mut handle_other: F,
+    ) -> Result<String>
+    where
+        F: AsyncFnMut(&Message) -> Result<()>,
+    {
         loop {
             tokio::select! {
                 _ = context.wait_cancel() => {
@@ -694,18 +713,23 @@ impl Message {
                     stream.write_all(self.as_ref()).await?;
                     continue;
                 }
-                MessageKind::Connect => break,
-                _ => return Err(whatever!("Invalid message type: {:?}", self.get_type())),
+                MessageKind::Connect => {
+                    let addr = String::from_utf8(self.get_payload().to_vec())
+                        .context("Invalid address")?;
+                    return Ok(addr);
+                }
+                MessageKind::Require => {
+                    handle_other(self).await?;
+                    continue;
+                }
             }
         }
-        let addr = String::from_utf8(self.get_payload().to_vec()).context("Invalid address")?;
-        Ok(addr)
     }
 }
 
 impl Default for Message {
     fn default() -> Self {
-        Self::with_capacity(4096 - Self::HEADER_SIZE)
+        Self::with_capacity(1024 - Self::HEADER_SIZE)
     }
 }
 

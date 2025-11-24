@@ -272,6 +272,7 @@ generate_from_any!(rustls::Error);
 generate_from_any!(tokio_rustls::rustls::pki_types::InvalidDnsNameError);
 generate_from_any!(tokio_rustls::rustls::pki_types::pem::Error);
 generate_from_any!(rustls::server::VerifierBuilderError);
+generate_from_any!(std::array::TryFromSliceError);
 
 // Not public API. Referenced by macro-generated code.
 #[doc(hidden)]

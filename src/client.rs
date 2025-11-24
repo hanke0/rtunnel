@@ -11,7 +11,7 @@ use tracing::{debug, error, error_span, info, info_span, trace};
 use crate::config::{ClientConfig, ConnectTo};
 use crate::errors::{Result, ResultExt as _, whatever};
 use crate::transport::{
-    Connector, Context, Message, PlainTcpConnector, Stream, TlsConnector, Transport,
+    Connector, Context, Message, MessageKind, PlainTcpConnector, Stream, TlsConnector, Transport,
     copy_bidirectional_flush,
 };
 
@@ -19,12 +19,12 @@ struct ClientOptions<T: Connector> {
     connector: T,
     allows: HashSet<String>,
     idle_connections: usize,
-    notify: Sender<()>,
+    notify: Sender<i32>,
 }
 
 impl<T: Connector> ClientOptions<T> {
-    async fn notify_for_new_tunnel(&self) {
-        match self.notify.send(()).await {
+    async fn notify_for_new_tunnel(&self, n: i32) {
+        match self.notify.send(n).await {
             Ok(_) => {}
             Err(e) => error!("failed to notify for new tunnel: {}", e),
         };
@@ -67,7 +67,7 @@ async fn run_client<T: Connector>(
     config: T::Config,
     allows: HashSet<String>,
 ) -> Result<()> {
-    let (sender, receiver) = mpsc::channel(idle);
+    let (sender, receiver) = mpsc::channel(idle * 2);
     let connector = T::new(config).await?;
     let options = ClientOptions {
         connector,
@@ -88,7 +88,7 @@ async fn run_client<T: Connector>(
 async fn start_client_sentry<T: Connector>(
     context: Context,
     options: ClientOptionsRef<T>,
-    receiver: Receiver<()>,
+    receiver: Receiver<i32>,
 ) {
     keep_client_connections(&context, &options, receiver).await;
     context.cancel_all();
@@ -100,7 +100,7 @@ async fn start_client_sentry<T: Connector>(
 async fn keep_client_connections<T: Connector>(
     context: &Context,
     options: &ClientOptionsRef<T>,
-    mut receiver: Receiver<()>,
+    mut receiver: Receiver<i32>,
 ) {
     let max_idle = options.idle_connections;
     let mut index: u64 = 0;
@@ -116,14 +116,16 @@ async fn keep_client_connections<T: Connector>(
         );
     }
     while !context.has_cancel() {
-        index += 1;
         select! {
-            _ = receiver.recv() => {
-                trace!("spawning new tunnel {}", index);
-                context.spawn(build_tunnel(context.clone(), options.clone()).instrument(error_span!(
-                    "tunnel",
-                    index
-                )));
+            n = receiver.recv() => {
+                for _ in 0..n.unwrap_or(0) {
+                    index += 1;
+                    trace!("spawning new tunnel {}", index);
+                    context.spawn(build_tunnel(context.clone(), options.clone()).instrument(error_span!(
+                        "tunnel",
+                        index
+                    )));
+                }
             },
             _ = context.wait_cancel() => break,
         };
@@ -138,7 +140,7 @@ async fn build_tunnel<T: Connector>(context: Context, options: ClientOptionsRef<
         Ok(_) => {}
         Err(e) => {
             error!("tunnel relay fail: {:#}", e);
-            options.notify_for_new_tunnel().await;
+            options.notify_for_new_tunnel(1).await;
         }
     }
 }
@@ -181,13 +183,29 @@ async fn wait_relay<T: Connector>(
 ) -> Result<()> {
     info!("connected to server");
     let mut message = Message::default();
-    let addr = context
-        .race(message.wait_connect_message(context, &mut stream))
-        .await
-        .context("Failed to wait connect message")?;
+
+    let addr = loop {
+        message.read_from_inplace(&mut stream).await?;
+        match message.get_type() {
+            MessageKind::Ping => {
+                stream.write_all(message.as_ref()).await?;
+                continue;
+            }
+            MessageKind::Connect => {
+                let addr =
+                    String::from_utf8(message.get_payload().to_vec()).context("Invalid address")?;
+                break addr;
+            }
+            MessageKind::Require => {
+                let n = message.parse_require()?;
+                options.notify_for_new_tunnel(n).await;
+                continue;
+            }
+        }
+    };
     trace!("tunnel connect message has received: {}", addr);
-    options.notify_for_new_tunnel().await;
-    match handle_relay::<T>(context, stream, options, &addr, &mut message)
+    options.notify_for_new_tunnel(1).await;
+    match handle_relay::<T>(context, stream, options, &addr)
         .instrument(info_span!("connect_local", client_addr = addr))
         .await
     {
@@ -213,7 +231,6 @@ async fn handle_relay<T: Connector>(
     stream: T::Stream,
     options: &ClientOptionsRef<T>,
     addr: &String,
-    message: &mut Message,
 ) -> Result<(u64, u64)> {
     if !options.allows.contains(addr) {
         return Err(whatever!("Address not allowed: {}", addr));
@@ -227,7 +244,7 @@ async fn handle_relay<T: Connector>(
                 .context("Failed to connect to local service")?;
             let local_addr = format!("{}-{}", conn.local_addr()?, conn.peer_addr()?);
             debug!("connect to local service: {}", local_addr);
-            handle_relay_impl::<T, TcpStream>(stream, message, conn)
+            handle_relay_impl::<T, TcpStream>(stream, conn)
                 .instrument(info_span!("handle_relay", local_addr))
                 .await
         }
@@ -235,12 +252,9 @@ async fn handle_relay<T: Connector>(
 }
 
 async fn handle_relay_impl<T: Connector, S: Stream>(
-    mut remote: T::Stream,
-    message: &mut Message,
+    remote: T::Stream,
     local: S,
 ) -> Result<(u64, u64)> {
-    message.connect_inplace("");
-    remote.write_all(message.as_ref()).await?;
     debug!("start copy_bidirectional");
     copy_bidirectional_flush(remote, local).await
 }

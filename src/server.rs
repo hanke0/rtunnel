@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::Ordering;
 use std::vec::Vec;
 
 use tokio::io::AsyncWriteExt;
@@ -200,17 +202,12 @@ async fn handle_service_relay<T: Listener, U: Listener>(
     connect_to: &str,
 ) -> Result<(u64, u64)> {
     info!("stream match a tunnel");
-    let mut message = Message::connect(connect_to);
+    let message = Message::connect(connect_to);
     context
         .timeout_default(tunnel.write_all(message.as_ref()))
         .await
         .context("Failed to write connect message")?;
-    trace!("tunnel connect message has sent, wait connect message reply");
-    context
-        .timeout_default(message.wait_connect_message(context, &mut tunnel))
-        .await
-        .context("Failed to wait connect message")?;
-    trace!("Tunnel connect message has received, relay started",);
+    trace!("tunnel connect message has sent, relay started");
     let r = copy_bidirectional_flush(stream, tunnel).await?;
     Ok(r)
 }
@@ -277,6 +274,7 @@ impl<T: Listener> Clone for TunnelPool<T> {
 struct TunnelPoolInner<T: Listener> {
     sessions: Mutex<BTreeMap<String, Session<T>>>,
     notify: Notify,
+    requires: AtomicI32,
 }
 
 impl<T: Listener> TunnelPool<T> {
@@ -284,6 +282,7 @@ impl<T: Listener> TunnelPool<T> {
         let inner = Arc::new(TunnelPoolInner {
             sessions: Mutex::new(BTreeMap::new()),
             notify: Notify::new(),
+            requires: AtomicI32::new(0),
         });
         Self { inner }
     }
@@ -331,12 +330,29 @@ impl<T: Listener> TunnelPool<T> {
 
     pub async fn pop(&self) -> Result<(T::Stream, String)> {
         loop {
-            match self.inner.sessions.lock().await.pop_first() {
+            let mut sessions = self.inner.sessions.lock().await;
+            match sessions.pop_first() {
                 Some((id, session)) => {
                     trace!("pop a session: {}", session);
-                    return Ok((session.join().await?, id));
+                    let mut session = session.join().await?;
+                    let n = match self.inner.requires.load(Ordering::Acquire) {
+                        0 => {
+                            if sessions.is_empty() {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        n => n,
+                    };
+                    if n > 0 {
+                        Message::require(n).write_to(&mut session).await?;
+                        self.inner.requires.fetch_sub(n, Ordering::Release);
+                    }
+                    return Ok((session, id));
                 }
                 None => {
+                    self.inner.requires.fetch_add(1, Ordering::Release);
                     self.inner.notify.notified().await;
                 }
             }

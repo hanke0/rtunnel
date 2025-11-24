@@ -128,7 +128,7 @@ async fn test_integration(config: &str) {
     concurrent_test(context.clone(), 1).await;
     concurrent_test(context.clone(), 8).await;
     // TODO: no more tunnel available. Should we support create tunnel from server side?
-    // concurrent_test(context.clone(), 100).await;
+    // concurrent_test(context.clone(), 20).await;
 
     // wait for keep alive ping to be sent
     sleep(Duration::from_secs(10)).await;
