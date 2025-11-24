@@ -149,7 +149,7 @@ async fn build_tunnel_impl<T: Connector>(
     context: &Context,
     options: &ClientOptionsRef<T>,
 ) -> Result<()> {
-   let (stream, server_addr) = context.race(options.connector.connect()).await?;
+    let (stream, server_addr) = context.race(options.connector.connect()).await?;
     wait_relay(context, stream, options)
         .instrument(info_span!("relay", server_addr))
         .await
