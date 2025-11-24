@@ -100,11 +100,11 @@ is_alive() {
 	kill -0 $1 >/dev/null 2>&1
 }
 
-case "$2" in
+case "$runmode" in
 test)
 	test_port() {
 	local port=$1
-	data=$(echo "hello" | cargo run --bin echo-client -- 127.0.0.1:$port)
+	data=$(echo "hello" | cargo run --quiet --bin echo-client -- 127.0.0.1:$port)
 	echo >&2 "recv data: $data"
 
 	[ "$data" != "hello" ] && echo "recv data is not hello for port: $port" && exit 1
