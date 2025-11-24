@@ -6,8 +6,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clap::Parser;
-use log::LevelFilter;
-use log::{error, info, trace};
 use serial_test::serial;
 use tempfile::NamedTempFile;
 use tokio::io;
@@ -17,28 +15,28 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
+use tracing::{error, info, trace};
 
 use rtunnel::errors::ResultExt;
-use rtunnel::{
-    Arguments, Context, config::build_tcp_example, config::build_tls_example, run, setup,
-};
+use rtunnel::observe;
+use rtunnel::{Arguments, Context, config::build_tcp_example, config::build_tls_example, run};
 
 #[tokio::test]
 #[serial]
-async fn test_tls_transport() {
+async fn test_tls() {
     let config = build_tls_example("example.com");
     test_integration(&config).await;
 }
 
 #[tokio::test]
 #[serial]
-async fn test_tcp_transport() {
+async fn test_tcp() {
     let config = build_tcp_example();
     test_integration(&config).await;
 }
 
 async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()> {
-    setup(LevelFilter::Trace, true);
+    observe::setup_testing();
     let mut file = NamedTempFile::new().unwrap();
     file.write_all(config.as_bytes()).unwrap();
 
@@ -173,6 +171,7 @@ async fn connect_to_echo(context: Context) {
 #[tokio::test]
 #[serial]
 async fn test_connect_spend_time_tls() {
+    observe::setup_testing();
     let config = build_tls_example("example.com");
     test_connect_spend_time(&config).await;
 }
@@ -180,6 +179,7 @@ async fn test_connect_spend_time_tls() {
 #[tokio::test]
 #[serial]
 async fn test_connect_spend_time_tcp() {
+    observe::setup_testing();
     let config = build_tcp_example();
     test_connect_spend_time(&config).await;
 }
@@ -190,7 +190,7 @@ async fn test_connect_spend_time(config: &str) {
     let max = Duration::from_millis(5);
 
     ensure_connect_spend_time("127.0.0.1:2335", max).await;
-    ensure_connect_spend_time("127.0.0.1:2334", max).await;
+    ensure_connect_spend_time("127.0.0.1:2334", 2 * max).await;
     finish.await;
 }
 

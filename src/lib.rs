@@ -4,10 +4,9 @@ use std::string::String;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use log::{debug, error, info};
 use tokio::select;
 use tokio::time::sleep;
-
+use tracing::{debug, error, info};
 pub mod client;
 pub mod config;
 pub mod errors;
@@ -72,7 +71,7 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
 pub async fn run_client(context: &Context, configs: Vec<ClientConfig>) -> i32 {
     debug!("starting {} clients", configs.len());
     for cfg in configs.iter() {
-        let err = client::start_client(context, cfg).await;
+        let err = client::start_client(context, cfg.clone()).await;
         match err {
             Ok(_) => continue,
             Err(e) => {
@@ -100,7 +99,7 @@ pub async fn run_client(context: &Context, configs: Vec<ClientConfig>) -> i32 {
 pub async fn run_server(context: &Context, configs: Vec<ServerConfig>) -> i32 {
     debug!("starting {} server", configs.len());
     for cfg in configs.iter() {
-        let err = server::start_server(context, cfg).await;
+        let err = server::start_server(context, cfg.clone()).await;
         match err {
             Ok(_) => continue,
             Err(e) => {
@@ -199,7 +198,7 @@ pub struct Arguments {
         global = true
     )]
     #[clap(value_enum)]
-    pub log_level: log::LevelFilter,
+    pub log_level: observe::Level,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

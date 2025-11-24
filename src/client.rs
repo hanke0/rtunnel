@@ -1,19 +1,24 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use log::{debug, error, info, trace};
 use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tracing::Instrument;
+use tracing::{debug, error, error_span, info, info_span, trace};
 
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, ConnectTo};
 use crate::errors::{Result, ResultExt as _, whatever};
-use crate::transport::{Connector, Context, Message, copy_bidirectional_flush};
+use crate::transport::{
+    Connector, Context, Message, PlainTcpConnector, Stream, TlsConnector, Transport,
+    copy_bidirectional_flush,
+};
 
 struct ClientOptions<T: Connector> {
     connector: T,
     allows: HashSet<String>,
-    idle_connections: i32,
+    idle_connections: usize,
     notify: Sender<()>,
 }
 
@@ -26,28 +31,65 @@ impl<T: Connector> ClientOptions<T> {
     }
 }
 
-type ClientOptionsRef = Arc<ClientOptions>;
+type ClientOptionsRef<T> = Arc<ClientOptions<T>>;
 
 /// Starts a tunnel client with the given configuration.
 ///
 /// This function establishes a connection to the tunnel server, performs the
 /// handshake, and begins managing tunnel connections. It spawns a background
 /// task to maintain the connection pool and handle reconnections.
-pub async fn start_client(context: &Context, cfg: &ClientConfig) -> Result<()> {
-    let connector = build_connector(cfg.connect_to.clone())?;
-    let (sender, receiver) = mpsc::channel(cfg.idle_connections as usize);
-    let options = Arc::new(ClientOptions {
+pub async fn start_client(context: &Context, config: ClientConfig) -> Result<()> {
+    match config.connect_to {
+        ConnectTo::PlainTcp(cfg) => {
+            run_client::<PlainTcpConnector>(
+                context,
+                config.idle_connections,
+                cfg,
+                config.allowed_addresses,
+            )
+            .await
+        }
+        ConnectTo::TcpWithTls(cfg) => {
+            run_client::<TlsConnector>(
+                context,
+                config.idle_connections,
+                cfg,
+                config.allowed_addresses,
+            )
+            .await
+        }
+    }
+}
+
+async fn run_client<T: Connector>(
+    context: &Context,
+    idle: usize,
+    config: T::Config,
+    allows: HashSet<String>,
+) -> Result<()> {
+    let (sender, receiver) = mpsc::channel(idle);
+    let connector = T::new(config).await?;
+    let options = ClientOptions {
         connector,
-        allows: cfg.allowed_addresses.clone(),
-        idle_connections: cfg.idle_connections,
+        allows,
+        idle_connections: idle,
         notify: sender,
-    });
+    };
+    let options = Arc::new(options);
     first_connect(context, options.clone()).await?;
-    context.spawn(start_client_sentry(context.children(), options, receiver));
+    let connect_to = format!("{}", options.connector);
+    context.spawn(
+        start_client_sentry(context.children(), options, receiver)
+            .instrument(error_span!("client_sentry", connect_to)),
+    );
     Ok(())
 }
 
-async fn start_client_sentry(context: Context, options: ClientOptionsRef, receiver: Receiver<()>) {
+async fn start_client_sentry<T: Connector>(
+    context: Context,
+    options: ClientOptionsRef<T>,
+    receiver: Receiver<()>,
+) {
     keep_client_connections(&context, &options, receiver).await;
     context.cancel_all();
     debug!("client sentry exiting, {}", options.connector);
@@ -55,29 +97,40 @@ async fn start_client_sentry(context: Context, options: ClientOptionsRef, receiv
     debug!("client sentry exited, {}", options.connector);
 }
 
-async fn keep_client_connections(
+async fn keep_client_connections<T: Connector>(
     context: &Context,
-    options: &ClientOptionsRef,
+    options: &ClientOptionsRef<T>,
     mut receiver: Receiver<()>,
 ) {
     let max_idle = options.idle_connections;
+    let mut index: u64 = 0;
     for _ in 0..max_idle {
         if context.has_cancel() {
+            info!("client sentry exiting early because of context cancel");
             return;
         }
-        context.spawn(build_tunnel(context.clone(), options.clone()));
+        index += 1;
+        trace!("spawning initial tunnel {}", index);
+        context.spawn(
+            build_tunnel(context.clone(), options.clone()).instrument(error_span!("tunnel", index)),
+        );
     }
     while !context.has_cancel() {
+        index += 1;
         select! {
             _ = receiver.recv() => {
-                context.spawn(build_tunnel(context.clone(), options.clone()));
+                trace!("spawning new tunnel {}", index);
+                context.spawn(build_tunnel(context.clone(), options.clone()).instrument(error_span!(
+                    "tunnel",
+                    index
+                )));
             },
             _ = context.wait_cancel() => break,
         };
     }
 }
 
-async fn build_tunnel(context: Context, options: ClientOptionsRef) {
+async fn build_tunnel<T: Connector>(context: Context, options: ClientOptionsRef<T>) {
     if context.has_cancel() {
         return;
     }
@@ -90,17 +143,28 @@ async fn build_tunnel(context: Context, options: ClientOptionsRef) {
     }
 }
 
-async fn build_tunnel_impl(context: &Context, options: &ClientOptionsRef) -> Result<()> {
-    let stream = options.connector.connect(context).await?;
-    wait_relay(context, stream, options).await
+async fn build_tunnel_impl<T: Connector>(
+    context: &Context,
+    options: &ClientOptionsRef<T>,
+) -> Result<()> {
+    let (stream, server_addr) = context.race(options.connector.connect()).await?;
+    wait_relay(context, stream, options)
+        .instrument(info_span!("relay", server_addr))
+        .await
 }
 
-async fn first_connect(context: &Context, options: ClientOptionsRef) -> Result<()> {
-    let stream = options.connector.connect(context).await?;
+async fn first_connect<T: Connector>(
+    context: &Context,
+    options: ClientOptionsRef<T>,
+) -> Result<()> {
+    let (stream, id) = options.connector.connect().await?;
     let new_ctx = context.clone();
     context.spawn(async move {
         let options = options;
-        match wait_relay(&new_ctx, stream, &options).await {
+        match wait_relay(&new_ctx, stream, &options)
+            .instrument(info_span!("wait_relay", server_addr = id, first = true))
+            .await
+        {
             Ok(_) => {}
             Err(e) => {
                 error!("tunnel relay fail: {:#}", e);
@@ -110,55 +174,73 @@ async fn first_connect(context: &Context, options: ClientOptionsRef) -> Result<(
     Ok(())
 }
 
-async fn wait_relay(
+async fn wait_relay<T: Connector>(
     context: &Context,
-    mut stream: Stream,
-    options: &ClientOptionsRef,
+    mut stream: T::Stream,
+    options: &ClientOptionsRef<T>,
 ) -> Result<()> {
-    debug!("tunnel established, wait connect message: {}", stream);
+    info!("connected to server");
     let mut message = Message::default();
-    let addr = message
-        .wait_connect_message(context, &mut stream)
+    let addr = context
+        .race(message.wait_connect_message(context, &mut stream))
         .await
         .context("Failed to wait connect message")?;
-    let debug = format!("{}->{}", stream, addr);
-    trace!("tunnel connect message has received: {}", debug);
+    trace!("tunnel connect message has received: {}", addr);
     options.notify_for_new_tunnel().await;
-    match handle_relay(context, stream, options, &addr, &mut message).await {
+    match handle_relay::<T>(context, stream, options, &addr, &mut message)
+        .instrument(info_span!("connect_local", client_addr = addr))
+        .await
+    {
         Ok((read, write)) => {
             info!(
-                "stream {} disconnected and has read {} bytes and wrote {}",
-                debug, read, write
+                "stream disconnected and has read {} bytes and wrote {}",
+                read, write
             );
         }
         Err(e) => {
             if e.is_relay_critical() {
-                error!("stream {} relay critical error:  {:#}", debug, e);
+                error!("stream relay critical error:  {:#}", e);
             } else {
-                info!("stream {} relay non-critical error:  {:#}", debug, e);
+                info!("stream relay non-critical error:  {:#}", e);
             }
         }
     };
     Ok(())
 }
 
-async fn handle_relay(
+async fn handle_relay<T: Connector>(
     context: &Context,
-    mut stream: Stream,
-    options: &ClientOptionsRef,
+    stream: T::Stream,
+    options: &ClientOptionsRef<T>,
     addr: &String,
     message: &mut Message,
 ) -> Result<(u64, u64)> {
-    trace!("tunnel connect message has read: {}", addr);
     if !options.allows.contains(addr) {
         return Err(whatever!("Address not allowed: {}", addr));
     }
-    let conn = Connector::parse_address(addr)?
-        .connect(context)
-        .await
-        .context("Failed to connect to local service")?;
+    let transport = Transport::parse(addr).context("Invalid address")?;
+    match transport {
+        Transport::Tcp(addr) => {
+            let conn = context
+                .race(TcpStream::connect(addr))
+                .await
+                .context("Failed to connect to local service")?;
+            let local_addr = format!("{}-{}", conn.local_addr()?, conn.peer_addr()?);
+            debug!("connect to local service: {}", local_addr);
+            handle_relay_impl::<T, TcpStream>(stream, message, conn)
+                .instrument(info_span!("handle_relay", local_addr))
+                .await
+        }
+    }
+}
+
+async fn handle_relay_impl<T: Connector, S: Stream>(
+    mut remote: T::Stream,
+    message: &mut Message,
+    local: S,
+) -> Result<(u64, u64)> {
     message.connect_inplace("");
-    stream.write_all(message.as_ref()).await?;
-    debug!("tunnel relay started: {}->{}", &stream, addr);
-    copy_bidirectional_flush(stream, conn).await
+    remote.write_all(message.as_ref()).await?;
+    debug!("start copy_bidirectional");
+    copy_bidirectional_flush(remote, local).await
 }

@@ -267,7 +267,6 @@ macro_rules! generate_from_any {
 generate_from_any!(std::io::Error, from_io);
 generate_from_any!(std::fmt::Error);
 generate_from_any!(std::string::FromUtf8Error);
-generate_from_any!(base64::DecodeError);
 generate_from_any!(toml::de::Error);
 generate_from_any!(ed25519_dalek::SignatureError);
 generate_from_any!(rand_core::Error);

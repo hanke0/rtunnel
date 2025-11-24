@@ -12,8 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, ResultExt as _};
 use crate::transport::{
-    Connector, Listener, PlainTcpConnector, PlainTcpConnectorConfig, PlainTcpListener,
-    PlainTcpListenerConfig, TlsConnector, TlsConnector, TlsConnectorConfig, TlsListenerConfig,
+    PlainTcpConnectorConfig, PlainTcpListenerConfig, TlsConnectorConfig, TlsListenerConfig,
     Transport,
 };
 use crate::whatever;
@@ -35,7 +34,7 @@ pub type ClientConfigList = Vec<ClientConfig>;
 ///
 /// This struct contains all the settings needed to run a tunnel server,
 /// including the listening address, cryptographic keys, and service definitions.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
     pub listen_to: ListenTo,
     pub services: Vec<Service>,
@@ -45,28 +44,28 @@ pub struct ServerConfig {
 ///
 /// This struct contains all the settings needed to run a tunnel client,
 /// including the server address, cryptographic keys, and connection limits.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct ClientConfig {
     pub connect_to: ConnectTo,
     pub allowed_addresses: HashSet<String>,
     #[serde(default)]
-    pub idle_connections: i32,
+    pub idle_connections: usize,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum ConnectTo {
     #[serde(rename = "tcp")]
-    Tcp(PlainTcpConnectorConfig),
+    PlainTcp(PlainTcpConnectorConfig),
     #[serde(rename = "tls")]
-    Tls(TlsConnectorConfig),
+    TcpWithTls(TlsConnectorConfig),
 }
 
 impl Display for ConnectTo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tcp(config) => write!(f, "tcp://{}", config.addr),
-            Self::Tls(config) => write!(f, "tls://{}", config.addr),
+            Self::PlainTcp(config) => write!(f, "tcp://{}", config.addr),
+            Self::TcpWithTls(config) => write!(f, "tls://{}", config.addr),
         }
     }
 }
@@ -116,7 +115,7 @@ impl Display for ListenTo {
 ///
 /// A service maps an external listening address to an internal destination address,
 /// allowing the server to forward traffic from the public interface to backend services.
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct Service {
     pub listen_to: String,
     pub connect_to: String,
@@ -126,14 +125,21 @@ impl ServerConfig {
     /// Loads server configurations from a TOML file.
     pub fn from_file(path: &str) -> Result<ServerConfigList> {
         let content = read_config_file(path)?;
-        Self::from_string(&content)
+        Self::parse(&content)
     }
     /// Parses server configurations from a TOML string.
-    pub fn from_string(contents: &str) -> Result<ServerConfigList> {
+    pub fn parse(contents: &str) -> Result<ServerConfigList> {
         let cfg = from_string::<Config>(contents)?;
-        let servers = cfg.servers.ok_or(whatever!("No server config found"))?;
+        let mut servers = cfg.servers.ok_or(whatever!("No server config found"))?;
         if servers.is_empty() {
             return Err(whatever!("No server found"));
+        }
+        for server in servers.iter_mut() {
+            for service in server.services.iter_mut() {
+                let transport = Transport::parse(&service.connect_to)
+                    .context("Failed to parse connect_to address")?;
+                service.connect_to = transport.as_string();
+            }
         }
         Ok(servers)
     }
@@ -143,24 +149,24 @@ impl ClientConfig {
     /// Loads client configurations from a TOML file.
     pub fn from_file(path: &str) -> Result<ClientConfigList> {
         let content = read_config_file(path)?;
-        Self::from_string(&content)
+        Self::parse(&content)
     }
     /// Parses client configurations from a TOML string.
-    pub fn from_string(contents: &str) -> Result<ClientConfigList> {
+    pub fn parse(contents: &str) -> Result<ClientConfigList> {
         let cfg = from_string::<Config>(contents)?;
         let mut clients = cfg.clients.ok_or(whatever!("No client config found"))?;
         if clients.is_empty() {
             return Err(whatever!("No client found"));
         }
         for client in clients.iter_mut() {
-            if client.idle_connections <= 0 {
+            if client.idle_connections == 0 {
                 client.idle_connections = 8;
             }
             let mut allowed_addresses = HashSet::new();
             for allowed_address in client.allowed_addresses.iter() {
-                let transport = Transport::from_str(allowed_address)
-                    .context("Failed to parse allowed address")?;
-                allowed_addresses.insert(transport.to_string());
+                let transport =
+                    Transport::parse(allowed_address).context("Failed to parse allowed address")?;
+                allowed_addresses.insert(transport.as_string());
             }
             client.allowed_addresses = allowed_addresses;
         }
@@ -186,7 +192,7 @@ pub fn build_tls_example(subject: &str) -> String {
             }],
         }]),
         clients: Some(vec![ClientConfig {
-            connect_to: ConnectTo::Tls(TlsConnectorConfig {
+            connect_to: ConnectTo::TcpWithTls(TlsConnectorConfig {
                 client_cert: cert.client_cert,
                 client_key: cert.client_key,
                 server_cert: cert.server_cert,
@@ -212,11 +218,11 @@ pub fn build_tcp_example() -> String {
             }],
         }]),
         clients: Some(vec![ClientConfig {
-            connect_to: ConnectTo::Tcp(PlainTcpConnectorConfig {
+            connect_to: ConnectTo::PlainTcp(PlainTcpConnectorConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
             }),
             idle_connections: 10,
-            allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
+            allowed_addresses: HashSet::from(["tcp://127.0.0.1:2335".to_string()]),
         }]),
     };
     toml::to_string(&config).unwrap()
@@ -271,14 +277,14 @@ mod tests {
     fn example_tls_config() {
         let cfg = build_tls_example("example.com");
         assert!(!cfg.is_empty());
-        ServerConfig::from_string(&cfg).unwrap();
-        ClientConfig::from_string(&cfg).unwrap();
+        ServerConfig::parse(&cfg).unwrap();
+        ClientConfig::parse(&cfg).unwrap();
     }
     #[test]
     fn example_tcp_config() {
         let cfg = build_tcp_example();
         assert!(!cfg.is_empty());
-        ServerConfig::from_string(&cfg).unwrap();
-        ClientConfig::from_string(&cfg).unwrap();
+        ServerConfig::parse(&cfg).unwrap();
+        ClientConfig::parse(&cfg).unwrap();
     }
 }

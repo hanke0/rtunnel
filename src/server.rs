@@ -4,32 +4,31 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::vec::Vec;
 
-use log::{debug, error, info, trace};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, Receiver};
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
+use tracing::{debug, error, error_span, info, info_span, trace};
 
 use crate::config::{ListenTo, ServerConfig, Service};
 use crate::errors::{Error, Result, ResultExt, whatever};
 use crate::transport::Transport;
 use crate::transport::{
     Context, Listener, Message, MessageKind, PlainTcpListener, PlainTcpListenerConfig, TlsListener,
-    TlsListenerConfig, copy_bidirectional_flush,
+    copy_bidirectional_flush,
 };
 
 pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()> {
+    let services = config.services;
     match config.listen_to {
-        ListenTo::Tcp(cfg) => {
-            start_server_impl::<PlainTcpListener>(context, cfg, config.services).await
-        }
-        ListenTo::Tls(cfg) => start_server_impl::<TlsListener>(context, cfg, config.services).await,
+        ListenTo::Tcp(cfg) => start_server_impl::<PlainTcpListener>(context, cfg, services).await,
+        ListenTo::Tls(cfg) => start_server_impl::<TlsListener>(context, cfg, services).await,
     }
 }
 
-#[tracing::instrument(skip_all)]
 async fn start_server_impl<T: Listener>(
     context: &Context,
     config: T::Config,
@@ -43,18 +42,30 @@ async fn start_server_impl<T: Listener>(
         listener.to_string(),
         pool.clone(),
     ));
-    context.spawn(serve_tunnel(context.children(), listener, pool.clone()));
+    let listen_to = format!("{}", listener);
+    context.spawn(
+        serve_tunnel(context.children(), listener, pool.clone())
+            .instrument(error_span!("server_tunnel", listen_to)),
+    );
     for s in services.iter() {
-        match Transport::from_str(&s.listen_to)? {
+        match Transport::parse(&s.listen_to)? {
             Transport::Tcp(addr) => {
                 let listener = PlainTcpListener::new(PlainTcpListenerConfig { addr }).await?;
+                let listen_to = format!("{}", listener);
                 info!("service starting, listening on {}", listener);
-                context.spawn(serve_service(
-                    context.children(),
-                    listener,
-                    s.connect_to.clone(),
-                    pool.clone(),
-                ));
+                context.spawn(
+                    serve_service(
+                        context.children(),
+                        listener,
+                        s.connect_to.clone(),
+                        pool.clone(),
+                    )
+                    .instrument(error_span!(
+                        "service",
+                        listen_to,
+                        connect_to = s.connect_to
+                    )),
+                );
             }
         }
     }
@@ -76,11 +87,15 @@ async fn tunnel_timer<T: Listener>(context: Context, id: String, pool: TunnelPoo
 
 async fn serve_tunnel<T: Listener>(context: Context, listener: T, pool: TunnelPool<T>) {
     let context = &context;
+    let mut index: u64 = 0;
     loop {
-        match listener.accept().await {
+        index += 1;
+        match context.race(listener.accept()).await {
             Ok((stream, id)) => {
-                debug!("new tunnel client connected: {}", id);
-                pool.clone().add(&context, stream, id).await;
+                pool.clone()
+                    .add(context, stream, id)
+                    .instrument(info_span!("tunnel", index))
+                    .await;
             }
             Err(e) => {
                 if e.is_accept_critical() {
@@ -106,16 +121,20 @@ async fn serve_service<T: Listener, U: Listener>(
     pool: TunnelPool<U>,
 ) {
     let context = &context;
+    let mut index: u64 = 0;
     loop {
-        match listener.accept().await {
-            Ok((stream, id)) => {
-                context.spawn(handle_service_stream::<T, U>(
-                    context.clone(),
-                    id,
-                    stream,
-                    pool.clone(),
-                    connect_to.clone(),
-                ));
+        index += 1;
+        match context.race(listener.accept()).await {
+            Ok((stream, remote_addr)) => {
+                context.spawn(
+                    handle_service_stream::<T, U>(
+                        context.clone(),
+                        stream,
+                        pool.clone(),
+                        connect_to.clone(),
+                    )
+                    .instrument(info_span!("service", index, remote_addr,)),
+                );
             }
             Err(e) => {
                 if e.is_accept_critical() {
@@ -132,19 +151,17 @@ async fn serve_service<T: Listener, U: Listener>(
     context.wait().await;
 }
 
-#[tracing::instrument(skip(context, stream, pool, connect_to))]
 async fn handle_service_stream<T: Listener, U: Listener>(
     context: Context,
-    id: String,
     stream: T::Stream,
     pool: TunnelPool<U>,
     connect_to: String,
 ) {
-    match handle_service_stream_impl::<T, U>(&context, &id, stream, pool, &connect_to).await {
+    match handle_service_stream_impl::<T, U>(&context, stream, pool, &connect_to).await {
         Ok((read, write)) => {
             info!(
-                "Stream {} closed and has read {} bytes and wrote {} bytes",
-                id, read, write
+                "Stream closed and has read {} bytes and wrote {} bytes",
+                read, write
             );
         }
         Err(e) => {
@@ -152,9 +169,9 @@ async fn handle_service_stream<T: Listener, U: Listener>(
                 if context.has_cancel() {
                     return;
                 }
-                error!("Stream {} relay critical error: {:#}", id, e);
+                error!("Stream relay critical error: {:#}", e);
             } else {
-                info!("Stream {} relay non-critical error: {:#}", id, e);
+                info!("Stream relay non-critical error: {:#}", e);
             }
         }
     };
@@ -162,35 +179,39 @@ async fn handle_service_stream<T: Listener, U: Listener>(
 
 async fn handle_service_stream_impl<T: Listener, U: Listener>(
     context: &Context,
-    id: &str,
     stream: T::Stream,
     pool: TunnelPool<U>,
     connect_to: &str,
 ) -> Result<(u64, u64)> {
-    let (mut remote, remote_id) = context
+    debug!("service received a stream");
+    let (remote, tunnel_addr) = context
         .timeout_default(pool.pop())
         .await
         .context("Failed to get a tunnel from pool")?;
-    trace!("Stream got a tunnel: {}->{}", remote_id, connect_to);
+    handle_service_relay::<T, U>(context, stream, remote, connect_to)
+        .instrument(info_span!("service_relay", tunnel_addr))
+        .await
+}
+
+async fn handle_service_relay<T: Listener, U: Listener>(
+    context: &Context,
+    stream: T::Stream,
+    mut tunnel: U::Stream,
+    connect_to: &str,
+) -> Result<(u64, u64)> {
+    info!("stream match a tunnel");
     let mut message = Message::connect(connect_to);
     context
-        .timeout_default(remote.write_all(message.as_ref()))
+        .timeout_default(tunnel.write_all(message.as_ref()))
         .await
         .context("Failed to write connect message")?;
-    trace!(
-        "tunnel connect message has sent, wait connect message reply: {}->{}",
-        id, remote_id,
-    );
+    trace!("tunnel connect message has sent, wait connect message reply");
     context
-        .timeout_default(message.wait_connect_message::<U>(context, &mut remote))
+        .timeout_default(message.wait_connect_message(context, &mut tunnel))
         .await
         .context("Failed to wait connect message")?;
-    trace!(
-        "Tunnel connect message has received, relay started: {}->{}",
-        id, remote_id,
-    );
-
-    let r = copy_bidirectional_flush(stream, remote).await?;
+    trace!("Tunnel connect message has received, relay started",);
+    let r = copy_bidirectional_flush(stream, tunnel).await?;
     Ok(r)
 }
 
@@ -268,6 +289,7 @@ impl<T: Listener> TunnelPool<T> {
     }
 
     async fn add(self, context: &Context, stream: T::Stream, id: String) {
+        info!("tunnel connected");
         let cancel_token = CancellationToken::new();
         let (sender, receiver) = mpsc::channel(1);
         let sender_token = cancel_token.clone();
@@ -337,10 +359,9 @@ async fn keep_alive<T: Listener>(
                 return Ok(stream);
             }
             _ = interval.tick() => {
-                trace!("keep alive ping sending: {}", id);
+                trace!("keep alive ping: {}", id);
                 stream.write_all(message.as_ref()).await?;
-                trace!("keep alive ping receiving: {}", id);
-                message.read_from_inplace::<T>(&mut stream).await?;
+                message.read_from_inplace(&mut stream).await?;
                 if message.get_type() != MessageKind::Ping {
                     error!("keep alive ping received invalid message type: {:?}", message.get_type());
                     return Err(whatever!("Invalid message type: {:?}", message.get_type()));

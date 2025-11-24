@@ -1,10 +1,12 @@
 use crate::errors::Error;
 use crate::errors::Result;
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Default)]
 pub enum Level {
     Trace,
     Debug,
     Info,
+    #[default]
     Warn,
     Error,
 }
@@ -22,14 +24,23 @@ impl Level {
 }
 
 pub fn setup(log_level: Level) -> Result<()> {
-    let r = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_max_level(log_level.to_level_filter())
-        .try_init()
-        .map_err(Error::from_any);
-    Ok(r?)
+    setup_impl(log_level, false)
 }
 
 pub fn setup_testing() {
-    setup(Level::Trace);
+    let _ = setup_impl(Level::Trace, true);
+}
+
+fn setup_impl(log_level: Level, is_testing: bool) -> Result<()> {
+    let builder = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(log_level.to_level_filter());
+    if is_testing {
+        builder
+            .with_test_writer()
+            .try_init()
+            .map_err(Error::from_any)
+    } else {
+        builder.try_init().map_err(Error::from_any)
+    }
 }

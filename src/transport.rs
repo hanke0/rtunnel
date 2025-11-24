@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fmt::Debug;
 use std::fmt::Display;
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -37,20 +38,28 @@ where
     Ok(tokio::io::copy_bidirectional(&mut a, &mut b).await?)
 }
 
-pub trait Listener: Sized + Send + Sync + Display + 'static {
-    type Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static;
+pub trait Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
+
+impl Stream for TcpStream {}
+impl Stream for TlsServerStream<TcpStream> {}
+impl Stream for TlsClientStream<TcpStream> {}
+
+pub trait Listener: Sized + Send + Sync + Display + Debug + 'static {
+    type Stream: Stream;
     type Config;
 
     fn new(config: Self::Config) -> impl Future<Output = Result<Self>> + Send + Sync;
     fn accept(&self) -> impl Future<Output = Result<(Self::Stream, String)>> + Send + Sync;
+    fn address(&self) -> SocketAddr;
 }
 
-pub trait Connector: Sized + Send + Sync + Display + 'static {
-    type Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static;
+pub trait Connector: Sized + Send + Sync + Display + Debug + 'static {
+    type Stream: Stream;
     type Config;
 
     fn new(config: Self::Config) -> impl Future<Output = Result<Self>> + Send;
     fn connect(&self) -> impl Future<Output = Result<(Self::Stream, String)>> + Send;
+    fn address(&self) -> SocketAddr;
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -65,12 +74,18 @@ pub struct TlsListenerConfig {
 pub struct TlsListener {
     acceptor: TlsAcceptor,
     listener: TcpListener,
-    id: String,
+    addr: SocketAddr,
 }
 
 impl fmt::Display for TlsListener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.id)
+        write!(f, "tls://{}", self.addr)
+    }
+}
+
+impl fmt::Debug for TlsListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TlsListener({})", self.addr)
     }
 }
 
@@ -102,11 +117,11 @@ impl Listener for TlsListener {
         server_config.ignore_client_order = true;
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
         let listener = TcpListener::bind(config.addr).await?;
-        let id = format!("tls://{}", listener.local_addr()?);
+        let addr = listener.local_addr()?;
         Ok(Self {
             acceptor,
             listener,
-            id,
+            addr,
         })
     }
 
@@ -118,6 +133,10 @@ impl Listener for TlsListener {
         let r = self.acceptor.accept(stream).await?;
         Ok((r, format!("{}-{}", local_addr, peer_addr)))
     }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -127,12 +146,18 @@ pub struct PlainTcpListenerConfig {
 
 pub struct PlainTcpListener {
     listener: TcpListener,
-    id: String,
+    addr: SocketAddr,
 }
 
 impl fmt::Display for PlainTcpListener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.id)
+        write!(f, "tcp://{}", self.addr)
+    }
+}
+
+impl Debug for PlainTcpListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PlainTcpListener({})", self.addr)
     }
 }
 
@@ -142,8 +167,8 @@ impl Listener for PlainTcpListener {
 
     async fn new(config: Self::Config) -> Result<Self> {
         let listener = TcpListener::bind(config.addr).await?;
-        let id = format!("tcp://{}", listener.local_addr()?);
-        Ok(Self { listener, id })
+        let addr = listener.local_addr()?;
+        Ok(Self { listener, addr })
     }
 
     async fn accept(&self) -> Result<(Self::Stream, String)> {
@@ -152,6 +177,10 @@ impl Listener for PlainTcpListener {
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
         Ok((stream, format!("{}-{}", local_addr, peer_addr)))
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
     }
 }
 
@@ -173,6 +202,12 @@ pub struct TlsConnector {
 impl fmt::Display for TlsConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "tls://{}", self.addr)
+    }
+}
+
+impl fmt::Debug for TlsConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TlsConnector({})", self.addr)
     }
 }
 
@@ -221,6 +256,10 @@ impl Connector for TlsConnector {
             .await?;
         Ok((r, format!("{}-{}", local_addr, peer_addr)))
     }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -235,6 +274,12 @@ pub struct PlainTcpConnector {
 impl fmt::Display for PlainTcpConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "tcp://{}", self.addr)
+    }
+}
+
+impl fmt::Debug for PlainTcpConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PlainTcpConnector({})", self.addr)
     }
 }
 
@@ -253,6 +298,10 @@ impl Connector for PlainTcpConnector {
         set_keep_alive(&stream)?;
         Ok((stream, format!("{local_addr}-{peer_addr}")))
     }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
+    }
 }
 
 pub enum Transport {
@@ -260,33 +309,27 @@ pub enum Transport {
 }
 
 impl Transport {
-    pub fn from_str(value: &str) -> Result<Self> {
-        parse_address(value)
-    }
-}
-
-impl fmt::Display for Transport {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Transport::Tcp(addr) => write!(f, "tcp://{}", addr),
+    pub fn parse(value: &str) -> Result<Self> {
+        if value.starts_with("tcp://") {
+            let addr = value.strip_prefix("tcp://").unwrap();
+            let addr = addr
+                .to_socket_addrs()?
+                .next()
+                .ok_or(whatever!("Invalid address"))?;
+            Ok(Transport::Tcp(addr))
+        } else {
+            let addr = value
+                .to_socket_addrs()?
+                .next()
+                .ok_or(whatever!("Invalid address"))?;
+            Ok(Transport::Tcp(addr))
         }
     }
-}
 
-fn parse_address(value: &str) -> Result<Transport> {
-    if value.starts_with("tcp://") {
-        let addr = value.strip_prefix("tcp://").unwrap();
-        let addr = addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or(whatever!("Invalid address"))?;
-        Ok(Transport::Tcp(addr))
-    } else {
-        let addr = value
-            .to_socket_addrs()?
-            .next()
-            .ok_or(whatever!("Invalid address"))?;
-        Ok(Transport::Tcp(addr))
+    pub fn as_string(&self) -> String {
+        match self {
+            Transport::Tcp(addr) => format!("tcp://{}", addr),
+        }
     }
 }
 
@@ -410,6 +453,27 @@ impl Context {
         E: Into<Error>,
     {
         timeout(Self::DEFAULT_TIMEOUT, f).await
+    }
+
+    /// race runs futures and fast kill it if context is cancelled.
+    /// It returns first result or [`Error::cancel()`]
+    ///
+    /// [`Error::cancel()`]: crate::errors::Error::cancel
+    #[inline]
+    pub async fn race<T, E, F>(&self, f: F) -> Result<T>
+    where
+        F: IntoFuture<Output = StdResult<T, E>>,
+        E: Into<Error>,
+    {
+        tokio::select! {
+            r = f => {
+                match r {
+                        Ok(r) => Ok(r),
+                        Err(e) => Err(e.into()),
+                }
+            }
+            _ = self.wait_cancel() => Err(Error::cancel()),
+        }
     }
 }
 
@@ -581,13 +645,13 @@ impl Message {
         output
     }
 
-    pub async fn read_from<T: Listener>(stream: &mut T::Stream) -> Result<Self> {
+    pub async fn read_from<T: Stream>(stream: &mut T) -> Result<Self> {
         let mut msg = Self::default();
-        msg.read_from_inplace::<T>(stream).await?;
+        msg.read_from_inplace(stream).await?;
         Ok(msg)
     }
 
-    pub async fn read_from_inplace<T: Listener>(&mut self, stream: &mut T::Stream) -> Result<()> {
+    pub async fn read_from_inplace<T: Stream>(&mut self, stream: &mut T) -> Result<()> {
         self.0.resize(Self::HEADER_SIZE, 0);
         stream
             .read_exact(&mut self.0)
@@ -607,10 +671,10 @@ impl Message {
         Ok(())
     }
 
-    pub async fn wait_connect_message<T: Listener>(
+    pub async fn wait_connect_message<T: Stream>(
         &mut self,
         context: &Context,
-        stream: &mut T::Stream,
+        stream: &mut T,
     ) -> Result<String> {
         loop {
             tokio::select! {
@@ -766,9 +830,9 @@ mod tests {
     }
 
     use crate::config;
-    use log::trace;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
+    use tracing::trace;
 
     #[tokio::test]
     async fn test_tls_stream() {
@@ -785,7 +849,7 @@ mod tests {
         .unwrap();
         let connector = TlsConnector::new(TlsConnectorConfig {
             subject: cert.subject,
-            addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
+            addr: listener.address(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert.server_cert,
@@ -818,7 +882,7 @@ mod tests {
         .unwrap();
         let connector = TlsConnector::new(TlsConnectorConfig {
             subject: cert.subject,
-            addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
+            addr: listener.address(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert.server_cert,
@@ -862,7 +926,7 @@ mod tests {
         .unwrap();
         let connector = TlsConnector::new(TlsConnectorConfig {
             subject: cert.subject,
-            addr: SocketAddr::from_str(&format!("{}", listener)).unwrap(),
+            addr: listener.address(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert1.server_cert,

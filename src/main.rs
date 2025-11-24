@@ -4,13 +4,13 @@ use clap::Parser;
 use tokio::runtime::Builder;
 
 use rtunnel::Context;
-use rtunnel::setup;
+use rtunnel::observe;
 use rtunnel::{Arguments, run};
 
 fn main() {
     let context = Context::new();
     let options = Arguments::parse();
-    setup(options.log_level, false);
+    observe::setup(options.log_level).unwrap();
     let res = block_on(run(&context, options));
     process::exit(res);
 }
