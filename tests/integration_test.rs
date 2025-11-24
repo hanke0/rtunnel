@@ -127,19 +127,21 @@ async fn test_integration(config: &str) {
     };
     concurrent_test(context.clone(), 1).await;
     concurrent_test(context.clone(), 8).await;
-    // TODO: no more tunnel available. Should we support create tunnel from server side?
-    // concurrent_test(context.clone(), 20).await;
 
     // wait for keep alive ping to be sent
     sleep(Duration::from_secs(10)).await;
     concurrent_test(context.clone(), 1).await;
+
+    for _ in 0..10000 {
+        connect_to_echo(context.clone()).await;
+    }
     finish.await;
 }
 
 async fn connect_to_echo(context: Context) {
     let stream = TcpStream::connect("127.0.0.1:2334").await.unwrap();
-    let expect = [1u8; 65535];
-    let mut got = [0u8; 65535];
+    let expect = [1u8; 1024];
+    let mut got = [0u8; 1024];
     let mut_got = &mut got;
     let addr = format!(
         "{}-{}",

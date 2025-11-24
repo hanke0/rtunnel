@@ -160,7 +160,7 @@ impl ClientConfig {
         }
         for client in clients.iter_mut() {
             if client.idle_connections == 0 {
-                client.idle_connections = 8;
+                client.idle_connections = 20;
             }
             let mut allowed_addresses = HashSet::new();
             for allowed_address in client.allowed_addresses.iter() {
@@ -199,7 +199,7 @@ pub fn build_tls_example(subject: &str) -> String {
                 subject: subject.to_string(),
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
             }),
-            idle_connections: 10,
+            idle_connections: 20,
             allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
         }]),
     };
@@ -221,7 +221,7 @@ pub fn build_tcp_example() -> String {
             connect_to: ConnectTo::PlainTcp(PlainTcpConnectorConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
             }),
-            idle_connections: 10,
+            idle_connections: 20,
             allowed_addresses: HashSet::from(["tcp://127.0.0.1:2335".to_string()]),
         }]),
     };
