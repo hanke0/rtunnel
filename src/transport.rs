@@ -26,7 +26,6 @@ use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument;
-use tracing::error;
 
 use crate::errors::{Error, Result, ResultExt as _, whatever};
 
@@ -130,22 +129,16 @@ impl Listener for TlsListener {
     }
 
     async fn accept(&self) -> Result<(Self::Stream, String)> {
-        loop {
-            let (stream, _) = self.listener.accept().await?;
-            set_keep_alive(&stream)?;
-            let local_addr = stream.local_addr()?.to_string();
-            let peer_addr = stream.peer_addr()?.to_string();
-
-            match self.acceptor.accept(stream).await {
-                Ok(r) => {
-                    return Ok((r, format!("{}-{}", local_addr, peer_addr)));
-                }
-                Err(e) => {
-                    error!("tls listener accept error: {:#}", e);
-                    continue;
-                }
-            }
-        }
+        let (stream, _) = self.listener.accept().await?;
+        set_keep_alive(&stream)?;
+        let local_addr = stream.local_addr()?.to_string();
+        let peer_addr = stream.peer_addr()?.to_string();
+        let stream = self
+            .acceptor
+            .accept(stream)
+            .await
+            .map_err(Error::from_tls)?;
+        Ok((stream, format!("{}-{}", local_addr, peer_addr)))
     }
 
     fn address(&self) -> SocketAddr {

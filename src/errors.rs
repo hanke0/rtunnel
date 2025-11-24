@@ -51,6 +51,7 @@ pub enum ErrorKind {
     IoRetryAble,
     Timeout,
     Canceled,
+    Tls,
     Other,
 }
 
@@ -67,6 +68,10 @@ impl Error {
         Self {
             inner: Box::new(Inner { kind, message }),
         }
+    }
+
+    pub fn from_tls<T: Display>(message: T) -> Self {
+        Self::from_string(ErrorKind::Tls, message.to_string())
     }
 
     pub fn from_any<T: Display>(e: T) -> Self {
@@ -96,7 +101,7 @@ impl Error {
     }
 
     pub fn is_accept_critical(&self) -> bool {
-        !matches!(self.inner.kind, ErrorKind::IoRetryAble)
+        !matches!(self.inner.kind, ErrorKind::IoRetryAble | ErrorKind::Tls)
     }
 
     pub fn is_relay_critical(&self) -> bool {
