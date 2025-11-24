@@ -346,7 +346,7 @@ impl<T: Listener> TunnelPool<T> {
                         n => {
                             self.inner.requires.fetch_sub(n, Ordering::Release);
                             n
-                        },
+                        }
                     };
                     if n > 0 {
                         Message::require(n).write_to(&mut session).await?;
