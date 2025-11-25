@@ -105,9 +105,9 @@ Edit `rtunnel.toml` to:
 - Add the server's public key to `server_public_key` in the client section
 - Configure `server_address` (where the client connects to)
 - Configure `listen` (where the server listens)
-- Set up `services` with `bind_to` (public address) and `connect_to` (local service address)
+- Set up `services` with `listen_to` (public address) and `connect_to` (local service address)
 - Configure `allowed_addresses` for security
-- See the [rtunnel.toml](rtunnel.toml) for full config example.
+- See the [config-examples](config-examples) for full config example.
 
 ### Step 4: Run the Server
 
