@@ -40,7 +40,7 @@ esac
 
 if [ "$1" != "cfg" ]; then
     download_tar "frp[cs]" "$FRPURL" frp
-    download_tar "rathole" "$RATHOLEURL" rathole
+    download_zip "rathole" "$RATHOLEURL" rathole
 fi
 
 write_tmp_config() {
