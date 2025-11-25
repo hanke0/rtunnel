@@ -56,7 +56,8 @@ write_tmp_config() {
 write_tmp_config frp frpc-tcp.toml <<__EOF__
 serverAddr = "127.0.0.1"
 serverPort = 2333
-log.level = "error"
+log.level = "warn"
+log.disablePrintColor = true
 
 [[proxies]]
 name = "test-tcp"
@@ -69,7 +70,8 @@ __EOF__
 write_tmp_config frp frpc-tls.toml <<__EOF__
 serverAddr = "127.0.0.1"
 serverPort = 2333
-log.level = "error"
+log.level = "warn"
+log.disablePrintColor = true
 transport.tls.enable = true
 transport.tls.certFile = "tmp/frp/client.crt"
 transport.tls.keyFile = "tmp/frp/client.key"
@@ -89,6 +91,7 @@ __EOF__
 write_tmp_config frp frps-tcp.toml <<__EOF__
 bindPort = 2333
 log.level = "warn"
+transport.maxPoolCount = 20
 __EOF__
 
 write_tmp_config frp frps-tls.toml <<__EOF__
@@ -98,6 +101,7 @@ transport.tls.force = true
 transport.tls.certFile = "tmp/frp/server.crt"
 transport.tls.keyFile = "tmp/frp/server.key"
 transport.tls.trustedCaFile = "tmp/frp/server_ca.crt"
+transport.maxPoolCount = 20
 __EOF__
 
 write_tmp_config rathole rathole-tcp.toml <<__EOF__

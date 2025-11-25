@@ -257,7 +257,7 @@ get_uptime() {
 
 echo "tunnel: $runmode"
 run_server
-sleep 3
+sleep 10
 run_client
 sleep 3
 client_cpu=$(get_cpu $clientpid)
