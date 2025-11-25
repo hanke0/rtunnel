@@ -1,7 +1,7 @@
 [[servers]]
 
 [servers.listen_to]
-type = "plain-tcp"
+type = "plain_tcp"
 addr = "127.0.0.1:2333"
 
 [[servers.services]]
@@ -13,6 +13,6 @@ allowed_addresses = ["tcp://127.0.0.1:2335"]
 idle_connections = 20
 
 [clients.connect_to]
-type = "plain-tcp"
+type = "plain_tcp"
 addr = "127.0.0.1:2333"
 
