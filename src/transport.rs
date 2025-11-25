@@ -33,7 +33,7 @@ use crate::errors::{Error, Result, ResultExt as _, whatever};
 pub use tokio::net::TcpListener;
 
 #[inline]
-pub async fn copy_bidirectional_flush<A, B>(mut a: A, mut b: B) -> Result<(u64, u64)>
+pub async fn relay_bidirectional<A, B>(mut a: A, mut b: B) -> Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin + Sized,
     B: AsyncRead + AsyncWrite + Unpin + Sized,

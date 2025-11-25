@@ -21,7 +21,7 @@ use crate::errors::{Error, Result, ResultExt, whatever};
 use crate::transport::Transport;
 use crate::transport::{
     Context, Listener, Message, MessageKind, PlainTcpListener, PlainTcpListenerConfig,
-    TlsTcpListener, copy_bidirectional_flush,
+    TlsTcpListener, relay_bidirectional,
 };
 
 pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()> {
@@ -211,7 +211,7 @@ async fn handle_service_relay<T: Listener, U: Listener>(
         .await
         .context("Failed to write connect message")?;
     trace!("tunnel connect message has sent, relay started");
-    let r = copy_bidirectional_flush(stream, tunnel).await?;
+    let r = relay_bidirectional(stream, tunnel).await?;
     Ok(r)
 }
 

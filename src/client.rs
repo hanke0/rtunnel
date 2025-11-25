@@ -12,7 +12,7 @@ use crate::config::{ClientConfig, ConnectTo};
 use crate::errors::{Result, ResultExt as _, whatever};
 use crate::transport::{
     Connector, Context, Message, MessageKind, PlainTcpConnector, Stream, TlsConnector, Transport,
-    copy_bidirectional_flush, tcp_no_delay,
+    relay_bidirectional, tcp_no_delay,
 };
 
 struct ClientOptions<T: Connector> {
@@ -258,5 +258,5 @@ async fn handle_relay_impl<T: Connector, S: Stream>(
     local: S,
 ) -> Result<(u64, u64)> {
     debug!("start copy_bidirectional");
-    copy_bidirectional_flush(remote, local).await
+    relay_bidirectional(remote, local).await
 }
