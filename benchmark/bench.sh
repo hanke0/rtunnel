@@ -1,7 +1,7 @@
 #!/bin/bash
 
 usage() {
-	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--frp] [--direct] [--tcp] [--frp-tls] [--http-rps]"
+	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--frp] [--direct] [--tcp] [--frp-tls] [--rathole-tls] [--http-rps]"
 	exit 1
 }
 
@@ -19,9 +19,9 @@ runmode=rtunnel-tls
 config=tmp/rtunnel.toml
 frpsconfig=tmp/frps.toml
 frpcconfig=tmp/frpc.toml
+ratholeconfig=tmp/rathole.toml
 http_rps=false
 extra_options=()
-
 
 echolistento=127.0.0.1:2335
 echoconnectto=127.0.0.1:2334
@@ -57,6 +57,10 @@ while [ "$#" -gt 0 ]; do
 		frpcconfig=tmp/frpc-tls.toml
 		shift
 		;;
+	--rathole-tls)
+		runmode=rathole-tls
+		shift
+		;;
 	--direct)
 		runmode=direct
 		echoconnectto=127.0.0.1:2335
@@ -81,7 +85,7 @@ echopid=
 server_pid=
 client_pid=
 
-severlog=/tmp/bench-server.log
+serverlog=/tmp/bench-server.log
 clientlog=/tmp/bench-client.log
 echolog=/tmp/echo-bench.log
 
@@ -110,11 +114,15 @@ run_server() {
 		;;
 	frp*)
 		echo >&2 "frps config: ${frpsconfig}"
-		tmp/frps -c "${frpsconfig}" >"${severlog}" 2>&1 &
+		tmp/frps -c "${frpsconfig}" >"${serverlog}" 2>&1 &
+		;;
+	rathole*)
+		echo >&2 "rathole config: ${ratholeconfig}"
+		tmp/rathole -s "${ratholeconfig}" >"${serverlog}" 2>&1 &
 		;;
 	*)
 		echo >&2 "rtunnel config: ${config}"
-		target/release/rtunnel -l error server -c "$config" >"${severlog}" 2>&1 &
+		target/release/rtunnel -l error server -c "$config" >"${serverlog}" 2>&1 &
 		;;
 	esac
 	server_pid=$!
@@ -129,6 +137,10 @@ run_client() {
 		echo >&2 "frpc config: ${frpcconfig}"
 		tmp/frpc -c "${frpcconfig}" >${clientlog} 2>&1 &
 		;;
+	rathole*)
+		echo >&2 "rathole config: ${ratholeconfig}"
+		tmp/rathole -c "${ratholeconfig}" >${clientlog} 2>&1 &
+		;;
 	*)
 		echo >&2 "rtunnel config: ${config}"
 		target/release/rtunnel -l error client -c "${config}" >${clientlog} 2>&1 &
@@ -137,16 +149,24 @@ run_client() {
 	client_pid=$!
 }
 
+grep_version() {
+	"$@" 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z\.-]+)?(\+[0-9A-Za-z\.-]+)?'
+}
+
 get_version() {
 	case "$runmode" in
 	direct)
+		echo "direct"
 		return
 		;;
 	frp*)
-		echo "frp" "$(tmp/frpc --version)"
+		echo "frp" "$(grep_version tmp/frpc --version)"
+		;;
+	rathole*)
+		echo "rathole" "$(grep_version tmp/rathole --version)"
 		;;
 	*)
-		target/release/rtunnel --version
+		echo rtunnel "$(grep_version target/release/rtunnel --version)"
 		;;
 	esac
 }
@@ -154,7 +174,7 @@ get_version() {
 run_bench() {
 	case "$http_rps" in
 	true)
-		echo '
+		printf '%s' '
 
 worker_processes 1;
 error_log /dev/stderr info;
@@ -175,8 +195,8 @@ http {
     }
 }	
 
-' > tmp/nginx.conf
-		nginx -g "daemon off;" -c tmp/nginx.conf >${severlog} 2>&1 &
+' >tmp/nginx.conf
+		nginx -g "daemon off;" -c tmp/nginx.conf >${echolog} 2>&1 &
 		echopid=$!
 		n="$((times * concurrent * loops))"
 		echo >&2 "running ab -n $n -c $concurrent -k -r http://127.0.0.1:2334/"
