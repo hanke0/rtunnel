@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, ResultExt as _};
 use crate::transport::{
-    PlainTcpConnectorConfig, PlainTcpListenerConfig, TlsConnectorConfig, TlsTcpListenerConfig,
+    PlainTcpConnectorConfig, PlainTcpListenerConfig, TlsTcpConnectorConfig, TlsTcpListenerConfig,
     Transport,
 };
 use crate::whatever;
@@ -53,28 +53,25 @@ pub struct ClientConfig {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ConnectTo {
-    #[serde(rename = "tcp")]
     PlainTcp(PlainTcpConnectorConfig),
-    #[serde(rename = "tls")]
-    TcpWithTls(TlsConnectorConfig),
+    TlsTcp(TlsTcpConnectorConfig),
 }
 
 impl Display for ConnectTo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PlainTcp(config) => write!(f, "tcp://{}", config.addr),
-            Self::TcpWithTls(config) => write!(f, "tls://{}", config.addr),
+            Self::TlsTcp(config) => write!(f, "tls://{}", config.addr),
         }
     }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ListenTo {
     PlainTcp(PlainTcpListenerConfig),
-    #[serde(rename = "tls")]
     TlsTcp(TlsTcpListenerConfig),
 }
 
@@ -191,7 +188,7 @@ pub fn build_tls_example(subject: &str) -> String {
             }],
         }]),
         clients: Some(vec![ClientConfig {
-            connect_to: ConnectTo::TcpWithTls(TlsConnectorConfig {
+            connect_to: ConnectTo::TlsTcp(TlsTcpConnectorConfig {
                 client_cert: cert.client_cert,
                 client_key: cert.client_key,
                 server_cert: cert.server_cert,

@@ -193,7 +193,7 @@ impl Listener for PlainTcpListener {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
-pub struct TlsConnectorConfig {
+pub struct TlsTcpConnectorConfig {
     pub client_cert: String,
     pub client_key: String,
     pub server_cert: String,
@@ -221,7 +221,7 @@ impl fmt::Debug for TlsTcpConnector {
 
 impl Connector for TlsTcpConnector {
     type Stream = TlsClientStream<TcpStream>;
-    type Config = TlsConnectorConfig;
+    type Config = TlsTcpConnectorConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
         let addr = config
@@ -906,7 +906,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let connector = TlsTcpConnector::new(TlsConnectorConfig {
+        let connector = TlsTcpConnector::new(TlsTcpConnectorConfig {
             subject: cert.subject,
             addr: listener.address().to_string(),
             client_cert: cert.client_cert,
@@ -939,7 +939,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let connector = TlsTcpConnector::new(TlsConnectorConfig {
+        let connector = TlsTcpConnector::new(TlsTcpConnectorConfig {
             subject: cert.subject,
             addr: listener.address().to_string(),
             client_cert: cert.client_cert,
@@ -983,7 +983,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let connector = TlsTcpConnector::new(TlsConnectorConfig {
+        let connector = TlsTcpConnector::new(TlsTcpConnectorConfig {
             subject: cert.subject,
             addr: listener.address().to_string(),
             client_cert: cert.client_cert,

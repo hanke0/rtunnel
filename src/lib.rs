@@ -25,12 +25,12 @@ pub use crate::transport::Context;
 /// the appropriate handler based on the selected command.
 pub async fn run(context: &Context, args: Arguments) -> i32 {
     match args.command {
-        Commands::ExampleConfig { subject, kind: typ } => {
-            match typ {
-                ExampleConfigKind::TlsTcp => {
+        Commands::ExampleConfig { subject, r#type } => {
+            match r#type {
+                ExampleConfigType::TlsTcp => {
                     println!("{}", config::build_tls_example(&subject));
                 }
-                ExampleConfigKind::PlainTcp => {
+                ExampleConfigType::PlainTcp => {
                     println!("{}", config::build_tcp_example());
                 }
             }
@@ -194,7 +194,8 @@ pub struct Arguments {
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum ExampleConfigKind {
+#[clap(rename_all = "kebab-case")]
+pub enum ExampleConfigType {
     TlsTcp,
     PlainTcp,
 }
@@ -212,13 +213,13 @@ pub enum Commands {
         #[arg(help = "subject name for the certificate")]
         subject: String,
         #[arg(
-            short = 'k',
-            long = "kind",
-            help = "transport kind of config",
-            default_value = "tls"
+            short = 't',
+            long = "type",
+            help = "transport type of config",
+            default_value = "tls-tcp"
         )]
         #[clap(value_enum)]
-        kind: ExampleConfigKind,
+        r#type: ExampleConfigType,
     },
     SelfSignedCert {
         #[arg(help = "subject name for the certificate")]

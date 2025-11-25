@@ -49,7 +49,7 @@ pub async fn start_client(context: &Context, config: ClientConfig) -> Result<()>
             )
             .await
         }
-        ConnectTo::TcpWithTls(cfg) => {
+        ConnectTo::TlsTcp(cfg) => {
             run_client::<TlsTcpConnector>(
                 context,
                 config.idle_connections,
