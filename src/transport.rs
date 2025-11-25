@@ -198,32 +198,37 @@ pub struct TlsConnectorConfig {
     pub client_key: String,
     pub server_cert: String,
     pub subject: String,
-    pub addr: SocketAddr,
+    pub addr: String,
 }
 
-pub struct TlsConnector {
+pub struct TlsTcpConnector {
     connector: TokioTlsConnector,
     addr: SocketAddr,
     server_name: ServerName<'static>,
 }
 
-impl fmt::Display for TlsConnector {
+impl fmt::Display for TlsTcpConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "tls://{}", self.addr)
     }
 }
 
-impl fmt::Debug for TlsConnector {
+impl fmt::Debug for TlsTcpConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TlsConnector({})", self.addr)
     }
 }
 
-impl Connector for TlsConnector {
+impl Connector for TlsTcpConnector {
     type Stream = TlsClientStream<TcpStream>;
     type Config = TlsConnectorConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
+        let addr = config
+            .addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(whatever!("Invalid address"))?;
         let cert_chain = CertificateDer::from_pem_slice(config.client_cert.as_bytes())
             .context("Failed to parse client cert")?;
         let key_der = PrivateKeyDer::from_pem_slice(config.client_key.as_bytes())
@@ -247,7 +252,7 @@ impl Connector for TlsConnector {
         let connector = TokioTlsConnector::from(Arc::new(client_config));
         Ok(Self {
             connector,
-            addr: config.addr,
+            addr,
             server_name,
         })
     }
@@ -273,7 +278,7 @@ impl Connector for TlsConnector {
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PlainTcpConnectorConfig {
-    pub addr: SocketAddr,
+    pub addr: String,
 }
 
 pub struct PlainTcpConnector {
@@ -297,7 +302,12 @@ impl Connector for PlainTcpConnector {
     type Config = PlainTcpConnectorConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
-        Ok(Self { addr: config.addr })
+        let addr = config
+            .addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(whatever!("Invalid address"))?;
+        Ok(Self { addr })
     }
 
     async fn connect(&self) -> Result<(Self::Stream, String)> {
@@ -896,9 +906,9 @@ mod tests {
         })
         .await
         .unwrap();
-        let connector = TlsConnector::new(TlsConnectorConfig {
+        let connector = TlsTcpConnector::new(TlsConnectorConfig {
             subject: cert.subject,
-            addr: listener.address(),
+            addr: listener.address().to_string(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert.server_cert,
@@ -929,9 +939,9 @@ mod tests {
         })
         .await
         .unwrap();
-        let connector = TlsConnector::new(TlsConnectorConfig {
+        let connector = TlsTcpConnector::new(TlsConnectorConfig {
             subject: cert.subject,
-            addr: listener.address(),
+            addr: listener.address().to_string(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert.server_cert,
@@ -973,9 +983,9 @@ mod tests {
         })
         .await
         .unwrap();
-        let connector = TlsConnector::new(TlsConnectorConfig {
+        let connector = TlsTcpConnector::new(TlsConnectorConfig {
             subject: cert.subject,
-            addr: listener.address(),
+            addr: listener.address().to_string(),
             client_cert: cert.client_cert,
             client_key: cert.client_key,
             server_cert: cert1.server_cert,

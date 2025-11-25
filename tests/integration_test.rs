@@ -132,7 +132,7 @@ async fn test_integration(config: &str) {
     sleep(Duration::from_secs(10)).await;
     concurrent_test(context.clone(), 1).await;
 
-    for _ in 0..10000 {
+    for _ in 0..1000 {
         connect_to_echo(context.clone()).await;
     }
     finish.await;

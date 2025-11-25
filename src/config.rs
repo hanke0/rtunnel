@@ -196,7 +196,7 @@ pub fn build_tls_example(subject: &str) -> String {
                 client_key: cert.client_key,
                 server_cert: cert.server_cert,
                 subject: subject.to_string(),
-                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+                addr: "127.0.0.1:2333".to_string(),
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
@@ -218,7 +218,7 @@ pub fn build_tcp_example() -> String {
         }]),
         clients: Some(vec![ClientConfig {
             connect_to: ConnectTo::PlainTcp(PlainTcpConnectorConfig {
-                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+                addr: "127.0.0.1:2333".to_string(),
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from(["tcp://127.0.0.1:2335".to_string()]),
