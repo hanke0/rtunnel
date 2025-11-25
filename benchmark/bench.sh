@@ -211,7 +211,7 @@ http {
 }	
 
 ' >tmp/nginx.conf
-		nginx -g "daemon off;" -c tmp/nginx.conf >${benchlog} 2>&1 &
+		nginx -g "daemon off;" -p tmp -c nginx.conf >${benchlog} 2>&1 &
 		benchpid=$!
 		n="$((times * concurrent * loops))"
 		echo >&2 "running ab -n $n -c $concurrent -k -r http://127.0.0.1:2334/"
