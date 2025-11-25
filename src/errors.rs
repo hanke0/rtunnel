@@ -19,6 +19,8 @@ pub trait ResultExt<T> {
     where
         C: Display + Send + Sync + 'static,
         F: FnOnce() -> C;
+
+    fn suppress<F: FnOnce(Error)>(self, f: F);
 }
 
 impl<T> ResultExt<T> for Result<T> {
@@ -41,6 +43,13 @@ impl<T> ResultExt<T> for Result<T> {
             Ok(t) => Ok(t),
             Err(e) => Err(e.context(f())),
         }
+    }
+
+    fn suppress<F: FnOnce(Error)>(self, f: F) {
+        match self {
+            Ok(_) => {}
+            Err(e) => f(e),
+        };
     }
 }
 
@@ -261,6 +270,12 @@ macro_rules! generate_from_any {
                     Ok(t) => Ok(t),
                     Err(e) => Err(Error::from(e).context(f())),
                 }
+            }
+            fn suppress<F: FnOnce(Error)>(self, f: F) {
+                match self {
+                    Ok(_) => {}
+                    Err(e) => f(e.into()),
+                };
             }
         }
     };

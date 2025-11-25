@@ -20,14 +20,16 @@ use crate::config::{ListenTo, ServerConfig, Service};
 use crate::errors::{Error, Result, ResultExt, whatever};
 use crate::transport::Transport;
 use crate::transport::{
-    Context, Listener, Message, MessageKind, PlainTcpListener, PlainTcpListenerConfig, TlsTcpListener,
-    copy_bidirectional_flush,
+    Context, Listener, Message, MessageKind, PlainTcpListener, PlainTcpListenerConfig,
+    TlsTcpListener, copy_bidirectional_flush,
 };
 
 pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()> {
     let services = config.services;
     match config.listen_to {
-        ListenTo::PlainTcp(cfg) => start_server_impl::<PlainTcpListener>(context, cfg, services).await,
+        ListenTo::PlainTcp(cfg) => {
+            start_server_impl::<PlainTcpListener>(context, cfg, services).await
+        }
         ListenTo::TlsTcp(cfg) => start_server_impl::<TlsTcpListener>(context, cfg, services).await,
     }
 }

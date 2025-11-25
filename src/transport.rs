@@ -26,6 +26,7 @@ use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument;
+use tracing::warn;
 
 use crate::errors::{Error, Result, ResultExt as _, whatever};
 
@@ -130,7 +131,9 @@ impl Listener for TlsTcpListener {
 
     async fn accept(&self) -> Result<(Self::Stream, String)> {
         let (stream, _) = self.listener.accept().await?;
-        set_keep_alive(&stream)?;
+        tunnel_socket_hint(&stream).suppress(|err| {
+            warn!("set socket hint failed when accept: {}", err);
+        });
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
         let stream = self
@@ -180,7 +183,9 @@ impl Listener for PlainTcpListener {
 
     async fn accept(&self) -> Result<(Self::Stream, String)> {
         let (stream, _) = self.listener.accept().await?;
-        set_keep_alive(&stream)?;
+        tunnel_socket_hint(&stream).suppress(|err| {
+            warn!("set socket hint failed when accept: {}", err);
+        });
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
         Ok((stream, format!("{}-{}", local_addr, peer_addr)))
@@ -255,7 +260,9 @@ impl Connector for TlsConnector {
         let stream = TcpStream::connect(self.addr).await?;
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
-        set_keep_alive(&stream)?;
+        tunnel_socket_hint(&stream).suppress(|err| {
+            warn!("set socket hint failed when connect: {}", err);
+        });
         let addr = stream.local_addr()?.to_string();
         let r = self
             .connector
@@ -303,7 +310,9 @@ impl Connector for PlainTcpConnector {
         let stream = TcpStream::connect(self.addr).await?;
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
-        set_keep_alive(&stream)?;
+        tunnel_socket_hint(&stream).suppress(|err| {
+            warn!("set socket hint failed when connect: {}", err);
+        });
         Ok((stream, format!("{local_addr}-{peer_addr}")))
     }
 
@@ -341,12 +350,13 @@ impl Transport {
     }
 }
 
-fn set_keep_alive(stream: &TcpStream) -> Result<()> {
+fn tunnel_socket_hint(stream: &TcpStream) -> Result<()> {
     let socket_ref = socket2::SockRef::from(stream);
-    let keep_alive = TcpKeepalive::new()
+    static KEEP_ALIVE: TcpKeepalive = TcpKeepalive::new()
         .with_time(Duration::from_secs(10))
         .with_interval(Duration::from_secs(1));
-    socket_ref.set_tcp_keepalive(&keep_alive)?;
+    socket_ref.set_tcp_keepalive(&KEEP_ALIVE)?;
+    socket_ref.set_tcp_nodelay(true)?;
     Ok(())
 }
 
