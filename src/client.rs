@@ -12,7 +12,7 @@ use crate::config::{ClientConfig, ConnectTo};
 use crate::errors::{Result, ResultExt as _, whatever};
 use crate::transport::{
     Connector, Context, Message, MessageKind, PlainTcpConnector, Stream, TlsConnector, Transport,
-    copy_bidirectional_flush,
+    copy_bidirectional_flush, tcp_no_delay,
 };
 
 struct ClientOptions<T: Connector> {
@@ -242,6 +242,8 @@ async fn handle_relay<T: Connector>(
                 .race(TcpStream::connect(addr))
                 .await
                 .context("Failed to connect to local service")?;
+
+            tcp_no_delay(&conn);
             let local_addr = format!("{}-{}", conn.local_addr()?, conn.peer_addr()?);
             debug!("connect to local service: {}", local_addr);
             handle_relay_impl::<T, TcpStream>(stream, conn)

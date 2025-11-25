@@ -131,9 +131,7 @@ impl Listener for TlsTcpListener {
 
     async fn accept(&self) -> Result<(Self::Stream, String)> {
         let (stream, _) = self.listener.accept().await?;
-        tunnel_socket_hint(&stream).suppress(|err| {
-            warn!("set socket hint failed when accept: {}", err);
-        });
+        socket_hint(&stream);
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
         let stream = self
@@ -183,9 +181,7 @@ impl Listener for PlainTcpListener {
 
     async fn accept(&self) -> Result<(Self::Stream, String)> {
         let (stream, _) = self.listener.accept().await?;
-        tunnel_socket_hint(&stream).suppress(|err| {
-            warn!("set socket hint failed when accept: {}", err);
-        });
+        socket_hint(&stream);
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
         Ok((stream, format!("{}-{}", local_addr, peer_addr)))
@@ -260,9 +256,7 @@ impl Connector for TlsConnector {
         let stream = TcpStream::connect(self.addr).await?;
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
-        tunnel_socket_hint(&stream).suppress(|err| {
-            warn!("set socket hint failed when connect: {}", err);
-        });
+        socket_hint(&stream);
         let addr = stream.local_addr()?.to_string();
         let r = self
             .connector
@@ -310,9 +304,7 @@ impl Connector for PlainTcpConnector {
         let stream = TcpStream::connect(self.addr).await?;
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
-        tunnel_socket_hint(&stream).suppress(|err| {
-            warn!("set socket hint failed when connect: {}", err);
-        });
+        socket_hint(&stream);
         Ok((stream, format!("{local_addr}-{peer_addr}")))
     }
 
@@ -350,14 +342,29 @@ impl Transport {
     }
 }
 
-fn tunnel_socket_hint(stream: &TcpStream) -> Result<()> {
+pub fn tcp_no_delay(stream: &TcpStream) {
+    socket_hint_impl(stream, true, false);
+}
+
+fn socket_hint(stream: &TcpStream) {
+    socket_hint_impl(stream, true, true);
+}
+
+fn socket_hint_impl(stream: &TcpStream, no_delay: bool, keep_alive: bool) {
     let socket_ref = socket2::SockRef::from(stream);
-    static KEEP_ALIVE: TcpKeepalive = TcpKeepalive::new()
-        .with_time(Duration::from_secs(10))
-        .with_interval(Duration::from_secs(1));
-    socket_ref.set_tcp_keepalive(&KEEP_ALIVE)?;
-    socket_ref.set_tcp_nodelay(true)?;
-    Ok(())
+    if no_delay {
+        socket_ref.set_tcp_nodelay(true).suppress(|err| {
+            warn!("set_tcp_nodelay failed: {}", err);
+        });
+    }
+    if keep_alive {
+        static KEEP_ALIVE: TcpKeepalive = TcpKeepalive::new()
+            .with_time(Duration::from_secs(10))
+            .with_interval(Duration::from_secs(1));
+        socket_ref.set_tcp_keepalive(&KEEP_ALIVE).suppress(|err| {
+            warn!("set_tcp_keepalive failed: {}", err);
+        });
+    }
 }
 
 /// Context for managing async tasks and cancellation.
