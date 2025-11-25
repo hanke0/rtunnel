@@ -7,9 +7,10 @@ runmode="$1"
 server_pid=
 client_pid=
 echopid=
-serverlog=/tmp/server.log
-clientlog=/tmp/client.log
-echolog=/tmp/echo.log
+serverlog=tmp/server.log
+clientlog=tmp/client.log
+echolog=tmp/echo.log
+mkdir -p tmp
 
 cleanup() {
 	kill $server_pid $client_pid $echopid

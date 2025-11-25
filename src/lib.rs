@@ -27,29 +27,17 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
     match args.command {
         Commands::ExampleConfig { subject, kind: typ } => {
             match typ {
-                ExampleConfigKind::Tls => {
+                ExampleConfigKind::TlsTcp => {
                     println!("{}", config::build_tls_example(&subject));
                 }
-                ExampleConfigKind::Tcp => {
+                ExampleConfigKind::PlainTcp => {
                     println!("{}", config::build_tcp_example());
                 }
             }
             0
         }
-        Commands::SelfSignedCert { subject, output } => {
-            let cert = config::SelfSignedCert::new(&subject);
-            fs::write(output.join("server.crt"), cert.server_cert.clone())
-                .expect("Failed to write server cert");
-            fs::write(output.join("server.key"), cert.server_key)
-                .expect("Failed to write server key");
-            fs::write(output.join("server_ca.crt"), cert.client_cert.clone())
-                .expect("Failed to write server ca cert");
-            fs::write(output.join("client.crt"), cert.client_cert)
-                .expect("Failed to write client cert");
-            fs::write(output.join("client.key"), cert.client_key)
-                .expect("Failed to write client key");
-            fs::write(output.join("client_ca.crt"), cert.server_cert)
-                .expect("Failed to write client ca cert");
+        Commands::SelfSignedCert { .. } => {
+            write_self_signed_cert(args.command);
             0
         }
         Commands::Client { config } => {
@@ -207,8 +195,8 @@ pub struct Arguments {
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum ExampleConfigKind {
-    Tls,
-    Tcp,
+    TlsTcp,
+    PlainTcp,
 }
 
 /// Available commands for the rtunnel CLI.
@@ -278,4 +266,25 @@ fn warmup_aws_lc_rs() {
     provider.secure_random.fill(&mut [0u8]).unwrap();
     // Ignore once value set many times.
     let _ = provider.clone().install_default();
+}
+
+fn write_self_signed_cert(opt: Commands) {
+    match opt {
+        Commands::SelfSignedCert { subject, output } => {
+            let cert = config::SelfSignedCert::new(&subject);
+            fs::write(output.join("server.crt"), cert.server_cert.clone())
+                .expect("Failed to write server cert");
+            fs::write(output.join("server.key"), cert.server_key)
+                .expect("Failed to write server key");
+            fs::write(output.join("server_ca.crt"), cert.client_cert.clone())
+                .expect("Failed to write server ca cert");
+            fs::write(output.join("client.crt"), cert.client_cert)
+                .expect("Failed to write client cert");
+            fs::write(output.join("client.key"), cert.client_key)
+                .expect("Failed to write client key");
+            fs::write(output.join("client_ca.crt"), cert.server_cert)
+                .expect("Failed to write client ca cert");
+        }
+        _ => unreachable!(),
+    }
 }

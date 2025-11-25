@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, ResultExt as _};
 use crate::transport::{
-    PlainTcpConnectorConfig, PlainTcpListenerConfig, TlsConnectorConfig, TlsListenerConfig,
+    PlainTcpConnectorConfig, PlainTcpListenerConfig, TlsConnectorConfig, TlsTcpListenerConfig,
     Transport,
 };
 use crate::whatever;
@@ -73,10 +73,9 @@ impl Display for ConnectTo {
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum ListenTo {
-    #[serde(rename = "tcp")]
-    Tcp(PlainTcpListenerConfig),
+    PlainTcp(PlainTcpListenerConfig),
     #[serde(rename = "tls")]
-    Tls(TlsListenerConfig),
+    TlsTcp(TlsTcpListenerConfig),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -105,8 +104,8 @@ impl SelfSignedCert {
 impl Display for ListenTo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Tcp(config) => write!(f, "tcp://{}", config.addr),
-            Self::Tls(config) => write!(f, "tls://{}", config.addr),
+            Self::PlainTcp(config) => write!(f, "tcp://{}", config.addr),
+            Self::TlsTcp(config) => write!(f, "tls://{}", config.addr),
         }
     }
 }
@@ -179,7 +178,7 @@ pub fn build_tls_example(subject: &str) -> String {
 
     let config = Config {
         servers: Some(vec![ServerConfig {
-            listen_to: ListenTo::Tls(TlsListenerConfig {
+            listen_to: ListenTo::TlsTcp(TlsTcpListenerConfig {
                 server_cert: cert.server_cert.clone(),
                 server_key: cert.server_key,
                 client_cert: cert.client_cert.clone(),
@@ -209,7 +208,7 @@ pub fn build_tls_example(subject: &str) -> String {
 pub fn build_tcp_example() -> String {
     let config = Config {
         servers: Some(vec![ServerConfig {
-            listen_to: ListenTo::Tcp(PlainTcpListenerConfig {
+            listen_to: ListenTo::PlainTcp(PlainTcpListenerConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
             }),
             services: vec![Service {

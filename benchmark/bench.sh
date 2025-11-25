@@ -1,7 +1,10 @@
 #!/bin/bash
 
 usage() {
-	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--frp] [--direct] [--tcp] [--frp-tls] [--rathole-tls] [--http-rps]"
+	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--http]"
+	echo "          [--direct] [--rtunnel-tcp] [--rtunnel-tls]"
+	echo "          [--frp-tcp] [--frp-tls]"
+	echo "          [--rathole-tcp] [--rathole-tls]"
 	exit 1
 }
 
@@ -16,10 +19,10 @@ concurrent=10
 bytes=1024
 loops=100
 runmode=rtunnel-tls
-config=tmp/rtunnel.toml
-frpsconfig=tmp/frps.toml
-frpcconfig=tmp/frpc.toml
-ratholeconfig=tmp/rathole.toml
+config=tmp/rtunnel/rtunnel-tls.toml
+frpsconfig=tmp/frp/frps-tcp.toml
+frpcconfig=tmp/frp/frpc-tcp.toml
+ratholeconfig=tmp/rathole/rathole-tls.toml
 http_rps=false
 extra_options=()
 
@@ -47,17 +50,35 @@ while [ "$#" -gt 0 ]; do
 		loops=$2
 		shift 2
 		;;
-	--frp)
-		runmode=frp
+	--rtunnel-tcp)
+		runmode=rtunnel-tcp
+		config=tmp/rtunnel/rtunnel-tcp.toml
+		shift
+		;;
+	--rtunnel-tls)
+		runmode=rtunnel-tls
+		config=tmp/rtunnel/rtunnel-tcp.toml
+		shift
+		;;
+	--frp-tcp)
+		runmode=frp-tcp
+		frpsconfig=tmp/frp/frps-tcp.toml
+		frpcconfig=tmp/frp/frpc-tcp.toml
 		shift
 		;;
 	--frp-tls)
 		runmode=frp-tls
-		frpsconfig=tmp/frps-tls.toml
-		frpcconfig=tmp/frpc-tls.toml
+		frpsconfig=tmp/frp/frps-tls.toml
+		frpcconfig=tmp/frp/frpc-tls.toml
+		shift
+		;;
+	--rathole-tcp)
+		ratholeconfig=tmp/rathole/rathole-tcp.toml
+		runmode=rathole-tcp
 		shift
 		;;
 	--rathole-tls)
+		ratholeconfig=tmp/rathole/rathole-tls.toml
 		runmode=rathole-tls
 		shift
 		;;
@@ -66,12 +87,7 @@ while [ "$#" -gt 0 ]; do
 		echoconnectto=127.0.0.1:2335
 		shift
 		;;
-	--tcp)
-		runmode=rtunnel-tcp
-		config=tmp/rtunnel-tcp.toml
-		shift
-		;;
-	--http-rps)
+	--http)
 		http_rps=true
 		shift
 		;;
@@ -81,31 +97,30 @@ while [ "$#" -gt 0 ]; do
 	esac
 done
 
-echopid=
-server_pid=
-client_pid=
+benchpid=
+serverpid=
+clientpid=
 
-serverlog=/tmp/bench-server.log
-clientlog=/tmp/bench-client.log
-echolog=/tmp/echo-bench.log
+serverlog=tmp/bench-server.log
+clientlog=tmp/bench-client.log
+benchlog=tmp/bench.log
 
 cleanup() {
-	[ -n "$echopid" ] && kill $echopid >/dev/null 2>&1
-	[ -n "$server_pid" ] && kill $server_pid >/dev/null 2>&1
-	[ -n "$client_pid" ] && kill $client_pid >/dev/null 2>&1
+	[ -n "$benchpid" ] && kill $benchpid >/dev/null 2>&1
+	[ -n "$serverpid" ] && kill $serverpid >/dev/null 2>&1
+	[ -n "$clientpid" ] && kill $clientpid >/dev/null 2>&1
 }
 
 trap 'cleanup' EXIT
-
+mkdir -p tmp
 cargo build --quiet --release --bin echo-bench || exit 1
 case "$runmode" in
 rtunnel*)
 	cargo build "${extra_options[@]}" --quiet --release --bin rtunnel || exit 1
-	cargo run --quiet -- example-config example.com >tmp/rtunnel.toml || exit 1
-	cargo run --quiet -- example-config --kind tcp example.com >tmp/rtunnel-tcp.toml || exit 1
-	chmod 600 tmp/rtunnel.toml tmp/rtunnel-tcp.toml
 	;;
 esac
+
+export RUST_LOG=warn
 
 run_server() {
 	case "$runmode" in
@@ -114,18 +129,18 @@ run_server() {
 		;;
 	frp*)
 		echo >&2 "frps config: ${frpsconfig}"
-		tmp/frps -c "${frpsconfig}" >"${serverlog}" 2>&1 &
+		tmp/frp/frps -c "${frpsconfig}" >"${serverlog}" 2>&1 &
 		;;
 	rathole*)
 		echo >&2 "rathole config: ${ratholeconfig}"
-		tmp/rathole -s "${ratholeconfig}" >"${serverlog}" 2>&1 &
+		tmp/rathole/rathole -s "${ratholeconfig}" >"${serverlog}" 2>&1 &
 		;;
 	*)
 		echo >&2 "rtunnel config: ${config}"
-		target/release/rtunnel -l error server -c "$config" >"${serverlog}" 2>&1 &
+		target/release/rtunnel -l warn server -c "$config" >"${serverlog}" 2>&1 &
 		;;
 	esac
-	server_pid=$!
+	serverpid=$!
 }
 
 run_client() {
@@ -135,18 +150,18 @@ run_client() {
 		;;
 	frp*)
 		echo >&2 "frpc config: ${frpcconfig}"
-		tmp/frpc -c "${frpcconfig}" >${clientlog} 2>&1 &
+		tmp/frp/frpc -c "${frpcconfig}" >${clientlog} 2>&1 &
 		;;
 	rathole*)
 		echo >&2 "rathole config: ${ratholeconfig}"
-		tmp/rathole -c "${ratholeconfig}" >${clientlog} 2>&1 &
+		tmp/rathole/rathole -c "${ratholeconfig}" >${clientlog} 2>&1 &
 		;;
 	*)
 		echo >&2 "rtunnel config: ${config}"
-		target/release/rtunnel -l error client -c "${config}" >${clientlog} 2>&1 &
+		target/release/rtunnel -l warn client -c "${config}" >${clientlog} 2>&1 &
 		;;
 	esac
-	client_pid=$!
+	clientpid=$!
 }
 
 grep_version() {
@@ -196,23 +211,27 @@ http {
 }	
 
 ' >tmp/nginx.conf
-		nginx -g "daemon off;" -c tmp/nginx.conf >${echolog} 2>&1 &
-		echopid=$!
+		nginx -g "daemon off;" -c tmp/nginx.conf >${benchlog} 2>&1 &
+		benchpid=$!
 		n="$((times * concurrent * loops))"
 		echo >&2 "running ab -n $n -c $concurrent -k -r http://127.0.0.1:2334/"
-		ab -n "$n" -c "$concurrent" -k -r http://127.0.0.1:2334/
-		kill $echopid
+		ab -n "$n" -c "$concurrent" -k -r http://127.0.0.1:2334/ 2>"${benchlog}" | tee -a "${benchlog}" | awk -F: '
+		/Failed requests/ { print "failed: ", $2 }
+		/Requests per second/ { print "rps: ", $2 }
+		/Transfer rate/ { print "throughput: ", $2 }
+		'
+		kill $benchpid
 		;;
 	*)
-		target/release/echo-bench $echoconnectto $echolistento "$concurrent" "$times" "$bytes" "$loops" 2>${echolog} &
-		echopid=$!
+		target/release/echo-bench $echoconnectto $echolistento "$concurrent" "$times" "$bytes" "$loops" 2>${benchlog} &
+		benchpid=$!
 		;;
 	esac
 }
 
 is_alive() {
 	[ -z "$1" ] && return
-	kill -0 $1 >/dev/null 2>&1
+	kill -0 "$1" >/dev/null 2>&1
 }
 
 get_cpu() {
@@ -233,41 +252,41 @@ get_uptime() {
 
 echo "tunnel: $runmode"
 run_server
-sleep 10
+sleep 3
 run_client
-sleep 10
-client_cpu=$(get_cpu $client_pid)
-server_cpu=$(get_cpu $server_pid)
+sleep 3
+client_cpu=$(get_cpu $clientpid)
+server_cpu=$(get_cpu $serverpid)
 uptime=$(get_uptime)
 run_bench
-sleep 10
+sleep 3
 
-echo >&2 "server pid: $server_pid"
-echo >&2 "client pid: $client_pid"
-echo >&2 "echo-bench pid: $echopid"
+echo >&2 "server pid: $serverpid"
+echo >&2 "client pid: $clientpid"
+echo >&2 "bench pid: $benchpid"
 echo >&2 "version: $(get_version)"
-echo >&2 "server-log: $severlog"
+echo >&2 "server-log: $serverlog"
 echo >&2 "client-log: $clientlog"
-echo >&2 "echo-bench-log: $echolog"
+echo >&2 "bench-log: $benchlog"
 
 while :; do
 	sleep 5
-	if ! is_alive $server_pid; then
+	if ! is_alive $serverpid; then
 		echo >&2 "server process died"
 		break
 	fi
-	if ! is_alive $client_pid; then
+	if ! is_alive $clientpid; then
 		echo >&2 "client process died"
 		break
 	fi
-	if ! is_alive $echopid; then
-		echo >&2 "echo-bench process died"
+	if ! is_alive $benchpid; then
+		echo >&2 "bench process died"
 		break
 	fi
 done
 
-server_cpu1=$(get_cpu $server_pid)
-client_cpu1=$(get_cpu $client_pid)
+server_cpu1=$(get_cpu $serverpid)
+client_cpu1=$(get_cpu $clientpid)
 uptime1=$(get_uptime)
 
 cpu1="($server_cpu1 - $server_cpu)/($uptime1 - $uptime)*100"
@@ -280,4 +299,4 @@ echo "client-cpu: $(echo "scale=3; $cpu2" | bc -l 2>/dev/null)%"
 echo
 
 cleanup
-wait $server_pid $client_pid $echopid
+wait $serverpid $clientpid $benchpid

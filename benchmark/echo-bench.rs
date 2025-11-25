@@ -18,6 +18,7 @@ use crate::common::run_echo_server;
 #[derive(Default)]
 struct Metrics {
     bytes: AtomicI64,
+    loops: AtomicI64,
     spend_ns: AtomicI64,
     failed: AtomicI64,
 }
@@ -61,11 +62,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("total_bytes: {}", metrics.bytes.load(Ordering::SeqCst));
     let throughout = metrics.bytes.load(Ordering::SeqCst) as f64
-        / (metrics.spend_ns.load(Ordering::SeqCst) as f64)
+        / metrics.spend_ns.load(Ordering::SeqCst) as f64
         * 1_000_000_000.
         / 1024.;
+    let rps = metrics.loops.load(Ordering::SeqCst) as f64
+        / metrics.spend_ns.load(Ordering::SeqCst) as f64
+        * 1_000_000_000.;
 
     println!("throughput: {:.3}KB/s", throughout);
+    println!("rps: {:.0}/s", rps);
     Ok(())
 }
 
@@ -102,6 +107,7 @@ async fn client_task(addr: String, times: usize, bytes: usize, loops: usize, met
                     return;
                 }
             };
+            metrics.loops.fetch_add(1, Ordering::SeqCst);
             start = Instant::now();
         }
     }

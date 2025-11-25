@@ -1,7 +1,7 @@
 #!/bin/bash
 
 usage() {
-	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>]"
+	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--http]"
 	exit 1
 }
 
@@ -15,6 +15,7 @@ times=10
 concurrent=10
 bytes=1024
 loops=100
+extra_args=()
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -38,6 +39,10 @@ while [ "$#" -gt 0 ]; do
 		loops=$2
 		shift 2
 		;;
+	--http)
+		extra_args+=("--http")
+		shift
+		;;
 	*)
 		usage
 		;;
@@ -46,27 +51,18 @@ done
 
 echo >tmp/benchmark.txt
 mkdir -p tmp
-echo "run direct"
-./benchmark/bench.sh --direct --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
-echo "run rtunnel"
-./benchmark/bench.sh --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
-echo "run rtunnel-tcp"
-./benchmark/bench.sh --tcp --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
-echo "run frp"
-./benchmark/bench.sh --frp --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
-echo "run frp-tls"
-./benchmark/bench.sh --frp-tls --times $times --concurrent $concurrent -b $bytes -l $loops | tee -a tmp/benchmark.txt
 
-columns=(
-	connect_spend_ns
-	Throughput
-	server-cpu
-	client-cpu
-)
-direct_data=()
-rtunnel_data=()
-rtunnel_tcp_data=()
-frp_data=()
-frp_tls_data=()
+run_bench() {
+	echo "run $1"
+	./benchmark/bench.sh "$1" --times $times --concurrent $concurrent -b $bytes -l $loops "${extra_args[@]}" | tee -a tmp/benchmark.txt
+}
+
+run_bench --direct
+run_bench --rtunnel-tcp
+run_bench --frp-tcp
+run_bench --rathole-tcp
+run_bench --rtunnel-tls
+run_bench --frp-tls
+run_bench --rathole-tls
 
 ./benchmark/bench-collect.sh tmp/benchmark.txt

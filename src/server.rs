@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 use std::vec::Vec;
 
 use tokio::io::AsyncWriteExt;
@@ -13,21 +14,21 @@ use tokio::sync::mpsc::{self, Receiver};
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
-use tracing::{debug, error, error_span, info, info_span, trace};
+use tracing::{debug, error, error_span, info, info_span, trace, warn};
 
 use crate::config::{ListenTo, ServerConfig, Service};
 use crate::errors::{Error, Result, ResultExt, whatever};
 use crate::transport::Transport;
 use crate::transport::{
-    Context, Listener, Message, MessageKind, PlainTcpListener, PlainTcpListenerConfig, TlsListener,
+    Context, Listener, Message, MessageKind, PlainTcpListener, PlainTcpListenerConfig, TlsTcpListener,
     copy_bidirectional_flush,
 };
 
 pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()> {
     let services = config.services;
     match config.listen_to {
-        ListenTo::Tcp(cfg) => start_server_impl::<PlainTcpListener>(context, cfg, services).await,
-        ListenTo::Tls(cfg) => start_server_impl::<TlsListener>(context, cfg, services).await,
+        ListenTo::PlainTcp(cfg) => start_server_impl::<PlainTcpListener>(context, cfg, services).await,
+        ListenTo::TlsTcp(cfg) => start_server_impl::<TlsTcpListener>(context, cfg, services).await,
     }
 }
 
@@ -299,9 +300,9 @@ impl<T: Listener> TunnelPool<T> {
             _marker: PhantomData,
         };
         self.inner.sessions.lock().await.insert(id.clone(), session);
-        self.inner.notify.notify_last();
+        self.inner.notify.notify_one();
         let alive_ctx = context.clone();
-        tokio::spawn(async move {
+        context.spawn(async move {
             let r = keep_alive::<T>(alive_ctx, sender_token, &id, stream).await;
             match r {
                 Ok(_) => {
@@ -329,27 +330,37 @@ impl<T: Listener> TunnelPool<T> {
     }
 
     pub async fn pop(&self) -> Result<(T::Stream, String)> {
+        let start = Instant::now();
+        let r = self
+            .pop_impl()
+            .instrument(info_span!("pop", elapsed = %start.elapsed().as_millis()))
+            .await;
+        let elapsed = start.elapsed();
+        if elapsed > Duration::from_millis(5) {
+            warn!("match a tunnel took too long: {:?}", elapsed);
+        }
+        r
+    }
+
+    async fn pop_impl(&self) -> Result<(T::Stream, String)> {
         loop {
             let mut sessions = self.inner.sessions.lock().await;
-            match sessions.pop_first() {
+            let result = sessions.pop_first();
+            let is_empty = sessions.is_empty();
+            drop(sessions);
+
+            match result {
                 Some((id, session)) => {
                     trace!("pop a session: {}", session);
                     let mut session = session.join().await?;
-                    let n = match self.inner.requires.load(Ordering::Acquire) {
-                        0 => {
-                            if sessions.is_empty() {
-                                1
-                            } else {
-                                0
-                            }
+                    let n = self.inner.requires.load(Ordering::Acquire);
+                    if n > 0 || is_empty {
+                        self.inner.requires.fetch_sub(n, Ordering::Release);
+                        if is_empty {
+                            Message::require(n + 1).write_to(&mut session).await?;
+                        } else {
+                            Message::require(n).write_to(&mut session).await?;
                         }
-                        n => {
-                            self.inner.requires.fetch_sub(n, Ordering::Release);
-                            n
-                        }
-                    };
-                    if n > 0 {
-                        Message::require(n).write_to(&mut session).await?;
                     }
                     return Ok((session, id));
                 }

@@ -65,7 +65,7 @@ pub trait Connector: Sized + Send + Sync + Display + Debug + 'static {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
-pub struct TlsListenerConfig {
+pub struct TlsTcpListenerConfig {
     pub server_cert: String,
     pub server_key: String,
     pub client_cert: String,
@@ -73,27 +73,27 @@ pub struct TlsListenerConfig {
     pub addr: SocketAddr,
 }
 
-pub struct TlsListener {
+pub struct TlsTcpListener {
     acceptor: TlsAcceptor,
     listener: TcpListener,
     addr: SocketAddr,
 }
 
-impl fmt::Display for TlsListener {
+impl fmt::Display for TlsTcpListener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "tls://{}", self.addr)
     }
 }
 
-impl fmt::Debug for TlsListener {
+impl fmt::Debug for TlsTcpListener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "TlsListener({})", self.addr)
     }
 }
 
-impl Listener for TlsListener {
+impl Listener for TlsTcpListener {
     type Stream = TlsServerStream<TcpStream>;
-    type Config = TlsListenerConfig;
+    type Config = TlsTcpListenerConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
         let cert_chain = CertificateDer::from_pem_slice(config.server_cert.as_bytes())
@@ -870,7 +870,7 @@ mod tests {
     async fn test_tls_stream() {
         observe::setup_testing();
         let cert = config::SelfSignedCert::new("example.com");
-        let listener = TlsListener::new(TlsListenerConfig {
+        let listener = TlsTcpListener::new(TlsTcpListenerConfig {
             server_cert: cert.server_cert.clone(),
             server_key: cert.server_key,
             client_cert: cert.client_cert.clone(),
@@ -903,7 +903,7 @@ mod tests {
         let cert = config::SelfSignedCert::new("example.com");
         let cert1 = config::SelfSignedCert::new("example.com");
 
-        let listener = TlsListener::new(TlsListenerConfig {
+        let listener = TlsTcpListener::new(TlsTcpListenerConfig {
             server_cert: cert.server_cert.clone(),
             server_key: cert.server_key,
             client_cert: cert1.client_cert.clone(),
@@ -947,7 +947,7 @@ mod tests {
         observe::setup_testing();
         let cert = config::SelfSignedCert::new("example.com");
         let cert1 = config::SelfSignedCert::new("example.com");
-        let listener = TlsListener::new(TlsListenerConfig {
+        let listener = TlsTcpListener::new(TlsTcpListenerConfig {
             server_cert: cert.server_cert.clone(),
             server_key: cert.server_key,
             client_cert: cert.client_cert.clone(),
