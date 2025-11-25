@@ -1,6 +1,6 @@
 [package]
 name = "rtunnel"
-version = "0.10.0"
+version = "0.10.1"
 edition = "2024"
 default-run = "rtunnel"
 
@@ -15,10 +15,11 @@ bytes = "1.11.0"
 tokio-util = { version = "0.7.17", features = ["rt"] }
 socket2 = "0.6.1"
 clap = { version = "4.5.52", features = ["derive"] }
-tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws_lc_rs"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs"] }
 rcgen = "0.14.5"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
+quinn = { version = "0.11.9", default-features = false, features = ["rustls-aws-lc-rs", "runtime-tokio"]}
 
 [dev-dependencies]
 serial_test = "3.2.0"

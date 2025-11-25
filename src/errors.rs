@@ -23,6 +23,16 @@ pub trait ResultExt<T> {
     fn suppress<F: FnOnce(Error)>(self, f: F);
 }
 
+pub trait ToAny<T> {
+    fn to_any(self) -> Result<T>;
+}
+
+impl<T, E: Display> ToAny<T> for StdResult<T, E> {
+    fn to_any(self) -> Result<T> {
+        self.map_err(Error::from_any)
+    }
+}
+
 impl<T> ResultExt<T> for Result<T> {
     fn context<C>(self, context: C) -> Result<T>
     where
@@ -93,6 +103,10 @@ impl Error {
 
     pub fn cancel() -> Self {
         Self::from_string(ErrorKind::Canceled, "context cancelled".to_string())
+    }
+
+    pub fn eof<T: Display>(msg: T) -> Self {
+        Self::from_string(ErrorKind::Eof, msg.to_string())
     }
 
     pub fn from_io(error: std::io::Error) -> Self {

@@ -3,15 +3,19 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::future::Future;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::pin::{Pin, pin};
 use std::result::Result as StdResult;
 use std::sync::Arc;
+use std::task::Context as FContext;
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::BytesMut;
+use quinn::crypto::rustls::QuicServerConfig;
+use quinn::{Endpoint, RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 use socket2::TcpKeepalive;
-use tokio::io::AsyncWriteExt;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector as TokioTlsConnector;
@@ -28,7 +32,7 @@ use tokio_util::task::TaskTracker;
 use tracing::Instrument;
 use tracing::warn;
 
-use crate::errors::{Error, Result, ResultExt as _, whatever};
+use crate::errors::{Error, Result, ResultExt as _, ToAny as _, whatever};
 
 pub use tokio::net::TcpListener;
 
@@ -46,6 +50,7 @@ pub trait Stream: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static {}
 impl Stream for TcpStream {}
 impl Stream for TlsServerStream<TcpStream> {}
 impl Stream for TlsClientStream<TcpStream> {}
+impl Stream for QuinStream {}
 
 pub trait Listener: Sized + Send + Sync + Display + Debug + 'static {
     type Stream: Stream;
@@ -97,28 +102,8 @@ impl Listener for TlsTcpListener {
     type Config = TlsTcpListenerConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
-        let cert_chain = CertificateDer::from_pem_slice(config.server_cert.as_bytes())
-            .context("Failed to parse server cert")?;
-        let key_der = PrivateKeyDer::from_pem_slice(config.server_key.as_bytes())
-            .context("Failed to parse server key")?;
-        let client_ca = CertificateDer::from_pem_slice(config.client_cert.as_bytes())
-            .context("Failed to parse client ca")?;
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store
-            .add(client_ca)
-            .context("failed to add client ca to root store")?;
-        let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-            .build()
-            .context("Failed to build client cert verifier")?;
-        debug_assert!(client_cert_verifier.client_auth_mandatory());
-        debug_assert!(client_cert_verifier.offer_client_auth());
-        let mut server_config =
-            rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_client_cert_verifier(client_cert_verifier)
-                .with_single_cert(vec![cert_chain], key_der)
-                .context("Failed to build server tls config")?;
-        server_config.ignore_client_order = true;
-        server_config.session_storage = ServerSessionMemoryCache::new(256);
+        let server_config =
+            build_tls_server_config(&config.server_cert, &config.server_key, &config.client_cert)?;
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
         let listener = TcpListener::bind(config.addr).await?;
         let addr = listener.local_addr()?;
@@ -192,6 +177,97 @@ impl Listener for PlainTcpListener {
     }
 }
 
+pub struct QuicListenerConfig {
+    pub server_cert: String,
+    pub server_key: String,
+    pub client_cert: String,
+    pub subject: String,
+    pub addr: SocketAddr,
+}
+
+pub struct QuicListener {
+    endpoint: Endpoint,
+    addr: SocketAddr,
+}
+
+impl Listener for QuicListener {
+    type Stream = QuinStream;
+    type Config = QuicListenerConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        let server_config =
+            build_tls_server_config(&config.server_cert, &config.server_key, &config.client_cert)?;
+        let server_config = QuicServerConfig::try_from(server_config).to_any()?;
+        let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(server_config));
+        let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+        transport_config.max_concurrent_uni_streams(0_u8.into());
+
+        let addr = config.addr;
+        let endpoint = Endpoint::server(server_config, config.addr)?;
+        Ok(Self { endpoint, addr })
+    }
+
+    async fn accept(&self) -> Result<(Self::Stream, String)> {
+        let incoming = match self.endpoint.accept().await {
+            Some(incoming) => incoming,
+            None => return Err(Error::eof("quic listener closed")),
+        };
+        let connection = incoming.await.to_any()?;
+        let (send, recv) = connection.accept_bi().await.to_any()?;
+        let peer_addr = connection.remote_address();
+        Ok((
+            QuinStream(send, recv),
+            format!("{}-{}", self.addr, peer_addr),
+        ))
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+impl Display for QuicListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "quic://{}", self.addr)
+    }
+}
+
+impl Debug for QuicListener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "QuicListener({})", self.addr)
+    }
+}
+
+pub struct QuinStream(SendStream, RecvStream);
+
+impl AsyncRead for QuinStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut FContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        pin!(&mut self.1).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for QuinStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut FContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        pin!(&mut self.0).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut FContext<'_>) -> Poll<std::io::Result<()>> {
+        pin!(&mut self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut FContext<'_>) -> Poll<std::io::Result<()>> {
+        pin!(&mut self.0).poll_shutdown(cx)
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 pub struct TlsTcpConnectorConfig {
     pub client_cert: String,
@@ -229,26 +305,10 @@ impl Connector for TlsTcpConnector {
             .to_socket_addrs()?
             .next()
             .ok_or(whatever!("Invalid address"))?;
-        let cert_chain = CertificateDer::from_pem_slice(config.client_cert.as_bytes())
-            .context("Failed to parse client cert")?;
-        let key_der = PrivateKeyDer::from_pem_slice(config.client_key.as_bytes())
-            .context("Failed to parse client key")?;
-        let server_cert = CertificateDer::from_pem_slice(config.server_cert.as_bytes())
-            .context("Failed to parse server cert")?;
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store
-            .add(server_cert)
-            .context("Failed to add server cert to root store")?;
+        let client_config =
+            build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
         let server_name =
             ServerName::try_from(config.subject).context("Failed to parse server name")?;
-
-        let mut client_config =
-            rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-                .with_root_certificates(root_store)
-                .with_client_auth_cert(vec![cert_chain], key_der)
-                .context("Failed to build client tls config")?;
-        client_config.enable_sni = false;
-        client_config.resumption = Resumption::in_memory_sessions(256);
         let connector = TokioTlsConnector::from(Arc::new(client_config));
         Ok(Self {
             connector,
@@ -375,6 +435,62 @@ fn socket_hint_impl(stream: &TcpStream, no_delay: bool, keep_alive: bool) {
             warn!("set_tcp_keepalive failed: {}", err);
         });
     }
+}
+
+fn build_tls_server_config(
+    server_cert: &str,
+    server_key: &str,
+    client_cert: &str,
+) -> Result<rustls::ServerConfig> {
+    let cert_chain = CertificateDer::from_pem_slice(server_cert.as_bytes())
+        .context("Failed to parse server cert")?;
+    let key_der = PrivateKeyDer::from_pem_slice(server_key.as_bytes())
+        .context("Failed to parse server key")?;
+    let client_ca = CertificateDer::from_pem_slice(client_cert.as_bytes())
+        .context("Failed to parse client ca")?;
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(client_ca)
+        .context("failed to add client ca to root store")?;
+    let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+        .build()
+        .context("Failed to build client cert verifier")?;
+    debug_assert!(client_cert_verifier.client_auth_mandatory());
+    debug_assert!(client_cert_verifier.offer_client_auth());
+    let mut server_config =
+        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_client_cert_verifier(client_cert_verifier)
+            .with_single_cert(vec![cert_chain], key_der)
+            .context("Failed to build server tls config")?;
+    server_config.ignore_client_order = true;
+    server_config.session_storage = ServerSessionMemoryCache::new(256);
+    Ok(server_config)
+}
+
+fn build_tls_client_config(
+    client_cert: &str,
+    client_key: &str,
+    server_cert: &str,
+) -> Result<rustls::ClientConfig> {
+    let cert_chain = CertificateDer::from_pem_slice(client_cert.as_bytes())
+        .context("Failed to parse client cert")?;
+    let key_der = PrivateKeyDer::from_pem_slice(client_key.as_bytes())
+        .context("Failed to parse client key")?;
+    let server_cert = CertificateDer::from_pem_slice(server_cert.as_bytes())
+        .context("Failed to parse server cert")?;
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store
+        .add(server_cert)
+        .context("Failed to add server cert to root store")?;
+
+    let mut client_config =
+        rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_root_certificates(root_store)
+            .with_client_auth_cert(vec![cert_chain], key_der)
+            .context("Failed to build client tls config")?;
+    client_config.enable_sni = false;
+    client_config.resumption = Resumption::in_memory_sessions(256);
+    Ok(client_config)
 }
 
 /// Context for managing async tasks and cancellation.

@@ -1,8 +1,0 @@
-endpoint = ":8080"
-# encryption = ""
-private_key = "123"
-
-[[services]]
-name = "ssh"
-bind = "localhost:22"
-allowed_clients = ["client_name"]
