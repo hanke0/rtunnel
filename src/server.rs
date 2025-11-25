@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
@@ -222,12 +221,6 @@ struct Session<T: Listener> {
     _marker: PhantomData<T>,
 }
 
-impl<T: Listener> Ord for Session<T> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.id.cmp(&other.id)
-    }
-}
-
 impl<T: Listener> PartialEq for Session<T> {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -235,24 +228,6 @@ impl<T: Listener> PartialEq for Session<T> {
 }
 
 impl<T: Listener> Eq for Session<T> {}
-
-impl<T: Listener> PartialOrd for Session<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<T: Listener> fmt::Display for Session<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.id)
-    }
-}
-
-impl<T: Listener> fmt::Debug for Session<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.id)
-    }
-}
 
 impl<T: Listener> Session<T> {
     #[tracing::instrument(skip_all)]
@@ -353,7 +328,7 @@ impl<T: Listener> TunnelPool<T> {
 
             match result {
                 Some((id, session)) => {
-                    trace!("pop a session: {}", session);
+                    trace!("match a tunnel: {}", session.id);
                     let mut session = session.join().await?;
                     let n = self.inner.requires.load(Ordering::Acquire);
                     if n > 0 || is_empty {
