@@ -64,5 +64,6 @@ run_bench --rathole-tcp
 run_bench --rtunnel-tls
 run_bench --frp-tls
 run_bench --rathole-tls
+run_bench --rtunnel-quic
 
 ./benchmark/bench-collect.sh tmp/benchmark.txt

@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, ResultExt as _};
 use crate::transport::{
-    PlainTcpConnectorConfig, PlainTcpListenerConfig, TlsTcpConnectorConfig, TlsTcpListenerConfig,
-    Transport,
+    PlainTcpConnectorConfig, PlainTcpListenerConfig, QuicConnectorConfig, QuicListenerConfig,
+    TlsTcpConnectorConfig, TlsTcpListenerConfig, Transport,
 };
 use crate::whatever;
 
@@ -53,10 +53,11 @@ pub struct ClientConfig {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ConnectTo {
     PlainTcp(PlainTcpConnectorConfig),
     TlsTcp(TlsTcpConnectorConfig),
+    Quic(QuicConnectorConfig),
 }
 
 impl Display for ConnectTo {
@@ -64,15 +65,17 @@ impl Display for ConnectTo {
         match self {
             Self::PlainTcp(config) => write!(f, "tcp://{}", config.addr),
             Self::TlsTcp(config) => write!(f, "tls://{}", config.addr),
+            Self::Quic(config) => write!(f, "quic://{}", config.addr),
         }
     }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ListenTo {
     PlainTcp(PlainTcpListenerConfig),
     TlsTcp(TlsTcpListenerConfig),
+    Quic(QuicListenerConfig),
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -103,6 +106,7 @@ impl Display for ListenTo {
         match self {
             Self::PlainTcp(config) => write!(f, "tcp://{}", config.addr),
             Self::TlsTcp(config) => write!(f, "tls://{}", config.addr),
+            Self::Quic(config) => write!(f, "quic://{}", config.addr),
         }
     }
 }
@@ -219,6 +223,38 @@ pub fn build_tcp_example() -> String {
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from(["tcp://127.0.0.1:2335".to_string()]),
+        }]),
+    };
+    toml::to_string(&config).unwrap()
+}
+
+pub fn build_quic_example(subject: &str) -> String {
+    let cert = SelfSignedCert::new(subject);
+
+    let config = Config {
+        servers: Some(vec![ServerConfig {
+            listen_to: ListenTo::Quic(QuicListenerConfig {
+                server_cert: cert.server_cert.clone(),
+                server_key: cert.server_key,
+                client_cert: cert.client_cert.clone(),
+                subject: subject.to_string(),
+                addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+            }),
+            services: vec![Service {
+                listen_to: "tcp://0.0.0.0:2334".to_string(),
+                connect_to: "tcp://127.0.0.1:2335".to_string(),
+            }],
+        }]),
+        clients: Some(vec![ClientConfig {
+            connect_to: ConnectTo::Quic(QuicConnectorConfig {
+                client_cert: cert.client_cert,
+                client_key: cert.client_key,
+                server_cert: cert.server_cert,
+                subject: subject.to_string(),
+                addr: "127.0.0.1:2333".to_string(),
+            }),
+            idle_connections: 20,
+            allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
         }]),
     };
     toml::to_string(&config).unwrap()

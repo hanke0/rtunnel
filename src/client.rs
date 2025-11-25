@@ -11,8 +11,8 @@ use tracing::{debug, error, error_span, info, info_span, trace};
 use crate::config::{ClientConfig, ConnectTo};
 use crate::errors::{Result, ResultExt as _, whatever};
 use crate::transport::{
-    Connector, Context, Message, MessageKind, PlainTcpConnector, Stream, TlsTcpConnector,
-    Transport, relay_bidirectional, tcp_no_delay,
+    Connector, Context, Message, MessageKind, PlainTcpConnector, QuicConnector, Stream,
+    TlsTcpConnector, Transport, relay_bidirectional, tcp_no_delay,
 };
 
 struct ClientOptions<T: Connector> {
@@ -51,6 +51,15 @@ pub async fn start_client(context: &Context, config: ClientConfig) -> Result<()>
         }
         ConnectTo::TlsTcp(cfg) => {
             run_client::<TlsTcpConnector>(
+                context,
+                config.idle_connections,
+                cfg,
+                config.allowed_addresses,
+            )
+            .await
+        }
+        ConnectTo::Quic(cfg) => {
+            run_client::<QuicConnector>(
                 context,
                 config.idle_connections,
                 cfg,

@@ -20,7 +20,7 @@ use crate::errors::{Error, Result, ResultExt, whatever};
 use crate::transport::Transport;
 use crate::transport::{
     Context, Listener, Message, MessageKind, PlainTcpListener, PlainTcpListenerConfig,
-    TlsTcpListener, relay_bidirectional,
+    QuicListener, TlsTcpListener, relay_bidirectional,
 };
 
 pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()> {
@@ -30,6 +30,7 @@ pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()>
             start_server_impl::<PlainTcpListener>(context, cfg, services).await
         }
         ListenTo::TlsTcp(cfg) => start_server_impl::<TlsTcpListener>(context, cfg, services).await,
+        ListenTo::Quic(cfg) => start_server_impl::<QuicListener>(context, cfg, services).await,
     }
 }
 

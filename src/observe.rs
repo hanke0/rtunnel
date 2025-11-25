@@ -1,3 +1,6 @@
+use std::env;
+use std::fmt;
+
 use crate::errors::Error;
 use crate::errors::Result;
 
@@ -11,14 +14,14 @@ pub enum Level {
     Error,
 }
 
-impl Level {
-    fn to_level_filter(self) -> tracing_subscriber::filter::LevelFilter {
+impl fmt::Display for Level {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Level::Trace => tracing_subscriber::filter::LevelFilter::TRACE,
-            Level::Debug => tracing_subscriber::filter::LevelFilter::DEBUG,
-            Level::Info => tracing_subscriber::filter::LevelFilter::INFO,
-            Level::Warn => tracing_subscriber::filter::LevelFilter::WARN,
-            Level::Error => tracing_subscriber::filter::LevelFilter::ERROR,
+            Level::Trace => write!(f, "trace"),
+            Level::Debug => write!(f, "debug"),
+            Level::Info => write!(f, "info"),
+            Level::Warn => write!(f, "warn"),
+            Level::Error => write!(f, "error"),
         }
     }
 }
@@ -32,9 +35,16 @@ pub fn setup_testing() {
 }
 
 fn setup_impl(log_level: Level, is_testing: bool) -> Result<()> {
+    let env_log = env::var("RUST_LOG").unwrap_or_default();
+    let rust_log = if env_log.is_empty() {
+        log_level.to_string() + ",quinn=error,quinn_proto=error,rustls=error,tokio_rustls=error"
+    } else {
+        env_log
+    };
+    let filter = tracing_subscriber::EnvFilter::new(rust_log);
     let builder = tracing_subscriber::fmt()
         .with_ansi(false)
-        .with_max_level(log_level.to_level_filter());
+        .with_env_filter(filter);
     if is_testing {
         builder
             .with_test_writer()

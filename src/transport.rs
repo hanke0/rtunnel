@@ -2,6 +2,8 @@ use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::future::Future;
+use std::net::IpAddr;
+use std::net::Ipv6Addr;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::{Pin, pin};
 use std::result::Result as StdResult;
@@ -11,12 +13,16 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::BytesMut;
+use quinn::Connection;
+use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Endpoint, RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 use socket2::TcpKeepalive;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector as TokioTlsConnector;
 use tokio_rustls::client::TlsStream as TlsClientStream;
@@ -30,7 +36,7 @@ use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument;
-use tracing::warn;
+use tracing::{error, info_span, warn};
 
 use crate::errors::{Error, Result, ResultExt as _, ToAny as _, whatever};
 
@@ -177,6 +183,7 @@ impl Listener for PlainTcpListener {
     }
 }
 
+#[derive(Deserialize, Serialize, Clone)]
 pub struct QuicListenerConfig {
     pub server_cert: String,
     pub server_key: String,
@@ -186,8 +193,66 @@ pub struct QuicListenerConfig {
 }
 
 pub struct QuicListener {
-    endpoint: Endpoint,
     addr: SocketAddr,
+    receiver: Mutex<mpsc::Receiver<(QuinStream, String)>>,
+    _sender: mpsc::Sender<(QuinStream, String)>,
+}
+
+impl QuicListener {
+    async fn accept_forever(endpoint: Endpoint, sender: mpsc::Sender<(QuinStream, String)>) {
+        loop {
+            match endpoint.accept().await {
+                Some(incoming) => match incoming.await.to_any() {
+                    Ok(connection) => {
+                        let remote = connection.remote_address().to_string();
+                        let sender = sender.clone();
+                        tokio::spawn(
+                            Self::handle_connection(sender, connection)
+                                .instrument(info_span!("handle_connection", remote)),
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("failed to accept connection: {:#}", e);
+                        break;
+                    }
+                },
+                None => return,
+            };
+        }
+    }
+
+    async fn handle_connection(sender: mpsc::Sender<(QuinStream, String)>, connection: Connection) {
+        loop {
+            let (send, mut recv) = match connection.accept_bi().await.to_any() {
+                Ok((send, recv)) => (send, recv),
+                Err(e) => {
+                    error!("failed to accept bi stream: {:#}", e);
+                    break;
+                }
+            };
+            // quic requires client-initiated, ignore first byte.
+            match recv.read_u8().await {
+                Ok(_) => {
+                    error!("client closed connection");
+                }
+                Err(err) => {
+                    warn!("failed to read first byte: {:#}", err);
+                    continue;
+                }
+            }
+            let id = format!("{}({})", connection.remote_address(), send.id());
+            match sender.send((QuinStream(send, recv), id)).await.to_any() {
+                Ok(_) => {
+                    continue;
+                }
+                Err(e) => {
+                    error!("failed to send stream: {:#}", e);
+                    break;
+                }
+            }
+        }
+    }
 }
 
 impl Listener for QuicListener {
@@ -204,21 +269,20 @@ impl Listener for QuicListener {
 
         let addr = config.addr;
         let endpoint = Endpoint::server(server_config, config.addr)?;
-        Ok(Self { endpoint, addr })
+        let (sender, receiver) = mpsc::channel(1024);
+        tokio::spawn(Self::accept_forever(endpoint, sender.clone()));
+        Ok(Self {
+            addr,
+            _sender: sender,
+            receiver: Mutex::new(receiver),
+        })
     }
 
     async fn accept(&self) -> Result<(Self::Stream, String)> {
-        let incoming = match self.endpoint.accept().await {
-            Some(incoming) => incoming,
-            None => return Err(Error::eof("quic listener closed")),
-        };
-        let connection = incoming.await.to_any()?;
-        let (send, recv) = connection.accept_bi().await.to_any()?;
-        let peer_addr = connection.remote_address();
-        Ok((
-            QuinStream(send, recv),
-            format!("{}-{}", self.addr, peer_addr),
-        ))
+        match self.receiver.lock().await.recv().await {
+            Some((stream, id)) => Ok((stream, id)),
+            None => Err(Error::eof("quic listener closed")),
+        }
     }
 
     fn address(&self) -> SocketAddr {
@@ -376,6 +440,100 @@ impl Connector for PlainTcpConnector {
         let peer_addr = stream.peer_addr()?.to_string();
         socket_hint(&stream);
         Ok((stream, format!("{local_addr}-{peer_addr}")))
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct QuicConnectorConfig {
+    pub client_cert: String,
+    pub client_key: String,
+    pub server_cert: String,
+    pub subject: String,
+    pub addr: String,
+}
+
+pub struct QuicConnector {
+    endpoint: Endpoint,
+    connection: Mutex<Option<Connection>>,
+    addr: SocketAddr,
+    server_name: String,
+}
+
+impl fmt::Display for QuicConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "quic://{}", self.addr)
+    }
+}
+
+impl fmt::Debug for QuicConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "QuicConnector({})", self.addr)
+    }
+}
+
+impl QuicConnector {
+    const ANY_IP: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
+    const ANY_ADDR: SocketAddr = SocketAddr::new(Self::ANY_IP, 0);
+
+    fn rebind(&self) -> Result<()> {
+        let socket = std::net::UdpSocket::bind(Self::ANY_ADDR)?;
+        self.endpoint.rebind(socket).to_any()
+    }
+
+    async fn new_connection(&self) -> Result<Connection> {
+        self.rebind()?;
+        let connection = self.endpoint.connect(self.addr, &self.server_name)?.await?;
+        Ok(connection)
+    }
+
+    async fn fill_new_connection(&self) -> Result<()> {
+        let connection = self.new_connection().await?;
+        *self.connection.lock().await = Some(connection);
+        Ok(())
+    }
+}
+
+impl Connector for QuicConnector {
+    type Stream = QuinStream;
+    type Config = QuicConnectorConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        let addr = config
+            .addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(whatever!("Invalid address"))?;
+        let client_config =
+            build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
+        let client_config = QuicClientConfig::try_from(client_config).to_any()?;
+        let client_config = quinn::ClientConfig::new(Arc::new(client_config));
+        let mut endpoint = Endpoint::client(Self::ANY_ADDR)?;
+        endpoint.set_default_client_config(client_config);
+        let server_name = config.subject.clone();
+        let c = Self {
+            endpoint,
+            addr,
+            server_name,
+            connection: Mutex::new(None),
+        };
+        c.fill_new_connection().await?;
+        Ok(c)
+    }
+    async fn connect(&self) -> Result<(Self::Stream, String)> {
+        let connection = self.connection.lock().await;
+        if connection.is_none() {
+            return Err(Error::eof("no connection"));
+        }
+        let (mut send, recv) = connection.as_ref().unwrap().open_bi().await?;
+        drop(connection);
+        // quic requires client-initiated, send a byte to open stream.
+        send.write_i8(0).await?;
+        let id = send.id();
+        Ok((QuinStream(send, recv), id.to_string()))
     }
 
     fn address(&self) -> SocketAddr {
@@ -1013,24 +1171,58 @@ mod tests {
     async fn test_tls_stream() {
         observe::setup_testing();
         let cert = config::SelfSignedCert::new("example.com");
-        let listener = TlsTcpListener::new(TlsTcpListenerConfig {
-            server_cert: cert.server_cert.clone(),
-            server_key: cert.server_key,
-            client_cert: cert.client_cert.clone(),
-            subject: cert.subject.clone(),
-            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
-        })
-        .await
-        .unwrap();
-        let connector = TlsTcpConnector::new(TlsTcpConnectorConfig {
-            subject: cert.subject,
-            addr: listener.address().to_string(),
-            client_cert: cert.client_cert,
-            client_key: cert.client_key,
-            server_cert: cert.server_cert,
-        })
-        .await
-        .unwrap();
+        const ADDR: &str = "127.0.0.1:4445";
+        test_stream::<TlsTcpListener, TlsTcpConnector>(
+            TlsTcpListenerConfig {
+                server_cert: cert.server_cert.clone(),
+                server_key: cert.server_key,
+                client_cert: cert.client_cert.clone(),
+                subject: cert.subject.clone(),
+                addr: SocketAddr::from_str(ADDR).unwrap(),
+            },
+            TlsTcpConnectorConfig {
+                subject: cert.subject,
+                addr: ADDR.to_string(),
+                client_cert: cert.client_cert,
+                client_key: cert.client_key,
+                server_cert: cert.server_cert,
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_quic_stream() {
+        observe::setup_testing();
+        let cert = config::SelfSignedCert::new("example.com");
+        const ADDR: &str = "127.0.0.1:4446";
+        test_stream::<QuicListener, QuicConnector>(
+            QuicListenerConfig {
+                server_cert: cert.server_cert.clone(),
+                server_key: cert.server_key,
+                client_cert: cert.client_cert.clone(),
+                subject: cert.subject.clone(),
+                addr: SocketAddr::from_str(ADDR).unwrap(),
+            },
+            QuicConnectorConfig {
+                client_cert: cert.client_cert,
+                client_key: cert.client_key,
+                server_cert: cert.server_cert,
+                subject: cert.subject,
+                addr: ADDR.to_string(),
+            },
+        )
+        .await;
+    }
+
+    async fn test_stream<T: Listener, C: Connector>(
+        listen_config: T::Config,
+        connect_config: C::Config,
+    ) {
+        let listener = T::new(listen_config).await.unwrap();
+        let connector = C::new(connect_config).await.unwrap();
+        trace!("listener: {:?}", listener);
+        trace!("connector: {:?}", connector);
         let (client, server) = tokio::join!(connector.connect(), listener.accept(),);
 
         let ((mut send, ..), (mut recv, ..)) = (client.unwrap(), server.unwrap());

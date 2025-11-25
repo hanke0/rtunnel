@@ -149,6 +149,7 @@ __EOF__
 mkdir -p tmp/rtunnel
 cargo run --quiet -- example-config --type plain-tcp example.com >tmp/rtunnel/rtunnel-tcp.toml
 cargo run --quiet -- example-config --type tls-tcp example.com >tmp/rtunnel/rtunnel-tls.toml
+cargo run --quiet -- example-config --type quic example.com >tmp/rtunnel/rtunnel-quic.toml
 cargo run --quiet -- self-signed-cert example.com -o tmp/frp
 mkdir -p tmp/frp
 ./benchmark/create-self-signed.sh tmp/rathole

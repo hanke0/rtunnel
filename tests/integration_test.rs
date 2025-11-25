@@ -18,7 +18,10 @@ use tracing::{error, info};
 
 use rtunnel::errors::ResultExt;
 use rtunnel::observe;
-use rtunnel::{Arguments, Context, config::build_tcp_example, config::build_tls_example, run};
+use rtunnel::{
+    Arguments, Context, config::build_quic_example, config::build_tcp_example,
+    config::build_tls_example, run,
+};
 
 #[tokio::test]
 #[serial]
@@ -31,6 +34,13 @@ async fn test_tls() {
 #[serial]
 async fn test_tcp() {
     let config = build_tcp_example();
+    test_integration(&config).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_quic() {
+    let config = build_quic_example("example.com");
     test_integration(&config).await;
 }
 

@@ -2,7 +2,7 @@
 
 usage() {
 	echo "Usage: $0 [-t <times=10>] [-c <concurrent=10>] [-b <bytes=1024>] [-l <loop=100>] [--http]"
-	echo "          [--direct] [--rtunnel-tcp] [--rtunnel-tls]"
+	echo "          [--direct] [--rtunnel-tcp] [--rtunnel-tls] [--rtunnel-quic]"
 	echo "          [--frp-tcp] [--frp-tls]"
 	echo "          [--rathole-tcp] [--rathole-tls]"
 	exit 1
@@ -26,8 +26,8 @@ ratholeconfig=tmp/rathole/rathole-tls.toml
 http_rps=false
 extra_options=()
 
-echolistento=127.0.0.1:2335
-echoconnectto=127.0.0.1:2334
+benchlistento=127.0.0.1:2335
+benchconnectto=127.0.0.1:2334
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	-t | --times)
@@ -60,6 +60,11 @@ while [ "$#" -gt 0 ]; do
 		config=tmp/rtunnel/rtunnel-tcp.toml
 		shift
 		;;
+	--rtunnel-quic)
+		runmode=rtunnel-quic
+		config=tmp/rtunnel/rtunnel-quic.toml
+		shift
+		;;
 	--frp-tcp)
 		runmode=frp-tcp
 		frpsconfig=tmp/frp/frps-tcp.toml
@@ -84,7 +89,7 @@ while [ "$#" -gt 0 ]; do
 		;;
 	--direct)
 		runmode=direct
-		echoconnectto=127.0.0.1:2335
+		benchconnectto=127.0.0.1:2335
 		shift
 		;;
 	--http)
@@ -215,7 +220,7 @@ http {
 		benchpid=$!
 		n="$((times * concurrent * loops))"
 		echo >&2 "running ab -n $n -c $concurrent -k -r http://127.0.0.1:2334/"
-		ab -n "$n" -c "$concurrent" -k -r http://127.0.0.1:2334/ 2>"${benchlog}" | tee -a "${benchlog}" | awk -F: '
+		ab -n "$n" -c "$concurrent" -k -r http://${benchconnectto}/ 2>"${benchlog}" | tee -a "${benchlog}" | awk -F: '
 		/Failed requests/ { print "failed: ", $2 }
 		/Requests per second/ { print "rps: ", $2 }
 		/Transfer rate/ { print "throughput: ", $2 }
@@ -223,7 +228,7 @@ http {
 		kill $benchpid
 		;;
 	*)
-		target/release/echo-bench $echoconnectto $echolistento "$concurrent" "$times" "$bytes" "$loops" 2>${benchlog} &
+		target/release/echo-bench $benchconnectto $benchlistento "$concurrent" "$times" "$bytes" "$loops" 2>${benchlog} &
 		benchpid=$!
 		;;
 	esac

@@ -33,6 +33,9 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
                 ExampleConfigType::PlainTcp => {
                     println!("{}", config::build_tcp_example());
                 }
+                ExampleConfigType::Quic => {
+                    println!("{}", config::build_quic_example(&subject));
+                }
             }
             0
         }
@@ -198,6 +201,7 @@ pub struct Arguments {
 pub enum ExampleConfigType {
     TlsTcp,
     PlainTcp,
+    Quic,
 }
 
 /// Available commands for the rtunnel CLI.
