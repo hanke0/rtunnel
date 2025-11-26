@@ -119,6 +119,7 @@ impl Display for ListenTo {
 pub struct Service {
     pub listen_to: String,
     pub connect_to: String,
+    pub reuse_port: Option<bool>,
 }
 
 impl ServerConfig {
@@ -185,10 +186,12 @@ pub fn build_tls_example(subject: &str) -> String {
                 client_cert: cert.client_cert.clone(),
                 subject: subject.to_string(),
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+                reuse_port: None,
             }),
             services: vec![Service {
                 listen_to: "tcp://0.0.0.0:2334".to_string(),
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
+                reuse_port: None,
             }],
         }]),
         clients: Some(vec![ClientConfig {
@@ -211,10 +214,12 @@ pub fn build_tcp_example() -> String {
         servers: Some(vec![ServerConfig {
             listen_to: ListenTo::PlainTcp(PlainTcpListenerConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
+                reuse_port: None,
             }),
             services: vec![Service {
                 listen_to: "tcp://0.0.0.0:2334".to_string(),
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
+                reuse_port: None,
             }],
         }]),
         clients: Some(vec![ClientConfig {
@@ -243,6 +248,7 @@ pub fn build_quic_example(subject: &str) -> String {
             services: vec![Service {
                 listen_to: "tcp://0.0.0.0:2334".to_string(),
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
+                reuse_port: None,
             }],
         }]),
         clients: Some(vec![ClientConfig {

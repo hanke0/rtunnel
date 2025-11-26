@@ -20,6 +20,7 @@ use quinn::{Endpoint, RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
 use socket2::TcpKeepalive;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::net::TcpSocket;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -83,6 +84,7 @@ pub struct TlsTcpListenerConfig {
     pub client_cert: String,
     pub subject: String,
     pub addr: SocketAddr,
+    pub reuse_port: Option<bool>,
 }
 
 pub struct TlsTcpListener {
@@ -111,7 +113,7 @@ impl Listener for TlsTcpListener {
         let server_config =
             build_tls_server_config(&config.server_cert, &config.server_key, &config.client_cert)?;
         let acceptor = TlsAcceptor::from(Arc::new(server_config));
-        let listener = TcpListener::bind(config.addr).await?;
+        let listener = build_listener(config.addr, config.reuse_port)?;
         let addr = listener.local_addr()?;
         Ok(Self {
             acceptor,
@@ -141,6 +143,7 @@ impl Listener for TlsTcpListener {
 #[derive(Deserialize, Serialize, Clone)]
 pub struct PlainTcpListenerConfig {
     pub addr: SocketAddr,
+    pub reuse_port: Option<bool>,
 }
 
 pub struct PlainTcpListener {
@@ -160,12 +163,30 @@ impl Debug for PlainTcpListener {
     }
 }
 
+fn build_listener(addr: SocketAddr, reuse_port: Option<bool>) -> Result<TcpListener> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4().context("failed to create socket")?
+    } else {
+        TcpSocket::new_v6().context("failed to create socket")?
+    };
+    socket
+        .set_reuseaddr(true)
+        .context("failed to set reuseaddr")?;
+    if reuse_port.unwrap_or(false) {
+        socket
+            .set_reuseport(true)
+            .context("failed to set reuseport")?;
+    }
+    socket.bind(addr).context("failed to bind socket")?;
+    socket.listen(128).context("failed to listen on socket")
+}
+
 impl Listener for PlainTcpListener {
     type Stream = TcpStream;
     type Config = PlainTcpListenerConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
-        let listener = TcpListener::bind(config.addr).await?;
+        let listener = build_listener(config.addr, config.reuse_port)?;
         let addr = listener.local_addr()?;
         Ok(Self { listener, addr })
     }
@@ -1179,6 +1200,7 @@ mod tests {
                 client_cert: cert.client_cert.clone(),
                 subject: cert.subject.clone(),
                 addr: SocketAddr::from_str(ADDR).unwrap(),
+                reuse_port: None,
             },
             TlsTcpConnectorConfig {
                 subject: cert.subject,
@@ -1244,6 +1266,7 @@ mod tests {
             client_cert: cert1.client_cert.clone(),
             subject: cert.subject.clone(),
             addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            reuse_port: None,
         })
         .await
         .unwrap();
@@ -1288,6 +1311,7 @@ mod tests {
             client_cert: cert.client_cert.clone(),
             subject: cert.subject.clone(),
             addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            reuse_port: None,
         })
         .await
         .unwrap();

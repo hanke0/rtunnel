@@ -55,7 +55,9 @@ async fn start_server_impl<T: Listener>(
     for s in services.iter() {
         match Transport::parse(&s.listen_to)? {
             Transport::Tcp(addr) => {
-                let listener = PlainTcpListener::new(PlainTcpListenerConfig { addr }).await?;
+                let reuse_port = s.reuse_port;
+                let listener =
+                    PlainTcpListener::new(PlainTcpListenerConfig { addr, reuse_port }).await?;
                 let listen_to = format!("{}", listener);
                 info!("service starting, listening on {}", listener);
                 context.spawn(
