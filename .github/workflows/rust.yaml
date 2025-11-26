@@ -77,6 +77,7 @@ jobs:
         with:
           command: test
           target: ${{ matrix.platform.target }}
+          args: '-- --show-output'
       - name: Publish artifacts and release
         if: ${{ github.event_name == 'release' && github.event.action == 'created' }}
         uses: houseabsolute/actions-rust-release@v0
