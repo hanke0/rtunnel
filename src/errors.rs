@@ -23,13 +23,21 @@ pub trait ResultExt<T> {
     fn suppress<F: FnOnce(Error)>(self, f: F);
 }
 
-pub trait ToAny<T> {
-    fn to_any(self) -> Result<T>;
+pub trait AnyContext<T> {
+    fn any_context<C>(self, context: C) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static;
 }
 
-impl<T, E: Display> ToAny<T> for StdResult<T, E> {
-    fn to_any(self) -> Result<T> {
-        self.map_err(Error::from_any)
+impl<T, E: Display> AnyContext<T> for StdResult<T, E> {
+    fn any_context<C>(self, context: C) -> Result<T>
+    where
+        C: Display + Send + Sync + 'static,
+    {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(Error::from_any(e).context(context)),
+        }
     }
 }
 

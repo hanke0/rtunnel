@@ -39,7 +39,7 @@ use tokio_util::task::TaskTracker;
 use tracing::Instrument;
 use tracing::{error, info_span, warn};
 
-use crate::errors::{Error, Result, ResultExt as _, ToAny as _, whatever};
+use crate::errors::{AnyContext as _, Error, Result, ResultExt as _, whatever};
 
 pub use tokio::net::TcpListener;
 
@@ -226,7 +226,7 @@ impl QuicListener {
     async fn accept_forever(endpoint: Endpoint, sender: mpsc::Sender<(QuinStream, String)>) {
         loop {
             match endpoint.accept().await {
-                Some(incoming) => match incoming.await.to_any() {
+                Some(incoming) => match incoming.await.any_context("failed to accept connection") {
                     Ok(connection) => {
                         let remote = connection.remote_address().to_string();
                         let sender = sender.clone();
@@ -248,7 +248,11 @@ impl QuicListener {
 
     async fn handle_connection(sender: mpsc::Sender<(QuinStream, String)>, connection: Connection) {
         loop {
-            let (send, mut recv) = match connection.accept_bi().await.to_any() {
+            let (send, mut recv) = match connection
+                .accept_bi()
+                .await
+                .any_context("failed to accept bi stream")
+            {
                 Ok((send, recv)) => (send, recv),
                 Err(e) => {
                     error!("failed to accept bi stream: {:#}", e);
@@ -266,7 +270,11 @@ impl QuicListener {
                 }
             }
             let id = format!("{}({})", connection.remote_address(), send.id());
-            match sender.send((QuinStream(send, recv), id)).await.to_any() {
+            match sender
+                .send((QuinStream(send, recv), id))
+                .await
+                .any_context("failed to send stream")
+            {
                 Ok(_) => {
                     continue;
                 }
@@ -286,7 +294,8 @@ impl Listener for QuicListener {
     async fn new(config: Self::Config) -> Result<Self> {
         let server_config =
             build_tls_server_config(&config.server_cert, &config.server_key, &config.client_cert)?;
-        let server_config = QuicServerConfig::try_from(server_config).to_any()?;
+        let server_config = QuicServerConfig::try_from(server_config)
+            .any_context("failed to build quic server config")?;
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(server_config));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_concurrent_uni_streams(0_u8.into());
@@ -505,7 +514,9 @@ impl QuicConnector {
 
     fn rebind(&self) -> Result<()> {
         let socket = std::net::UdpSocket::bind(Self::ANY_ADDR)?;
-        self.endpoint.rebind(socket).to_any()
+        self.endpoint
+            .rebind(socket)
+            .any_context("failed to rebind endpoint")
     }
 
     async fn new_connection(&self) -> Result<Connection> {
@@ -515,7 +526,10 @@ impl QuicConnector {
     }
 
     async fn fill_new_connection(&self) -> Result<()> {
-        let connection = self.new_connection().await?;
+        let connection = self
+            .new_connection()
+            .await
+            .context("failed to create new connection")?;
         *self.connection.lock().await = Some(connection);
         Ok(())
     }
@@ -533,9 +547,11 @@ impl Connector for QuicConnector {
             .ok_or(whatever!("Invalid address"))?;
         let client_config =
             build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
-        let client_config = QuicClientConfig::try_from(client_config).to_any()?;
+        let client_config = QuicClientConfig::try_from(client_config)
+            .any_context("failed to build quic client config")?;
         let client_config = quinn::ClientConfig::new(Arc::new(client_config));
-        let mut endpoint = Endpoint::client(Self::ANY_ADDR)?;
+        let mut endpoint =
+            Endpoint::client(Self::ANY_ADDR).context("Failed to create quic endpoint")?;
         endpoint.set_default_client_config(client_config);
         let server_name = config.subject.clone();
         let c = Self {
@@ -544,13 +560,14 @@ impl Connector for QuicConnector {
             server_name,
             connection: Mutex::new(None),
         };
-        c.fill_new_connection().await?;
         Ok(c)
     }
     async fn connect(&self) -> Result<(Self::Stream, String)> {
-        let connection = self.connection.lock().await;
+        let mut connection = self.connection.lock().await;
         if connection.is_none() {
-            return Err(Error::eof("no connection"));
+            drop(connection);
+            self.fill_new_connection().await?;
+            connection = self.connection.lock().await;
         }
         let (mut send, recv) = connection.as_ref().unwrap().open_bi().await?;
         drop(connection);
