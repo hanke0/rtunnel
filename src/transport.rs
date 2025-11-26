@@ -512,15 +512,7 @@ impl QuicConnector {
     const ANY_IP: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
     const ANY_ADDR: SocketAddr = SocketAddr::new(Self::ANY_IP, 0);
 
-    fn rebind(&self) -> Result<()> {
-        let socket = std::net::UdpSocket::bind(Self::ANY_ADDR)?;
-        self.endpoint
-            .rebind(socket)
-            .any_context("failed to rebind endpoint")
-    }
-
     async fn new_connection(&self) -> Result<Connection> {
-        self.rebind()?;
         let connection = self.endpoint.connect(self.addr, &self.server_name)?.await?;
         Ok(connection)
     }
