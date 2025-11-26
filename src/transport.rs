@@ -172,11 +172,16 @@ fn build_listener(addr: SocketAddr, reuse_port: Option<bool>) -> Result<TcpListe
     socket
         .set_reuseaddr(true)
         .context("failed to set reuseaddr")?;
-    if reuse_port.unwrap_or(false) {
-        socket
-            .set_reuseport(true)
-            .context("failed to set reuseport")?;
+
+    #[cfg(unix)]
+    {
+        if reuse_port.unwrap_or(false) {
+            socket
+                .set_reuseport(true)
+                .context("failed to set reuseport")?;
+        }
     }
+
     socket.bind(addr).context("failed to bind socket")?;
     socket.listen(128).context("failed to listen on socket")
 }
