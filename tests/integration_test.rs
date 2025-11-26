@@ -1,5 +1,4 @@
 use core::panic;
-use std::fs;
 use std::io::Write;
 use std::string::String;
 use std::time::Duration;
@@ -52,6 +51,7 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        use std::fs;
         let perm = fs::Permissions::from_mode(0o600);
         fs::set_permissions(file.path().display().to_string(), perm).unwrap();
     }
