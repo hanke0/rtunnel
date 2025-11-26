@@ -50,8 +50,8 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         use std::fs;
+        use std::os::unix::fs::PermissionsExt;
         let perm = fs::Permissions::from_mode(0o600);
         fs::set_permissions(file.path().display().to_string(), perm).unwrap();
     }
