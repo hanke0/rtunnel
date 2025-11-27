@@ -1,8 +1,11 @@
 # rtunnel
 
-[![Version](https://img.shields.io/badge/version-0.7.9-blue.svg)](https://github.com/hanke0/rtunnel/releases)
+[![Version](https://img.shields.io/badge/version-0.10.5-blue.svg)](https://github.com/hanke0/rtunnel/releases)
 [![License](https://img.shields.io/badge/license-BSD%203--Clause-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
+[![Audit Dependencies](https://github.com/hanke0/rtunnel/actions/workflows/audit.yaml/badge.svg)](https://github.com/hanke0/rtunnel/actions/workflows/audit.yaml)
+[![Rust](https://github.com/hanke0/rtunnel/actions/workflows/rust.yaml/badge.svg)](https://github.com/hanke0/rtunnel/actions/workflows/rust.yaml)
+
 
 A lightweight, secure tunneling tool written in Rust for exposing local servers behind NATs and firewalls to the public internet.
 
