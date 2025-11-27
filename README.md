@@ -1,6 +1,6 @@
 # rtunnel
 
-[![Version](https://img.shields.io/badge/version-0.10.5-blue.svg)](https://github.com/hanke0/rtunnel/releases)
+[![Version](https://img.shields.io/github/v/release/hanke0/rtunnel.svg?style=flat)](https://github.com/hanke0/rtunnel/releases)
 [![License](https://img.shields.io/badge/license-BSD%203--Clause-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 [![Audit Dependencies](https://github.com/hanke0/rtunnel/actions/workflows/audit.yaml/badge.svg)](https://github.com/hanke0/rtunnel/actions/workflows/audit.yaml)
