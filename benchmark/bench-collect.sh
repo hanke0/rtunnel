@@ -2,11 +2,6 @@
 
 awk -F': ' '
 BEGIN {
-    direct_data[0] = "direct"
-    rtunnel_data[0] = "rtunnel"
-    rtunnel_tcp_data[0] = "rtunnel-tcp"
-    frp_data[0] = "frp"
-    frp_tls_data[0] = "frp-tls"
     name=""
     tunnel_count = 0
 }

@@ -490,10 +490,10 @@ pub struct QuicConnectorConfig {
 }
 
 pub struct QuicConnector {
-    endpoint: Endpoint,
-    connection: Mutex<Option<Connection>>,
+    _endpoint: Endpoint,
+    connection: Connection,
     addr: SocketAddr,
-    server_name: String,
+    _server_name: String,
 }
 
 impl fmt::Display for QuicConnector {
@@ -511,20 +511,6 @@ impl fmt::Debug for QuicConnector {
 impl QuicConnector {
     const ANY_IP: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
     const ANY_ADDR: SocketAddr = SocketAddr::new(Self::ANY_IP, 0);
-
-    async fn new_connection(&self) -> Result<Connection> {
-        let connection = self.endpoint.connect(self.addr, &self.server_name)?.await?;
-        Ok(connection)
-    }
-
-    async fn fill_new_connection(&self) -> Result<()> {
-        let connection = self
-            .new_connection()
-            .await
-            .context("failed to create new connection")?;
-        *self.connection.lock().await = Some(connection);
-        Ok(())
-    }
 }
 
 impl Connector for QuicConnector {
@@ -546,25 +532,23 @@ impl Connector for QuicConnector {
             Endpoint::client(Self::ANY_ADDR).context("Failed to create quic endpoint")?;
         endpoint.set_default_client_config(client_config);
         let server_name = config.subject.clone();
+        let connection = endpoint
+            .connect(addr, &server_name)?
+            .await
+            .context("failed to make a quic connection")?;
+
         let c = Self {
-            endpoint,
+            _endpoint: endpoint,
             addr,
-            server_name,
-            connection: Mutex::new(None),
+            _server_name: server_name,
+            connection,
         };
         Ok(c)
     }
     async fn connect(&self) -> Result<(Self::Stream, String)> {
-        let mut connection = self.connection.lock().await;
-        if connection.is_none() {
-            drop(connection);
-            self.fill_new_connection().await?;
-            connection = self.connection.lock().await;
-        }
-        let (mut send, recv) = connection.as_ref().unwrap().open_bi().await?;
-        drop(connection);
+        let (mut send, recv) = self.connection.open_bi().await?;
         // quic requires client-initiated, send a byte to open stream.
-        send.write_i8(0).await?;
+        send.write_u8(0).await?;
         let id = send.id();
         Ok((QuinStream(send, recv), id.to_string()))
     }

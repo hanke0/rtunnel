@@ -176,17 +176,16 @@ grep_version() {
 get_version() {
 	case "$runmode" in
 	direct)
-		echo "direct"
 		return
 		;;
 	frp*)
-		echo "frp" "$(grep_version tmp/frpc --version)"
+		grep_version tmp/frp/frpc --version
 		;;
 	rathole*)
-		echo "rathole" "$(grep_version tmp/rathole --version)"
+		grep_version tmp/rathole/rathole --version
 		;;
 	*)
-		echo rtunnel "$(grep_version target/release/rtunnel --version)"
+		grep_version target/release/rtunnel --version
 		;;
 	esac
 }
@@ -255,7 +254,7 @@ get_uptime() {
 	date +%s%N | cut -b1-13
 }
 
-echo "tunnel: $runmode"
+echo "tunnel: $runmode $(get_version)"
 run_server
 sleep 10
 run_client
@@ -265,14 +264,13 @@ server_cpu=$(get_cpu $serverpid)
 uptime=$(get_uptime)
 run_bench
 sleep 3
-
 echo >&2 "server pid: $serverpid"
 echo >&2 "client pid: $clientpid"
 echo >&2 "bench pid: $benchpid"
-echo >&2 "version: $(get_version)"
 echo >&2 "server-log: $serverlog"
 echo >&2 "client-log: $clientlog"
 echo >&2 "bench-log: $benchlog"
+
 
 while :; do
 	sleep 5
