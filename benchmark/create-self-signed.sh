@@ -10,12 +10,12 @@ cd "$output"
 openssl req -x509 \
     -sha256 -days 356 \
     -nodes \
-    -newkey rsa:2048 \
+    -newkey ed25519 \
     -subj "/CN=MyOwnCA/C=US/L=San Fransisco" \
     -keyout rootCA.key -out rootCA.crt
 
 # create server private key
-openssl genrsa -out server.key 2048
+openssl genpkey -algorithm ed25519 -out server.key
 
 # create certificate signing request (CSR)
 cat >csr.conf <<EOF

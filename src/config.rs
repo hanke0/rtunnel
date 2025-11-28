@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::string::String;
 
-use rcgen::generate_simple_self_signed;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -88,9 +87,18 @@ pub struct SelfSignedCert {
 }
 
 impl SelfSignedCert {
+    fn generate(subject: &str) -> rcgen::CertifiedKey<rcgen::KeyPair> {
+        let signing_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+        let cert = rcgen::CertificateParams::new(vec![subject.to_string()])
+            .unwrap()
+            .self_signed(&signing_key)
+            .unwrap();
+        rcgen::CertifiedKey { cert, signing_key }
+    }
+
     pub fn new(subject: &str) -> Self {
-        let server_key = generate_simple_self_signed(vec![subject.to_string()]).unwrap();
-        let client_key = generate_simple_self_signed(vec![subject.to_string()]).unwrap();
+        let server_key = Self::generate(subject);
+        let client_key = Self::generate(subject);
         Self {
             server_cert: server_key.cert.pem(),
             server_key: server_key.signing_key.serialize_pem(),

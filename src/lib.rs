@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::string::String;
+use std::sync::Once;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -267,10 +268,12 @@ pub enum Commands {
 }
 
 fn warmup_aws_lc_rs() {
-    let provider = aws_lc_rs::default_provider();
-    provider.secure_random.fill(&mut [0u8]).unwrap();
-    // Ignore once value set many times.
-    let _ = provider.clone().install_default();
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let provider = aws_lc_rs::default_provider();
+        provider.secure_random.fill(&mut [0u8]).unwrap();
+        provider.clone().install_default().unwrap();
+    });
 }
 
 fn write_self_signed_cert(opt: Commands) {
