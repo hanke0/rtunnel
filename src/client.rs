@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::time::sleep;
 use tracing::Instrument;
 use tracing::{debug, error, error_span, info, info_span, trace};
 
@@ -158,7 +160,28 @@ async fn build_tunnel_impl<T: Connector>(
     context: &Context,
     options: &ClientOptionsRef<T>,
 ) -> Result<()> {
-    let (stream, server_addr) = context.with_cancel(options.connector.connect()).await?;
+    let (stream, server_addr) = {
+        let mut duration = Duration::from_millis(100);
+        let mut retries = 0;
+        loop {
+            match context.with_cancel(options.connector.connect()).await {
+                Ok(r) => {
+                    break r;
+                }
+                Err(e) => {
+                    if e.is_cancel() {
+                        return Err(e);
+                    }
+                    retries += 1;
+                    if retries >= 10 {
+                        return Err(e);
+                    }
+                }
+            }
+            sleep(duration).await;
+            duration *= 2;
+        }
+    };
     wait_relay(context, stream, options)
         .instrument(info_span!("relay", server_addr))
         .await
@@ -194,7 +217,9 @@ async fn wait_relay<T: Connector>(
     let mut message = Message::default();
 
     let addr = loop {
-        context.with_cancel(message.read_from_inplace(&mut stream)).await?;
+        context
+            .with_cancel(message.read_from_inplace(&mut stream))
+            .await?;
         match message.get_type() {
             MessageKind::Ping => {
                 stream.write_all(message.as_ref()).await?;
