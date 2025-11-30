@@ -786,7 +786,7 @@ impl Context {
     ///
     /// [`Error::cancel()`]: crate::errors::Error::cancel
     #[inline]
-    pub async fn race<T, E, F>(&self, f: F) -> Result<T>
+    pub async fn with_cancel<T, E, F>(&self, f: F) -> Result<T>
     where
         F: IntoFuture<Output = StdResult<T, E>>,
         E: Into<Error>,

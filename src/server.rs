@@ -95,7 +95,7 @@ async fn serve_tunnel<T: Listener>(context: Context, listener: T, pool: TunnelPo
     let mut index: u64 = 0;
     loop {
         index += 1;
-        match context.race(listener.accept()).await {
+        match context.with_cancel(listener.accept()).await {
             Ok((stream, id)) => {
                 pool.clone()
                     .add(context, stream, id)
@@ -129,7 +129,7 @@ async fn serve_service<T: Listener, U: Listener>(
     let mut index: u64 = 0;
     loop {
         index += 1;
-        match context.race(listener.accept()).await {
+        match context.with_cancel(listener.accept()).await {
             Ok((stream, remote_addr)) => {
                 context.spawn(
                     handle_service_stream::<T, U>(

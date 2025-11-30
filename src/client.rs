@@ -158,7 +158,7 @@ async fn build_tunnel_impl<T: Connector>(
     context: &Context,
     options: &ClientOptionsRef<T>,
 ) -> Result<()> {
-    let (stream, server_addr) = context.race(options.connector.connect()).await?;
+    let (stream, server_addr) = context.with_cancel(options.connector.connect()).await?;
     wait_relay(context, stream, options)
         .instrument(info_span!("relay", server_addr))
         .await
@@ -194,7 +194,7 @@ async fn wait_relay<T: Connector>(
     let mut message = Message::default();
 
     let addr = loop {
-        context.race(message.read_from_inplace(&mut stream)).await?;
+        context.with_cancel(message.read_from_inplace(&mut stream)).await?;
         match message.get_type() {
             MessageKind::Ping => {
                 stream.write_all(message.as_ref()).await?;
@@ -248,7 +248,7 @@ async fn handle_relay<T: Connector>(
     match transport {
         Transport::Tcp(addr) => {
             let conn = context
-                .race(TcpStream::connect(addr))
+                .with_cancel(TcpStream::connect(addr))
                 .await
                 .context("Failed to connect to local service")?;
 
