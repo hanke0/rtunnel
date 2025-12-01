@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "rtunnel"
-version = "0.10.6"
+version = "0.10.7"
 dependencies = [
  "bytes",
  "clap",
