@@ -216,7 +216,6 @@ async fn handle_service_relay<T: Listener, U: Listener>(
 }
 
 struct Session<T: Listener> {
-    id: String,
     cancel_tx: oneshot::Sender<()>,
     receiver: oneshot::Receiver<Result<T::Stream>>,
 }
@@ -265,7 +264,6 @@ impl<T: Listener> TunnelPool<T> {
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let (sender, receiver) = oneshot::channel();
         let session = Session::<T> {
-            id: id.clone(),
             cancel_tx,
             receiver,
         };
@@ -322,7 +320,7 @@ impl<T: Listener> TunnelPool<T> {
 
             match result {
                 Some((id, session)) => {
-                    trace!("match a tunnel: {}", session.id);
+                    trace!("match a tunnel: {}", id);
                     let mut session = session.join().await?;
                     let n = self.inner.requires.load(Ordering::Acquire);
                     if n > 0 || is_empty {
