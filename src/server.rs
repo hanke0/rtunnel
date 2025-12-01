@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
@@ -9,9 +8,8 @@ use std::vec::Vec;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::oneshot;
 use tokio::time::{self, Duration};
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::{debug, error, error_span, info, info_span, trace, warn};
 
@@ -219,24 +217,18 @@ async fn handle_service_relay<T: Listener, U: Listener>(
 
 struct Session<T: Listener> {
     id: String,
-    cancel_token: CancellationToken,
-    receiver: Receiver<Result<T::Stream>>,
-    _marker: PhantomData<T>,
+    cancel_tx: oneshot::Sender<()>,
+    receiver: oneshot::Receiver<Result<T::Stream>>,
 }
-
-impl<T: Listener> PartialEq for Session<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl<T: Listener> Eq for Session<T> {}
 
 impl<T: Listener> Session<T> {
     #[tracing::instrument(skip_all)]
-    async fn join(mut self) -> Result<T::Stream> {
-        self.cancel_token.cancel();
-        self.receiver.recv().await.unwrap()
+    async fn join(self) -> Result<T::Stream> {
+        self.cancel_tx.send(()).unwrap();
+        match self.receiver.await {
+            Ok(r) => r,
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -270,24 +262,23 @@ impl<T: Listener> TunnelPool<T> {
 
     async fn add(self, context: &Context, stream: T::Stream, id: String) {
         info!("tunnel connected");
-        let cancel_token = CancellationToken::new();
-        let (sender, receiver) = mpsc::channel(1);
-        let sender_token = cancel_token.clone();
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (sender, receiver) = oneshot::channel();
         let session = Session::<T> {
             id: id.clone(),
-            cancel_token,
+            cancel_tx,
             receiver,
-            _marker: PhantomData,
         };
         self.inner.sessions.lock().await.insert(id.clone(), session);
         self.inner.notify.notify_one();
         let alive_ctx = context.clone();
         context.spawn(async move {
-            let r = keep_alive::<T>(alive_ctx, sender_token, &id, stream).await;
+            let r = keep_alive::<T>(alive_ctx, cancel_rx, &id, stream).await;
             match r {
-                Ok(_) => {
-                    sender.send(r).await.unwrap();
-                }
+                Ok(_) => match sender.send(r) {
+                    Ok(_) => {}
+                    Err(_) => unreachable!(),
+                },
                 Err(err) => {
                     if err.is_relay_critical() {
                         error!("{} keep alive critical error: {:#}", id, err);
@@ -355,7 +346,7 @@ impl<T: Listener> TunnelPool<T> {
 
 async fn keep_alive<T: Listener>(
     context: Context,
-    stopped: CancellationToken,
+    mut stopped: oneshot::Receiver<()>,
     id: &String,
     mut stream: T::Stream,
 ) -> Result<T::Stream> {
@@ -364,7 +355,7 @@ async fn keep_alive<T: Listener>(
     let mut message = Message::ping();
     loop {
         tokio::select! {
-            _ = stopped.cancelled() => {
+            _ = &mut stopped => {
                 return Ok(stream);
             }
             _ = interval.tick() => {

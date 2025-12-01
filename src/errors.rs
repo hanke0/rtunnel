@@ -317,6 +317,7 @@ generate_from_any!(rustls::server::VerifierBuilderError);
 generate_from_any!(std::array::TryFromSliceError);
 generate_from_any!(quinn::ConnectError);
 generate_from_any!(quinn::ConnectionError);
+generate_from_any!(tokio::sync::oneshot::error::RecvError);
 
 // Not public API. Referenced by macro-generated code.
 #[doc(hidden)]
