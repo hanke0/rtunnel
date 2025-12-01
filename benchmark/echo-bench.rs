@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         / metrics.spend_ns.load(Ordering::SeqCst) as f64
         * 1_000_000_000.;
 
-    println!("throughput: {:.3}KB/s", throughout);
+    println!("goodput: {:.3}KB/s", throughout);
     println!("rps: {:.0}/s", rps);
     Ok(())
 }

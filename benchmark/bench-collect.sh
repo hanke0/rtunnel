@@ -14,8 +14,8 @@ BEGIN {
     if ($1 == "failed") {
         data[name, "failed"] = $2
     }
-    if ($1 == "throughput") {
-        data[name, "throughput"] = $2
+    if ($1 == "goodput") {
+        data[name, "goodput"] = $2
     }
     if ($1 == "rps") {
         data[name, "rps"] = $2
@@ -28,11 +28,11 @@ BEGIN {
     }
 }
 END {
-    print "| tunnel | failed | rps | throughput | server-cpu |client-cpu |"
+    print "| tunnel | failed | rps | goodput | server-cpu |client-cpu |"
     print "| --- | --- | --- | --- | --- | --- |"
     for (i = 1; i <= tunnel_count; i++) {
         tunnel_name = tunnels[i]
-        print "| " tunnel_name " | " data[tunnel_name, "failed"] " | " data[tunnel_name, "rps"] " | " data[tunnel_name, "throughput"] " | " data[tunnel_name, "server-cpu"] " | " data[tunnel_name, "client-cpu"] " |"
+        print "| " tunnel_name " | " data[tunnel_name, "failed"] " | " data[tunnel_name, "rps"] " | " data[tunnel_name, "goodput"] " | " data[tunnel_name, "server-cpu"] " | " data[tunnel_name, "client-cpu"] " |"
     }
 }
 ' "${1:-tmp/benchmark.txt}"

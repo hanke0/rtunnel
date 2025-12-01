@@ -271,7 +271,6 @@ echo >&2 "server-log: $serverlog"
 echo >&2 "client-log: $clientlog"
 echo >&2 "bench-log: $benchlog"
 
-
 while :; do
 	sleep 5
 	if ! is_alive $serverpid; then
