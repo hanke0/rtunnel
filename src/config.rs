@@ -36,6 +36,7 @@ pub type ClientConfigList = Vec<ClientConfig>;
 #[derive(Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
     pub listen_to: ListenTo,
+    pub listen_to2: Option<ListenTo>,
     pub services: Vec<Service>,
 }
 
@@ -196,6 +197,7 @@ pub fn build_tls_example(subject: &str) -> String {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
                 reuse_port: None,
             }),
+            listen_to2: None,
             services: vec![Service {
                 listen_to: "tcp://0.0.0.0:2334".to_string(),
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
@@ -224,6 +226,7 @@ pub fn build_tcp_example() -> String {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
                 reuse_port: None,
             }),
+            listen_to2: None,
             services: vec![Service {
                 listen_to: "tcp://0.0.0.0:2334".to_string(),
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
@@ -253,6 +256,7 @@ pub fn build_quic_example(subject: &str) -> String {
                 subject: subject.to_string(),
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
             }),
+            listen_to2: None,
             services: vec![Service {
                 listen_to: "tcp://0.0.0.0:2334".to_string(),
                 connect_to: "tcp://127.0.0.1:2335".to_string(),

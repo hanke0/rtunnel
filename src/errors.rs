@@ -20,6 +20,8 @@ pub trait ResultExt<T> {
         F: FnOnce() -> C;
 
     fn suppress<F: FnOnce(Error)>(self, f: F);
+
+    fn into_option(self) -> Option<Result<T>>;
 }
 
 impl<T, E> ResultExt<T> for StdResult<T, E>
@@ -53,6 +55,13 @@ where
             Err(e) => f(e.into()),
         };
     }
+
+    fn into_option(self) -> Option<Result<T>> {
+        match self {
+            Ok(t) => Some(Ok(t)),
+            Err(e) => Some(Err(e.into())),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -63,6 +72,7 @@ pub enum ErrorKind {
     IoRetryAble,
     Timeout,
     Canceled,
+    Exausted,
     Tls,
     Other,
 }
@@ -92,6 +102,13 @@ impl Error {
 
     pub fn cancel() -> Self {
         Self::from_string(ErrorKind::Canceled, "context cancelled".to_string())
+    }
+
+    pub fn exausted() -> Self {
+        Self::from_string(ErrorKind::Exausted, "pool is exausted".to_string())
+    }
+    pub fn is_exausted(&self) -> bool {
+        matches!(self.inner.kind, ErrorKind::Exausted)
     }
 
     pub fn eof<T: Display>(msg: T) -> Self {

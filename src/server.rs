@@ -21,20 +21,41 @@ use crate::transport::{
     QuicListener, TlsTcpListener, relay_bidirectional,
 };
 
-pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()> {
-    let services = config.services;
-    match config.listen_to {
-        ListenTo::PlainTcp(cfg) => {
-            start_server_impl::<PlainTcpListener>(context, cfg, services).await
+macro_rules! match_listen_to2 {
+    ($context:ident, $config:ident, $cfg:ident, $typ:ty) => {
+        match $config.listen_to2 {
+            Some(ListenTo::PlainTcp(cfg2)) => {
+                match_listen_to2!($context, $config, $cfg, $typ, Some(cfg2), PlainTcpListener)
+            }
+            Some(ListenTo::TlsTcp(cfg2)) => {
+                match_listen_to2!($context, $config, $cfg, $typ, Some(cfg2), TlsTcpListener)
+            }
+            Some(ListenTo::Quic(cfg2)) => {
+                match_listen_to2!($context, $config, $cfg, $typ, Some(cfg2), QuicListener)
+            }
+            None => {
+                match_listen_to2!($context, $config, $cfg, $typ, None, QuicListener)
+            }
         }
-        ListenTo::TlsTcp(cfg) => start_server_impl::<TlsTcpListener>(context, cfg, services).await,
-        ListenTo::Quic(cfg) => start_server_impl::<QuicListener>(context, cfg, services).await,
+    };
+
+    ($context:ident, $config:ident, $cfg1:ident, $typ1:ty, $cfg2:expr, $typ2:ty) => {
+        start_server_impl::<$typ1, $typ2>($context, $cfg1, $cfg2, $config.services).await
+    };
+}
+
+pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()> {
+    match config.listen_to {
+        ListenTo::PlainTcp(cfg) => match_listen_to2!(context, config, cfg, PlainTcpListener),
+        ListenTo::TlsTcp(cfg) => match_listen_to2!(context, config, cfg, TlsTcpListener),
+        ListenTo::Quic(cfg) => match_listen_to2!(context, config, cfg, QuicListener),
     }
 }
 
-async fn start_server_impl<T: Listener>(
+async fn start_server_impl<T: Listener, T2: Listener>(
     context: &Context,
     config: T::Config,
+    config2: Option<T2::Config>,
     services: Vec<Service>,
 ) -> Result<()> {
     let pool = TunnelPool::new();
@@ -50,6 +71,24 @@ async fn start_server_impl<T: Listener>(
         serve_tunnel(context.children(), listener, pool.clone())
             .instrument(error_span!("server_tunnel", listen_to)),
     );
+    let mut backup_pool = None;
+    if let Some(config2) = config2 {
+        let listener2 = T2::new(config2).await?;
+        let pool2 = TunnelPool::new();
+        backup_pool = Some(pool2.clone());
+        let listen_to2 = format!("{}", listener2);
+        info!("server listening on {}", listener2);
+        context.spawn(tunnel_timer(
+            context.clone(),
+            listener2.to_string(),
+            pool2.clone(),
+        ));
+        context.spawn(
+            serve_tunnel(context.children(), listener2, pool2.clone())
+                .instrument(error_span!("server_tunnel2", listen_to2)),
+        );
+    }
+
     for s in services.iter() {
         match Transport::parse(&s.listen_to)? {
             Transport::Tcp(addr) => {
@@ -64,6 +103,7 @@ async fn start_server_impl<T: Listener>(
                         listener,
                         s.connect_to.clone(),
                         pool.clone(),
+                        backup_pool.clone(),
                     )
                     .instrument(error_span!(
                         "service",
@@ -119,11 +159,12 @@ async fn serve_tunnel<T: Listener>(context: Context, listener: T, pool: TunnelPo
     context.wait_cancel_and_finish().await;
 }
 
-async fn serve_service<T: Listener, U: Listener>(
+async fn serve_service<T: Listener, U: Listener, V: Listener>(
     context: Context,
     listener: T,
     connect_to: String,
     pool: TunnelPool<U>,
+    pool2: Option<TunnelPool<V>>,
 ) {
     let context = &context;
     let mut index: u64 = 0;
@@ -132,10 +173,11 @@ async fn serve_service<T: Listener, U: Listener>(
         match context.with_cancel(listener.accept()).await {
             Ok((stream, remote_addr)) => {
                 context.spawn(
-                    handle_service_stream::<T, U>(
+                    handle_service_stream::<T, U, V>(
                         context.clone(),
                         stream,
                         pool.clone(),
+                        pool2.clone(),
                         connect_to.clone(),
                     )
                     .instrument(info_span!("service", index, remote_addr,)),
@@ -156,13 +198,14 @@ async fn serve_service<T: Listener, U: Listener>(
     context.wait_cancel_and_finish().await;
 }
 
-async fn handle_service_stream<T: Listener, U: Listener>(
+async fn handle_service_stream<T: Listener, U: Listener, V: Listener>(
     context: Context,
     stream: T::Stream,
     pool: TunnelPool<U>,
+    pool2: Option<TunnelPool<V>>,
     connect_to: String,
 ) {
-    match handle_service_stream_impl::<T, U>(&context, stream, pool, &connect_to).await {
+    match handle_service_stream_impl::<T, U, V>(&context, stream, pool, pool2, &connect_to).await {
         Ok((read, write)) => {
             info!(
                 "Stream closed and has read {} bytes and wrote {} bytes",
@@ -182,13 +225,37 @@ async fn handle_service_stream<T: Listener, U: Listener>(
     };
 }
 
-async fn handle_service_stream_impl<T: Listener, U: Listener>(
+async fn handle_service_stream_impl<T: Listener, U: Listener, V: Listener>(
     context: &Context,
     stream: T::Stream,
     pool: TunnelPool<U>,
+    pool2: Option<TunnelPool<V>>,
     connect_to: &str,
 ) -> Result<(u64, u64)> {
     debug!("service received a stream");
+    if let Some(pool2) = pool2 {
+        match pool.try_pop().await {
+            Ok((remote, tunnel_addr)) => {
+                return handle_service_relay::<T, U>(context, stream, remote, connect_to)
+                    .instrument(info_span!("service_relay", tunnel_addr))
+                    .await;
+            }
+            Err(err) => {
+                info!("no tunnel found in pool, trying backup pool: {:#}", err);
+                match pool2.try_pop().await {
+                    Ok((remote, tunnel_addr)) => {
+                        return handle_service_relay::<T, V>(context, stream, remote, connect_to)
+                            .instrument(info_span!("service_relay", tunnel_addr))
+                            .await;
+                    }
+                    Err(e) => {
+                        info!("no tunnel found in backup pool: {:#}", e);
+                    }
+                }
+            }
+        }
+    }
+
     let (remote, tunnel_addr) = context
         .timeout_default(pool.pop())
         .await
@@ -313,30 +380,44 @@ impl<T: Listener> TunnelPool<T> {
 
     async fn pop_impl(&self) -> Result<(T::Stream, String)> {
         loop {
-            let mut sessions = self.inner.sessions.lock().await;
-            let result = sessions.pop_first();
-            let is_empty = sessions.is_empty();
-            drop(sessions);
-
-            match result {
-                Some((id, session)) => {
-                    trace!("match a tunnel: {}", id);
-                    let mut session = session.join().await?;
-                    let n = self.inner.requires.load(Ordering::Acquire);
-                    if n > 0 || is_empty {
-                        self.inner.requires.fetch_sub(n, Ordering::Release);
-                        if is_empty {
-                            Message::require(n + 1).write_to(&mut session).await?;
-                        } else {
-                            Message::require(n).write_to(&mut session).await?;
-                        }
+            let r = self.try_pop().await;
+            match r {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    if e.is_exausted() {
+                        self.inner.notify.notified().await;
+                        continue;
                     }
-                    return Ok((session, id));
+                    return Err(e);
                 }
-                None => {
-                    self.inner.requires.fetch_add(1, Ordering::Release);
-                    self.inner.notify.notified().await;
+            }
+        }
+    }
+
+    pub async fn try_pop(&self) -> Result<(T::Stream, String)> {
+        let mut sessions = self.inner.sessions.lock().await;
+        let result = sessions.pop_first();
+        let is_empty = sessions.is_empty();
+        drop(sessions);
+
+        match result {
+            Some((id, session)) => {
+                trace!("match a tunnel: {}", id);
+                let mut session = session.join().await?;
+                let n = self.inner.requires.load(Ordering::Acquire);
+                if n > 0 || is_empty {
+                    self.inner.requires.fetch_sub(n, Ordering::Release);
+                    if is_empty {
+                        Message::require(n + 1).write_to(&mut session).await?;
+                    } else {
+                        Message::require(n).write_to(&mut session).await?;
+                    }
                 }
+                Ok((session, id))
+            }
+            None => {
+                self.inner.requires.fetch_add(1, Ordering::Release);
+                Err(Error::exausted())
             }
         }
     }
