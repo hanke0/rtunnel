@@ -22,8 +22,44 @@ use crate::whatever;
 /// It may contain either server configurations, client configurations, or both.
 #[derive(Deserialize, Serialize)]
 pub struct Config {
-    pub servers: Option<ServerConfigList>,
-    pub clients: Option<ClientConfigList>,
+    pub servers: ServerConfigList,
+    pub clients: ClientConfigList,
+}
+
+impl Config {
+    pub fn parse(contents: &str) -> Result<Self> {
+        let mut cfg = from_string::<Config>(contents)?;
+        Self::fix_servers(&mut cfg.servers)?;
+        Self::fix_clients(&mut cfg.clients)?;
+        Ok(cfg)
+    }
+
+    fn fix_servers(servers: &mut ServerConfigList) -> Result<()> {
+        for server in servers.iter_mut() {
+            for service in server.services.iter_mut() {
+                let transport = Transport::parse(&service.connect_to)
+                    .context("Failed to parse connect_to address")?;
+                service.connect_to = transport.as_string();
+            }
+        }
+        Ok(())
+    }
+
+    fn fix_clients(clients: &mut ClientConfigList) -> Result<()> {
+        for client in clients.iter_mut() {
+            if client.idle_connections == 0 {
+                client.idle_connections = 20;
+            }
+            let mut allowed_addresses = HashSet::new();
+            for allowed_address in client.allowed_addresses.iter() {
+                let transport =
+                    Transport::parse(allowed_address).context("Failed to parse allowed address")?;
+                allowed_addresses.insert(transport.as_string());
+            }
+            client.allowed_addresses = allowed_addresses;
+        }
+        Ok(())
+    }
 }
 
 pub type ServerConfigList = Vec<ServerConfig>;
@@ -140,18 +176,10 @@ impl ServerConfig {
     /// Parses server configurations from a TOML string.
     pub fn parse(contents: &str) -> Result<ServerConfigList> {
         let cfg = from_string::<Config>(contents)?;
-        let mut servers = cfg.servers.ok_or(whatever!("No server config found"))?;
-        if servers.is_empty() {
+        if cfg.servers.is_empty() {
             return Err(whatever!("No server found"));
         }
-        for server in servers.iter_mut() {
-            for service in server.services.iter_mut() {
-                let transport = Transport::parse(&service.connect_to)
-                    .context("Failed to parse connect_to address")?;
-                service.connect_to = transport.as_string();
-            }
-        }
-        Ok(servers)
+        Ok(cfg.servers)
     }
 }
 
@@ -164,23 +192,10 @@ impl ClientConfig {
     /// Parses client configurations from a TOML string.
     pub fn parse(contents: &str) -> Result<ClientConfigList> {
         let cfg = from_string::<Config>(contents)?;
-        let mut clients = cfg.clients.ok_or(whatever!("No client config found"))?;
-        if clients.is_empty() {
+        if cfg.clients.is_empty() {
             return Err(whatever!("No client found"));
         }
-        for client in clients.iter_mut() {
-            if client.idle_connections == 0 {
-                client.idle_connections = 20;
-            }
-            let mut allowed_addresses = HashSet::new();
-            for allowed_address in client.allowed_addresses.iter() {
-                let transport =
-                    Transport::parse(allowed_address).context("Failed to parse allowed address")?;
-                allowed_addresses.insert(transport.as_string());
-            }
-            client.allowed_addresses = allowed_addresses;
-        }
-        Ok(clients)
+        Ok(cfg.clients)
     }
 }
 
@@ -188,7 +203,7 @@ pub fn build_tls_example(subject: &str) -> String {
     let cert = SelfSignedCert::new(subject);
 
     let config = Config {
-        servers: Some(vec![ServerConfig {
+        servers: vec![ServerConfig {
             listen_to: ListenTo::TlsTcp(TlsTcpListenerConfig {
                 server_cert: cert.server_cert.clone(),
                 server_key: cert.server_key,
@@ -203,8 +218,8 @@ pub fn build_tls_example(subject: &str) -> String {
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
                 reuse_port: None,
             }],
-        }]),
-        clients: Some(vec![ClientConfig {
+        }],
+        clients: vec![ClientConfig {
             connect_to: ConnectTo::TlsTcp(TlsTcpConnectorConfig {
                 client_cert: cert.client_cert,
                 client_key: cert.client_key,
@@ -214,14 +229,14 @@ pub fn build_tls_example(subject: &str) -> String {
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
-        }]),
+        }],
     };
     toml::to_string(&config).unwrap()
 }
 
 pub fn build_tcp_example() -> String {
     let config = Config {
-        servers: Some(vec![ServerConfig {
+        servers: vec![ServerConfig {
             listen_to: ListenTo::PlainTcp(PlainTcpListenerConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
                 reuse_port: None,
@@ -232,14 +247,14 @@ pub fn build_tcp_example() -> String {
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
                 reuse_port: None,
             }],
-        }]),
-        clients: Some(vec![ClientConfig {
+        }],
+        clients: vec![ClientConfig {
             connect_to: ConnectTo::PlainTcp(PlainTcpConnectorConfig {
                 addr: "127.0.0.1:2333".to_string(),
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from(["tcp://127.0.0.1:2335".to_string()]),
-        }]),
+        }],
     };
     toml::to_string(&config).unwrap()
 }
@@ -248,7 +263,7 @@ pub fn build_quic_example(subject: &str) -> String {
     let cert = SelfSignedCert::new(subject);
 
     let config = Config {
-        servers: Some(vec![ServerConfig {
+        servers: vec![ServerConfig {
             listen_to: ListenTo::Quic(QuicListenerConfig {
                 server_cert: cert.server_cert.clone(),
                 server_key: cert.server_key,
@@ -262,8 +277,8 @@ pub fn build_quic_example(subject: &str) -> String {
                 connect_to: "tcp://127.0.0.1:2335".to_string(),
                 reuse_port: None,
             }],
-        }]),
-        clients: Some(vec![ClientConfig {
+        }],
+        clients: vec![ClientConfig {
             connect_to: ConnectTo::Quic(QuicConnectorConfig {
                 client_cert: cert.client_cert,
                 client_key: cert.client_key,
@@ -273,7 +288,7 @@ pub fn build_quic_example(subject: &str) -> String {
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
-        }]),
+        }],
     };
     toml::to_string(&config).unwrap()
 }

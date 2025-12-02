@@ -1,5 +1,8 @@
 use core::panic;
+use std::collections::HashSet;
 use std::io::Write;
+use std::net::SocketAddr;
+use std::str::FromStr;
 use std::string::String;
 use std::time::Duration;
 
@@ -15,8 +18,11 @@ use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
 use tracing::{error, info};
 
+use rtunnel::config;
 use rtunnel::errors::ResultExt;
 use rtunnel::observe;
+use rtunnel::server;
+use rtunnel::transport;
 use rtunnel::{
     Arguments, Context, config::build_quic_example, config::build_tcp_example,
     config::build_tls_example, run,
@@ -43,6 +49,65 @@ async fn test_quic() {
     test_integration(&config).await;
 }
 
+#[tokio::test]
+#[serial]
+async fn test_tcp_backup() {
+    let config = build_tcp_example();
+    let cfg = &mut config::Config::parse(&config).unwrap();
+    for server in cfg.servers.iter_mut() {
+        server.listen_to2 = Some(config::ListenTo::PlainTcp(
+            transport::PlainTcpListenerConfig {
+                addr: SocketAddr::from_str("127.0.0.1:2336").unwrap(),
+                reuse_port: None,
+            },
+        ));
+    }
+    for client in cfg.clients.iter_mut() {
+        client.connect_to = config::ConnectTo::PlainTcp(transport::PlainTcpConnectorConfig {
+            addr: "127.0.0.1:2336".to_string(),
+        });
+    }
+    let config = toml::to_string(cfg).unwrap();
+    test_integration(&config).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn test_client_works_fine_when_one_tunnel_is_not_available() {
+    observe::setup_testing();
+    let config = build_tcp_example();
+    let cfg = &mut config::Config::parse(&config).unwrap();
+    cfg.clients.push(config::ClientConfig {
+        connect_to: config::ConnectTo::PlainTcp(transport::PlainTcpConnectorConfig {
+            addr: "127.0.0.1:2336".to_string(),
+        }),
+        allowed_addresses: HashSet::new(),
+        idle_connections: 20,
+    });
+    let config = toml::to_string(cfg).unwrap();
+    let server_context = Context::new();
+    server::start_server(
+        &server_context,
+        config::ServerConfig {
+            listen_to: config::ListenTo::PlainTcp(transport::PlainTcpListenerConfig {
+                addr: SocketAddr::from_str("127.0.0.1:2336").unwrap(),
+                reuse_port: None,
+            }),
+            listen_to2: None,
+            services: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let context = Context::new();
+    let finish = start_test(&context, &config).await;
+    sleep(Duration::from_secs(1)).await;
+    server_context.cancel();
+    server_context.wait_finish().await;
+    concurrent_test(&context).await;
+    finish.await;
+}
+
 async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()> {
     observe::setup_testing();
     let mut file = NamedTempFile::new().unwrap();
@@ -67,7 +132,7 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
         ];
         let options = Arguments::parse_from(args);
         let code = run(&server_context, options).await;
-        assert_eq!(code, 0);
+        assert_eq!(code, 0, "server failed with code {code}");
     });
 
     sleep(Duration::from_secs(1)).await;
@@ -82,7 +147,7 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
         ];
         let options = Arguments::parse_from(args);
         let code = run(&client_context, options).await;
-        assert_eq!(code, 0);
+        assert_eq!(code, 0, "client failed with code {code}");
     });
 
     sleep(Duration::from_secs(1)).await;
@@ -127,6 +192,11 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
 async fn test_integration(config: &str) {
     let context = Context::new();
     let finish = start_test(&context, config).await;
+    concurrent_test(&context).await;
+    finish.await;
+}
+
+async fn concurrent_test(context: &Context) {
     let concurrent_test = async |context: Context, n: usize| {
         let mut set = JoinSet::new();
         for _ in 0..n {
@@ -145,7 +215,6 @@ async fn test_integration(config: &str) {
     for _ in 0..1000 {
         connect_to_echo(context.clone()).await;
     }
-    finish.await;
 }
 
 async fn connect_to_echo(context: Context) {
