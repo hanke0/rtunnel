@@ -108,7 +108,7 @@ pub async fn run_server(context: &Context, configs: Vec<ServerConfig>) -> i32 {
     info!("all service started, server is ready");
     select! {
             _ = wait_exit_signal() => {},
-            _ = context.wait_cancel() => {}
+            _ = context.wait_finish() => {}
     }
     info!("server is shutting down");
     graceful_exit(context, "server").await;
@@ -160,7 +160,7 @@ async fn graceful_exit(context: &Context, side: &str) {
     context.cancel_all();
     loop {
         select! {
-            _ = context.wait() => {
+            _ = context.wait_cancel_and_finish() => {
                 break;
             }
             _ = sleep(Duration::from_millis(1000)) => {

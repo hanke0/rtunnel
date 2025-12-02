@@ -102,9 +102,9 @@ async fn start_client_sentry<T: Connector>(
     receiver: Receiver<i32>,
 ) {
     keep_client_connections(&context, &options, receiver).await;
-    context.cancel_all();
+    context.cancel();
     debug!("client sentry exiting, {}", options.connector);
-    context.wait().await;
+    context.wait_cancel_and_finish().await;
     debug!("client sentry exited, {}", options.connector);
 }
 
@@ -151,6 +151,10 @@ async fn build_tunnel<T: Connector>(context: Context, options: ClientOptionsRef<
         Ok(_) => {}
         Err(e) => {
             error!("tunnel relay fail: {:#}", e);
+            if e.is_connect_critical() {
+                context.cancel();
+                return;
+            }
             options.notify_for_new_tunnel(1).await;
         }
     }

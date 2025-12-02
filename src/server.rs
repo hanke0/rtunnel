@@ -116,7 +116,7 @@ async fn serve_tunnel<T: Listener>(context: Context, listener: T, pool: TunnelPo
         }
     }
     context.cancel_all();
-    context.wait().await;
+    context.wait_cancel_and_finish().await;
 }
 
 async fn serve_service<T: Listener, U: Listener>(
@@ -153,7 +153,7 @@ async fn serve_service<T: Listener, U: Listener>(
         }
     }
     context.cancel_all();
-    context.wait().await;
+    context.wait_cancel_and_finish().await;
 }
 
 async fn handle_service_stream<T: Listener, U: Listener>(

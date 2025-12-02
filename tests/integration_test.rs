@@ -119,7 +119,7 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
         listen_handle.await.unwrap();
         server_handle.await.unwrap();
         client_handle.await.unwrap();
-        context.wait().await;
+        context.wait_cancel_and_finish().await;
         let _ = file.path();
     }
 }

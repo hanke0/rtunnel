@@ -58,6 +58,7 @@ where
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ErrorKind {
     BadIo,
+    ConnectionRefused,
     Eof,
     IoRetryAble,
     Timeout,
@@ -103,6 +104,9 @@ impl Error {
             std::io::ErrorKind::WouldBlock => Self::new(ErrorKind::IoRetryAble, error.to_string()),
             std::io::ErrorKind::Interrupted => Self::new(ErrorKind::IoRetryAble, error.to_string()),
             std::io::ErrorKind::TimedOut => Self::new(ErrorKind::Timeout, error.to_string()),
+            std::io::ErrorKind::ConnectionRefused => {
+                Self::new(ErrorKind::ConnectionRefused, error.to_string())
+            }
             _ => Self::new(ErrorKind::BadIo, error.to_string()),
         }
     }
@@ -125,7 +129,7 @@ impl Error {
     pub fn is_connect_critical(&self) -> bool {
         !matches!(
             self.inner.kind,
-            ErrorKind::IoRetryAble | ErrorKind::Canceled
+            ErrorKind::ConnectionRefused | ErrorKind::Canceled
         )
     }
 

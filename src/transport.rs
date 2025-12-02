@@ -733,9 +733,16 @@ impl Context {
     }
 
     #[inline]
-    pub async fn wait(&self) {
+    pub async fn wait_cancel_and_finish(&self) {
         self.wait_cancel().await;
         self.tracker.wait().await;
+    }
+
+    #[inline]
+    pub async fn wait_finish(&self) {
+        self.tracker.close();
+        self.tracker.wait().await;
+        self.tracker.reopen();
     }
 
     #[inline]
@@ -759,7 +766,7 @@ impl Context {
         let child = children.clone();
         self.spawn(async move {
             child.wait_cancel().await;
-            child.wait().await;
+            child.wait_cancel_and_finish().await;
         });
         children
     }
@@ -1107,7 +1114,7 @@ mod tests {
                 println!("children sleep");
                 sleep(fn_spend).await;
                 println!("children wait");
-                grandson1.wait().await;
+                grandson1.wait_cancel_and_finish().await;
                 println!("children wait done");
             });
             assert_eq!(father.task_count(), 2);
@@ -1115,7 +1122,7 @@ mod tests {
             sender.send(()).unwrap();
             sleep(fn_spend).await;
             println!("father wait");
-            children1.wait().await;
+            children1.wait_cancel_and_finish().await;
             println!("father wait done");
         });
 
@@ -1124,9 +1131,12 @@ mod tests {
         assert_eq!(children1.task_count(), 2);
         assert_eq!(grandson1.task_count(), 1);
 
-        timeout(Duration::from_millis(400), grandson1.wait())
-            .await
-            .unwrap();
+        timeout(
+            Duration::from_millis(400),
+            grandson1.wait_cancel_and_finish(),
+        )
+        .await
+        .unwrap();
 
         assert!(grandson1.has_cancel());
         assert!(children1.has_cancel());
@@ -1146,11 +1156,11 @@ mod tests {
         assert!(!context.has_cancel());
         assert!(children.has_cancel());
         assert_eq!(children.task_count(), 0);
-        children.wait().await;
+        children.wait_cancel_and_finish().await;
 
         context.cancel();
         assert!(context.has_cancel());
-        context.wait().await;
+        context.wait_cancel_and_finish().await;
         assert_eq!(context.task_count(), 0);
     }
 
@@ -1162,8 +1172,8 @@ mod tests {
         context.cancel();
         assert!(context.has_cancel());
         assert!(children.has_cancel());
-        children.wait().await;
-        context.wait().await;
+        children.wait_cancel_and_finish().await;
+        context.wait_cancel_and_finish().await;
     }
 
     #[tokio::test]
