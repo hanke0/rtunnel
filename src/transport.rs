@@ -141,6 +141,74 @@ impl Listener for TlsTcpListener {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
+pub struct TlsTcpConnectorConfig {
+    pub client_cert: String,
+    pub client_key: String,
+    pub server_cert: String,
+    pub subject: String,
+    pub addr: String,
+}
+
+pub struct TlsTcpConnector {
+    connector: TokioTlsConnector,
+    addr: SocketAddr,
+    server_name: ServerName<'static>,
+}
+
+impl fmt::Display for TlsTcpConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tls://{}", self.addr)
+    }
+}
+
+impl fmt::Debug for TlsTcpConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "TlsConnector({})", self.addr)
+    }
+}
+
+impl Connector for TlsTcpConnector {
+    type Stream = TlsClientStream<TcpStream>;
+    type Config = TlsTcpConnectorConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        let addr = config
+            .addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(whatever!("Invalid address"))?;
+        let client_config =
+            build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
+        let server_name =
+            ServerName::try_from(config.subject).context("Failed to parse server name")?;
+        let connector = TokioTlsConnector::from(Arc::new(client_config));
+        Ok(Self {
+            connector,
+            addr,
+            server_name,
+        })
+    }
+
+    async fn connect(&self) -> Result<(Self::Stream, String)> {
+        let stream = TcpStream::connect(self.addr).await?;
+        let local_addr = stream.local_addr()?.to_string();
+        let peer_addr = stream.peer_addr()?.to_string();
+        socket_hint(&stream);
+        let addr = stream.local_addr()?.to_string();
+        let r = self
+            .connector
+            .connect(self.server_name.clone(), stream)
+            .instrument(tracing::info_span!("client {}", addr))
+            .await?;
+        Ok((r, format!("{}-{}", local_addr, peer_addr)))
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 pub struct PlainTcpListenerConfig {
     pub addr: SocketAddr,
     pub reuse_port: Option<bool>,
@@ -200,6 +268,53 @@ impl Listener for PlainTcpListener {
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
         Ok((stream, format!("{}-{}", local_addr, peer_addr)))
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct PlainTcpConnectorConfig {
+    pub addr: String,
+}
+
+pub struct PlainTcpConnector {
+    addr: SocketAddr,
+}
+
+impl fmt::Display for PlainTcpConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tcp://{}", self.addr)
+    }
+}
+
+impl fmt::Debug for PlainTcpConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "PlainTcpConnector({})", self.addr)
+    }
+}
+
+impl Connector for PlainTcpConnector {
+    type Stream = TcpStream;
+    type Config = PlainTcpConnectorConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        let addr = config
+            .addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(whatever!("Invalid address"))?;
+        Ok(Self { addr })
+    }
+
+    async fn connect(&self) -> Result<(Self::Stream, String)> {
+        let stream = TcpStream::connect(self.addr).await?;
+        let local_addr = stream.local_addr()?.to_string();
+        let peer_addr = stream.peer_addr()?.to_string();
+        socket_hint(&stream);
+        Ok((stream, format!("{local_addr}-{peer_addr}")))
     }
 
     fn address(&self) -> SocketAddr {
@@ -362,121 +477,6 @@ impl AsyncWrite for QuinStream {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut FContext<'_>) -> Poll<std::io::Result<()>> {
         pin!(&mut self.0).poll_shutdown(cx)
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-pub struct TlsTcpConnectorConfig {
-    pub client_cert: String,
-    pub client_key: String,
-    pub server_cert: String,
-    pub subject: String,
-    pub addr: String,
-}
-
-pub struct TlsTcpConnector {
-    connector: TokioTlsConnector,
-    addr: SocketAddr,
-    server_name: ServerName<'static>,
-}
-
-impl fmt::Display for TlsTcpConnector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tls://{}", self.addr)
-    }
-}
-
-impl fmt::Debug for TlsTcpConnector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TlsConnector({})", self.addr)
-    }
-}
-
-impl Connector for TlsTcpConnector {
-    type Stream = TlsClientStream<TcpStream>;
-    type Config = TlsTcpConnectorConfig;
-
-    async fn new(config: Self::Config) -> Result<Self> {
-        let addr = config
-            .addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or(whatever!("Invalid address"))?;
-        let client_config =
-            build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
-        let server_name =
-            ServerName::try_from(config.subject).context("Failed to parse server name")?;
-        let connector = TokioTlsConnector::from(Arc::new(client_config));
-        Ok(Self {
-            connector,
-            addr,
-            server_name,
-        })
-    }
-
-    async fn connect(&self) -> Result<(Self::Stream, String)> {
-        let stream = TcpStream::connect(self.addr).await?;
-        let local_addr = stream.local_addr()?.to_string();
-        let peer_addr = stream.peer_addr()?.to_string();
-        socket_hint(&stream);
-        let addr = stream.local_addr()?.to_string();
-        let r = self
-            .connector
-            .connect(self.server_name.clone(), stream)
-            .instrument(tracing::info_span!("client {}", addr))
-            .await?;
-        Ok((r, format!("{}-{}", local_addr, peer_addr)))
-    }
-
-    fn address(&self) -> SocketAddr {
-        self.addr
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-pub struct PlainTcpConnectorConfig {
-    pub addr: String,
-}
-
-pub struct PlainTcpConnector {
-    addr: SocketAddr,
-}
-
-impl fmt::Display for PlainTcpConnector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tcp://{}", self.addr)
-    }
-}
-
-impl fmt::Debug for PlainTcpConnector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PlainTcpConnector({})", self.addr)
-    }
-}
-
-impl Connector for PlainTcpConnector {
-    type Stream = TcpStream;
-    type Config = PlainTcpConnectorConfig;
-
-    async fn new(config: Self::Config) -> Result<Self> {
-        let addr = config
-            .addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or(whatever!("Invalid address"))?;
-        Ok(Self { addr })
-    }
-
-    async fn connect(&self) -> Result<(Self::Stream, String)> {
-        let stream = TcpStream::connect(self.addr).await?;
-        let local_addr = stream.local_addr()?.to_string();
-        let peer_addr = stream.peer_addr()?.to_string();
-        socket_hint(&stream);
-        Ok((stream, format!("{local_addr}-{peer_addr}")))
-    }
-
-    fn address(&self) -> SocketAddr {
-        self.addr
     }
 }
 
