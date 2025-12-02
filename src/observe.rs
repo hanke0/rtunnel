@@ -1,8 +1,8 @@
 use std::env;
 use std::fmt;
 
-use crate::errors::Error;
 use crate::errors::Result;
+use crate::errors::ResultExt;
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, Default)]
 pub enum Level {
@@ -37,7 +37,7 @@ pub fn setup_testing() {
 fn setup_impl(log_level: Level, is_testing: bool) -> Result<()> {
     let env_log = env::var("RUST_LOG").unwrap_or_default();
     let rust_log = if env_log.is_empty() {
-        log_level.to_string() + ",quinn=error,quinn_proto=error,rustls=error,tokio_rustls=error"
+        log_level.to_string() + ",quinn=off,quinn_proto=off,rustls=off,tokio_rustls=off"
     } else {
         env_log
     };
@@ -49,8 +49,8 @@ fn setup_impl(log_level: Level, is_testing: bool) -> Result<()> {
         builder
             .with_test_writer()
             .try_init()
-            .map_err(Error::from_any)
+            .context("Failed to init test logger")
     } else {
-        builder.try_init().map_err(Error::from_any)
+        builder.try_init().context("Failed to init logger")
     }
 }

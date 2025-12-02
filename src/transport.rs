@@ -39,7 +39,7 @@ use tokio_util::task::TaskTracker;
 use tracing::Instrument;
 use tracing::{error, info_span, warn};
 
-use crate::errors::{AnyContext as _, Error, Result, ResultExt as _, whatever};
+use crate::errors::{Error, Result, ResultExt as _, whatever};
 
 pub use tokio::net::TcpListener;
 
@@ -131,7 +131,7 @@ impl Listener for TlsTcpListener {
             .acceptor
             .accept(stream)
             .await
-            .map_err(Error::from_tls)?;
+            .context("tls accept failed")?;
         Ok((stream, format!("{}-{}", local_addr, peer_addr)))
     }
 
@@ -226,7 +226,7 @@ impl QuicListener {
     async fn accept_forever(endpoint: Endpoint, sender: mpsc::Sender<(QuinStream, String)>) {
         loop {
             match endpoint.accept().await {
-                Some(incoming) => match incoming.await.any_context("failed to accept connection") {
+                Some(incoming) => match incoming.await.context("failed to accept connection") {
                     Ok(connection) => {
                         let remote = connection.remote_address().to_string();
                         let sender = sender.clone();
@@ -251,7 +251,7 @@ impl QuicListener {
             let (send, mut recv) = match connection
                 .accept_bi()
                 .await
-                .any_context("failed to accept bi stream")
+                .context("failed to accept bi stream")
             {
                 Ok((send, recv)) => (send, recv),
                 Err(e) => {
@@ -273,7 +273,7 @@ impl QuicListener {
             match sender
                 .send((QuinStream(send, recv), id))
                 .await
-                .any_context("failed to send stream")
+                .context("failed to send stream")
             {
                 Ok(_) => {
                     continue;
@@ -295,7 +295,7 @@ impl Listener for QuicListener {
         let server_config =
             build_tls_server_config(&config.server_cert, &config.server_key, &config.client_cert)?;
         let server_config = QuicServerConfig::try_from(server_config)
-            .any_context("failed to build quic server config")?;
+            .context("failed to build quic server config")?;
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(server_config));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_concurrent_uni_streams(0_u8.into());
@@ -526,7 +526,7 @@ impl Connector for QuicConnector {
         let client_config =
             build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
         let client_config = QuicClientConfig::try_from(client_config)
-            .any_context("failed to build quic client config")?;
+            .context("failed to build quic client config")?;
         let client_config = quinn::ClientConfig::new(Arc::new(client_config));
         let mut endpoint =
             Endpoint::client(Self::ANY_ADDR).context("Failed to create quic endpoint")?;

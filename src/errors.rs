@@ -1,6 +1,5 @@
 use std::error::Error as StdError;
 use std::fmt::{Debug, Display};
-use std::ops::Deref;
 use std::result::Result as StdResult;
 use std::string::String;
 use std::time::Duration;
@@ -23,32 +22,17 @@ pub trait ResultExt<T> {
     fn suppress<F: FnOnce(Error)>(self, f: F);
 }
 
-pub trait AnyContext<T> {
-    fn any_context<C>(self, context: C) -> Result<T>
-    where
-        C: Display + Send + Sync + 'static;
-}
-
-impl<T, E: Display> AnyContext<T> for StdResult<T, E> {
-    fn any_context<C>(self, context: C) -> Result<T>
-    where
-        C: Display + Send + Sync + 'static,
-    {
-        match self {
-            Ok(t) => Ok(t),
-            Err(e) => Err(Error::from_any(e).context(context)),
-        }
-    }
-}
-
-impl<T> ResultExt<T> for Result<T> {
+impl<T, E> ResultExt<T> for StdResult<T, E>
+where
+    E: Into<Error>,
+{
     fn context<C>(self, context: C) -> Result<T>
     where
         C: Display + Send + Sync + 'static,
     {
         match self {
             Ok(t) => Ok(t),
-            Err(e) => Err(e.context(context)),
+            Err(e) => Err(e.into().context(context)),
         }
     }
 
@@ -59,14 +43,14 @@ impl<T> ResultExt<T> for Result<T> {
     {
         match self {
             Ok(t) => Ok(t),
-            Err(e) => Err(e.context(f())),
+            Err(e) => Err(e.into().context(f())),
         }
     }
 
     fn suppress<F: FnOnce(Error)>(self, f: F) {
         match self {
             Ok(_) => {}
-            Err(e) => f(e),
+            Err(e) => f(e.into()),
         };
     }
 }
@@ -97,16 +81,12 @@ impl Error {
         }
     }
 
-    pub fn from_tls<T: Display>(message: T) -> Self {
+    pub fn as_tls<T: Display>(message: T) -> Self {
         Self::from_string(ErrorKind::Tls, message.to_string())
     }
 
-    pub fn from_any<T: Display>(e: T) -> Self {
-        Self::whatever(e.to_string())
-    }
-
-    pub fn whatever(message: String) -> Self {
-        Self::from_string(ErrorKind::Other, message)
+    pub fn as_other<T: Display>(e: T) -> Self {
+        Self::from_string(ErrorKind::Other, e.to_string())
     }
 
     pub fn cancel() -> Self {
@@ -171,42 +151,21 @@ impl Error {
     }
 }
 
-impl From<Inner> for Error {
-    fn from(inner: Inner) -> Self {
-        Self {
-            inner: Box::new(inner),
-        }
-    }
-}
-
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.inner, f)
+        f.write_str(&self.inner.message)
     }
 }
 
 impl Debug for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self, f)
+        f.write_str(&self.inner.message)
     }
 }
 
 impl AsRef<str> for Error {
     fn as_ref(&self) -> &str {
         &self.inner.message
-    }
-}
-
-impl AsRef<dyn StdError> for Error {
-    fn as_ref(&self) -> &(dyn StdError + 'static) {
-        &self.inner
-    }
-}
-
-impl Deref for Error {
-    type Target = dyn StdError;
-    fn deref(&self) -> &Self::Target {
-        &self.inner
     }
 }
 
@@ -227,97 +186,65 @@ impl Inner {
     }
 }
 
-impl From<Error> for Inner {
-    fn from(error: Error) -> Self {
-        *error.inner
-    }
-}
-
-impl StdError for Inner {}
-
-impl Display for Inner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl Debug for Inner {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self, f)
-    }
-}
-
 #[macro_export]
 macro_rules! whatever {
     ($msg:literal $(,)?) => {
         $crate::errors::__private::must_use(
-            $crate::errors::Error::whatever($msg.to_string())
+            $crate::errors::Error::as_other($msg.to_string())
         )
     };
     ($fmt:expr, $($arg:tt)*) => {
         $crate::errors::__private::must_use(
-            $crate::errors::Error::whatever($crate::errors::__private::format!($fmt, $($arg)*))
+            $crate::errors::Error::as_other($crate::errors::__private::format!($fmt, $($arg)*))
         )
     };
 }
 
-use tokio_rustls::rustls;
 pub use whatever;
 
-macro_rules! generate_from_any {
-    ($typ:ty, $from:ident) => {
-        impl From<$typ> for $crate::errors::Error {
-            fn from(error: $typ) -> Self {
+macro_rules! impl_from_for {
+    ( $name:ty, $from:ident ) => {
+        impl From<$name> for $crate::errors::Error {
+            fn from(error: $name) -> Self {
                 Error::$from(error)
             }
         }
-
-        impl<T> $crate::errors::ResultExt<T> for std::result::Result<T, $typ> {
-            fn context<C>(self, context: C) -> Result<T>
-            where
-                C: Display + Send + Sync + 'static,
-            {
-                match self {
-                    Ok(t) => Ok(t),
-                    Err(e) => Err(Error::from(e).context(context)),
-                }
-            }
-
-            fn with_context<C, F>(self, f: F) -> Result<T>
-            where
-                C: Display + Send + Sync + 'static,
-                F: FnOnce() -> C,
-            {
-                match self {
-                    Ok(t) => Ok(t),
-                    Err(e) => Err(Error::from(e).context(f())),
-                }
-            }
-            fn suppress<F: FnOnce(Error)>(self, f: F) {
-                match self {
-                    Ok(_) => {}
-                    Err(e) => f(e.into()),
-                };
+    };
+    ( $name:ty ) => {
+        impl From<$name> for $crate::errors::Error {
+            fn from(error: $name) -> Self {
+                Error::as_other(error)
             }
         }
     };
-    ($typ:ty) => {
-        generate_from_any!($typ, from_any);
+    ($generic:ident, $ty:ty) => {
+        impl<$generic> From<$ty> for crate::errors::Error {
+            fn from(error: $ty) -> Self {
+                Error::as_other(error)
+            }
+        }
     };
 }
 
-generate_from_any!(std::io::Error, from_io);
-generate_from_any!(std::fmt::Error);
-generate_from_any!(std::string::FromUtf8Error);
-generate_from_any!(toml::de::Error);
-generate_from_any!(rustls::Error);
-generate_from_any!(tokio_rustls::rustls::pki_types::InvalidDnsNameError);
-generate_from_any!(tokio_rustls::rustls::pki_types::pem::Error);
-generate_from_any!(rustls::server::VerifierBuilderError);
-generate_from_any!(std::array::TryFromSliceError);
-generate_from_any!(quinn::ConnectError);
-generate_from_any!(quinn::ConnectionError);
-generate_from_any!(tokio::sync::oneshot::error::RecvError);
+impl_from_for!(std::io::Error, from_io);
+impl_from_for!(std::fmt::Error);
+impl_from_for!(std::string::FromUtf8Error);
+impl_from_for!(std::array::TryFromSliceError);
+impl_from_for!(Box<dyn StdError + Send + Sync + 'static>);
+
+impl_from_for!(toml::de::Error);
+
+impl_from_for!(tokio_rustls::rustls::Error);
+impl_from_for!(tokio_rustls::rustls::pki_types::InvalidDnsNameError);
+impl_from_for!(tokio_rustls::rustls::pki_types::pem::Error);
+impl_from_for!(tokio_rustls::rustls::server::VerifierBuilderError);
+
+impl_from_for!(quinn::ConnectError);
+impl_from_for!(quinn::ConnectionError);
+impl_from_for!(quinn::crypto::rustls::NoInitialCipherSuite);
+
+impl_from_for!(tokio::sync::oneshot::error::RecvError);
+impl_from_for!(T, tokio::sync::mpsc::error::SendError<T>);
 
 // Not public API. Referenced by macro-generated code.
 #[doc(hidden)]
