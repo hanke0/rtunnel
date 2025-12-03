@@ -6,8 +6,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::result::Result as StdResult;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicI32;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use hyper::Method;
