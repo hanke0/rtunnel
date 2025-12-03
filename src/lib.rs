@@ -5,6 +5,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use tokio::net::TcpListener;
 use tokio::select;
 use tokio::time::sleep;
 use tokio_rustls::rustls::crypto::aws_lc_rs;
@@ -121,9 +122,12 @@ pub async fn run_server(context: &Context, config: Config) -> Result<()> {
 }
 
 async fn build_watch(context: &Context, config: Option<AdminConfig>) -> Result<Watcher> {
-    let _ = context;
-    let _ = config;
     let watch = Watcher::new();
+    if let Some(config) = config {
+        let listener = TcpListener::bind(config.listen_to).await?;
+        let watch = watch.clone();
+        context.spawn(watch.serve_http(context.clone(), listener, config.get_http_path()));
+    }
     Ok(watch)
 }
 

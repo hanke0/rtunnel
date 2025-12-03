@@ -267,6 +267,8 @@ impl_from_for!(quinn::crypto::rustls::NoInitialCipherSuite);
 impl_from_for!(tokio::sync::oneshot::error::RecvError);
 impl_from_for!(T, tokio::sync::mpsc::error::SendError<T>);
 
+impl_from_for!(hyper::Error);
+
 // Not public API. Referenced by macro-generated code.
 #[doc(hidden)]
 pub mod __private {

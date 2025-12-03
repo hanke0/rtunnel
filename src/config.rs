@@ -9,7 +9,7 @@ use std::string::String;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::errors::{Result, ResultExt as _};
+use crate::errors::{Error, Result, ResultExt as _};
 use crate::transport::{
     PlainTcpConnectorConfig, PlainTcpListenerConfig, QuicConnectorConfig, QuicListenerConfig,
     TlsTcpConnectorConfig, TlsTcpListenerConfig, Transport,
@@ -65,6 +65,13 @@ impl Config {
             client.allowed_addresses = allowed_addresses;
         }
         Ok(())
+    }
+}
+
+impl FromStr for Config {
+    type Err = Error;
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse(s)
     }
 }
 
@@ -124,6 +131,14 @@ impl ClientConfig {
 pub struct AdminConfig {
     pub listen_to: SocketAddr,
     pub http_path: Option<String>,
+}
+
+impl AdminConfig {
+    pub fn get_http_path(&self) -> String {
+        self.http_path
+            .clone()
+            .unwrap_or_else(|| "/rtunnel/admin/status".to_string())
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]

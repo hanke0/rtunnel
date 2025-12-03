@@ -32,21 +32,21 @@ use rtunnel::{
 #[serial]
 async fn test_tls() {
     let config = build_tls_example("example.com");
-    test_integration(&config).await;
+    test_integration(&config, false).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn test_tcp() {
     let config = build_tcp_example();
-    test_integration(&config).await;
+    test_integration(&config, false).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn test_quic() {
     let config = build_quic_example("example.com");
-    test_integration(&config).await;
+    test_integration(&config, false).await;
 }
 
 #[tokio::test]
@@ -67,8 +67,12 @@ async fn test_tcp_backup() {
             addr: "127.0.0.1:2336".to_string(),
         });
     }
+    cfg.admin = Some(config::AdminConfig {
+        listen_to: SocketAddr::from_str("127.0.0.1:2337").unwrap(),
+        http_path: Some("/status".to_string()),
+    });
     let config = toml::to_string(cfg).unwrap();
-    test_integration(&config).await;
+    test_integration(&config, true).await;
 }
 
 #[tokio::test]
@@ -191,10 +195,21 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
     }
 }
 
-async fn test_integration(config: &str) {
+async fn test_integration(config: &str, admin_check: bool) {
     let context = Context::new();
     let finish = start_test(&context, config).await;
     concurrent_test(&context).await;
+    if admin_check {
+        let mut stream = TcpStream::connect("127.0.0.1:2337").await.unwrap();
+        stream
+            .write_all(b"GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buffer = [0; 1024];
+        let n = stream.read(&mut buffer).await.unwrap();
+        let response: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&buffer[0..n]);
+        assert!(response.contains("\"alive_tunnel\":"), "{}", response);
+    };
     finish.await;
 }
 

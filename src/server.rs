@@ -393,6 +393,10 @@ impl<T: Listener> TunnelPool<T> {
         }
     }
 
+    async fn wait(&self) {
+        self.inner.notify.notified().await;
+    }
+
     pub async fn try_pop(&self) -> Result<(T::Stream, String)> {
         let mut sessions = self.inner.sessions.lock().await;
         let result = sessions.pop_first();
