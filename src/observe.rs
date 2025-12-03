@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::result::Result as StdResult;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicI32, AtomicU32};
+use std::sync::atomic::AtomicI32;
 use std::time::{Duration, Instant};
 
 use hyper::Method;
@@ -316,7 +316,7 @@ impl WatchOne {
     }
 
     pub fn observe_match_spend(&self, spend: Duration) {
-        let spend = spend.as_millis() as u32;
+        let spend = spend.as_millis() as i32;
         self.inner.match_spend.add_value(spend);
     }
 
@@ -328,19 +328,19 @@ impl WatchOne {
         self.inner.busy_tunnel.load(Ordering::Acquire)
     }
 
-    pub fn match_spend(&self) -> u32 {
+    pub fn match_spend(&self) -> i32 {
         self.inner.match_spend.get_average()
     }
 
-    pub fn match_count(&self) -> u32 {
+    pub fn match_count(&self) -> i32 {
         self.inner.match_spend.get_count()
     }
 }
 
 #[derive(Debug)]
 pub struct Average {
-    count: AtomicU32,
-    average: AtomicU32,
+    count: AtomicI32,
+    average: AtomicI32,
 }
 
 impl Default for Average {
@@ -352,15 +352,15 @@ impl Default for Average {
 impl Average {
     pub fn new() -> Self {
         Self {
-            count: AtomicU32::new(0),
-            average: AtomicU32::new(0),
+            count: AtomicI32::new(0),
+            average: AtomicI32::new(0),
         }
     }
 
-    pub fn add_value(&self, value: u32) {
+    pub fn add_value(&self, value: i32) {
         loop {
-            let current_count = self.count.load(std::sync::atomic::Ordering::Acquire);
-            let current_avg = self.average.load(std::sync::atomic::Ordering::Acquire);
+            let current_count = self.count.load(Ordering::Acquire);
+            let current_avg = self.average.load(Ordering::Acquire);
             let new_count = current_count + 1;
             let new_avg_scaled = if current_count == 0 {
                 value
@@ -390,12 +390,12 @@ impl Average {
         }
     }
 
-    pub fn get_average(&self) -> u32 {
-        self.average.load(std::sync::atomic::Ordering::Acquire)
+    pub fn get_average(&self) -> i32 {
+        self.average.load(Ordering::Acquire)
     }
 
-    pub fn get_count(&self) -> u32 {
-        self.count.load(std::sync::atomic::Ordering::Acquire)
+    pub fn get_count(&self) -> i32 {
+        self.count.load(Ordering::Acquire)
     }
 }
 
@@ -412,6 +412,8 @@ mod tests {
         assert_eq!(average.get_average(), 10);
         average.add_value(30);
         assert_eq!(average.get_average(), 20);
+        average.add_value(5);
+        assert_eq!(average.get_average(), 15);
     }
 
     #[tokio::test]
