@@ -144,6 +144,7 @@ async fn serve_tunnel<T: Listener>(context: Context, listener: T, pool: TunnelPo
             }
             Err(e) => {
                 if e.is_accept_critical() {
+                    drop(listener);
                     if context.has_cancel() {
                         return;
                     }
@@ -188,6 +189,7 @@ async fn serve_service<T: Listener, U: Listener, V: Listener>(
                     if !context.has_cancel() {
                         error!("listener accept error: {:#}", e);
                     }
+                    drop(listener);
                     break;
                 }
                 info!("listener accept error, retrying: {:#}", e);
