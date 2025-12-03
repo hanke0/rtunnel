@@ -17,14 +17,17 @@ pub mod observe;
 pub mod server;
 pub mod transport;
 
-pub use crate::config::{ClientConfig, ServerConfig};
+pub use crate::config::{AdminConfig, ClientConfig, Config, ServerConfig};
 pub use crate::transport::Context;
+
+use crate::errors::Result;
+use crate::observe::Watcher;
 
 /// Runs the rtunnel application based on the provided CLI options.
 ///
 /// This function handles the main command-line interface and dispatches to
 /// the appropriate handler based on the selected command.
-pub async fn run(context: &Context, args: Arguments) -> i32 {
+pub async fn run(context: &Context, args: Arguments) -> Result<()> {
     match args.command {
         Commands::ExampleConfig { subject, r#type } => {
             match r#type {
@@ -38,21 +41,21 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
                     println!("{}", config::build_quic_example(&subject));
                 }
             }
-            0
+            Ok(())
         }
         Commands::SelfSignedCert { .. } => {
             write_self_signed_cert(args.command);
-            0
+            Ok(())
         }
         Commands::Client { config } => {
             info!("starting client, loading config from {}", config);
-            let configs = ClientConfig::from_file(&config).expect("Failed to load config");
-            run_client(context, configs).await
+            let config = Config::from_file(&config).expect("Failed to load config");
+            run_client(context, config).await
         }
         Commands::Server { config } => {
             info!("starting server, loading config from {}", config);
-            let configs = ServerConfig::from_file(&config).expect("Failed to load config");
-            run_server(context, configs).await
+            let config = Config::from_file(&config).expect("Failed to load config");
+            run_server(context, config).await
         }
     }
 }
@@ -62,28 +65,29 @@ pub async fn run(context: &Context, args: Arguments) -> i32 {
 /// This function starts one or more client connections based on the provided
 /// configurations. Each client connects to a tunnel server and manages
 /// connections for relaying traffic.
-pub async fn run_client(context: &Context, configs: Vec<ClientConfig>) -> i32 {
+pub async fn run_client(context: &Context, config: Config) -> Result<()> {
     warmup_aws_lc_rs();
-    debug!("starting {} clients", configs.len());
-    for cfg in configs.iter() {
-        let err = client::start_client(context, cfg.clone()).await;
+    let watch = build_watch(context, config.admin).await?;
+    debug!("starting {} clients", config.clients.len());
+    for cfg in config.clients.iter() {
+        let err = client::start_client(context, cfg.clone(), &watch).await;
         match err {
             Ok(_) => continue,
             Err(e) => {
                 error!("connect to {} failed, exiting: {:#}", cfg.connect_to, e);
                 graceful_exit(context, "client").await;
-                return 1;
+                return Err(e);
             }
         }
     }
     info!("all clients started, client is ready");
     select! {
             _ = wait_exit_signal() => {},
-            _ = context.wait_cancel() => {}
+            _ = context.wait_finish() => {}
     }
     info!("client is shutting down");
     graceful_exit(context, "client").await;
-    0
+    Ok(())
 }
 
 /// Runs the server mode of rtunnel.
@@ -91,18 +95,18 @@ pub async fn run_client(context: &Context, configs: Vec<ClientConfig>) -> i32 {
 /// This function starts one or more server instances based on the provided
 /// configurations. Each server listens for tunnel connections and manages
 /// services that forward traffic to backend services.
-pub async fn run_server(context: &Context, configs: Vec<ServerConfig>) -> i32 {
+pub async fn run_server(context: &Context, config: Config) -> Result<()> {
     warmup_aws_lc_rs();
-    debug!("starting {} server", configs.len());
-    let watch = observe::Watcher::new();
-    for cfg in configs.iter() {
+    let watch = build_watch(context, config.admin).await?;
+    debug!("starting {} server", config.servers.len());
+    for cfg in config.servers.iter() {
         let err = server::start_server(context, cfg.clone(), &watch).await;
         match err {
             Ok(_) => continue,
             Err(e) => {
                 error!("start server {} failed, exiting: {:#}", cfg.listen_to, e);
                 graceful_exit(context, "server").await;
-                return 1;
+                return Err(e);
             }
         }
     }
@@ -113,7 +117,14 @@ pub async fn run_server(context: &Context, configs: Vec<ServerConfig>) -> i32 {
     }
     info!("server is shutting down");
     graceful_exit(context, "server").await;
-    0
+    Ok(())
+}
+
+async fn build_watch(context: &Context, config: Option<AdminConfig>) -> Result<Watcher> {
+    let _ = context;
+    let _ = config;
+    let watch = Watcher::new();
+    Ok(watch)
 }
 
 async fn wait_exit_signal() {

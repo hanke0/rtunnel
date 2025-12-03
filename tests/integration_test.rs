@@ -135,8 +135,7 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
             file_path,
         ];
         let options = Arguments::parse_from(args);
-        let code = run(&server_context, options).await;
-        assert_eq!(code, 0, "server failed with code {code}");
+        run(&server_context, options).await.expect("server failed");
     });
 
     sleep(Duration::from_secs(1)).await;
@@ -150,8 +149,7 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
             file_path,
         ];
         let options = Arguments::parse_from(args);
-        let code = run(&client_context, options).await;
-        assert_eq!(code, 0, "client failed with code {code}");
+        run(&client_context, options).await.expect("client failed");
     });
 
     sleep(Duration::from_secs(1)).await;

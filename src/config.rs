@@ -22,11 +22,17 @@ use crate::whatever;
 /// It may contain either server configurations, client configurations, or both.
 #[derive(Deserialize, Serialize)]
 pub struct Config {
-    pub servers: ServerConfigList,
-    pub clients: ClientConfigList,
+    pub servers: Vec<ServerConfig>,
+    pub clients: Vec<ClientConfig>,
+    pub admin: Option<AdminConfig>,
 }
 
 impl Config {
+    pub fn from_file(path: &str) -> Result<Self> {
+        let contents = read_config_file(path).context("Failed to read config file")?;
+        Self::parse(&contents)
+    }
+
     pub fn parse(contents: &str) -> Result<Self> {
         let mut cfg = from_string::<Config>(contents)?;
         Self::fix_servers(&mut cfg.servers)?;
@@ -34,7 +40,7 @@ impl Config {
         Ok(cfg)
     }
 
-    fn fix_servers(servers: &mut ServerConfigList) -> Result<()> {
+    fn fix_servers(servers: &mut [ServerConfig]) -> Result<()> {
         for server in servers.iter_mut() {
             for service in server.services.iter_mut() {
                 let transport = Transport::parse(&service.connect_to)
@@ -45,7 +51,7 @@ impl Config {
         Ok(())
     }
 
-    fn fix_clients(clients: &mut ClientConfigList) -> Result<()> {
+    fn fix_clients(clients: &mut [ClientConfig]) -> Result<()> {
         for client in clients.iter_mut() {
             if client.idle_connections == 0 {
                 client.idle_connections = 20;
@@ -62,9 +68,6 @@ impl Config {
     }
 }
 
-pub type ServerConfigList = Vec<ServerConfig>;
-pub type ClientConfigList = Vec<ClientConfig>;
-
 /// Server configuration for rtunnel.
 ///
 /// This struct contains all the settings needed to run a tunnel server,
@@ -75,6 +78,25 @@ pub struct ServerConfig {
     pub listen_to: ListenTo,
     pub listen_to2: Option<ListenTo>,
     pub services: Vec<Service>,
+}
+
+impl ServerConfig {
+    pub fn get_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.listen_to.to_string())
+    }
+}
+
+/// Service definition for a tunnel server.
+///
+/// A service maps an external listening address to an internal destination address,
+/// allowing the server to forward traffic from the public interface to backend services.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct Service {
+    pub listen_to: String,
+    pub connect_to: String,
+    pub reuse_port: Option<bool>,
 }
 
 /// Client configuration for rtunnel.
@@ -88,6 +110,20 @@ pub struct ClientConfig {
     pub allowed_addresses: HashSet<String>,
     #[serde(default)]
     pub idle_connections: usize,
+}
+
+impl ClientConfig {
+    pub fn get_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.connect_to.to_string())
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct AdminConfig {
+    pub listen_to: SocketAddr,
+    pub http_path: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -114,6 +150,16 @@ pub enum ListenTo {
     PlainTcp(PlainTcpListenerConfig),
     TlsTcp(TlsTcpListenerConfig),
     Quic(QuicListenerConfig),
+}
+
+impl Display for ListenTo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PlainTcp(config) => write!(f, "tcp://{}", config.addr),
+            Self::TlsTcp(config) => write!(f, "tls://{}", config.addr),
+            Self::Quic(config) => write!(f, "quic://{}", config.addr),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -148,75 +194,11 @@ impl SelfSignedCert {
     }
 }
 
-impl Display for ListenTo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PlainTcp(config) => write!(f, "tcp://{}", config.addr),
-            Self::TlsTcp(config) => write!(f, "tls://{}", config.addr),
-            Self::Quic(config) => write!(f, "quic://{}", config.addr),
-        }
-    }
-}
-
-/// Service definition for a tunnel server.
-///
-/// A service maps an external listening address to an internal destination address,
-/// allowing the server to forward traffic from the public interface to backend services.
-#[derive(Deserialize, Serialize, Clone)]
-pub struct Service {
-    pub listen_to: String,
-    pub connect_to: String,
-    pub reuse_port: Option<bool>,
-}
-
-impl ServerConfig {
-    /// Loads server configurations from a TOML file.
-    pub fn from_file(path: &str) -> Result<ServerConfigList> {
-        let content = read_config_file(path)?;
-        Self::parse(&content)
-    }
-    /// Parses server configurations from a TOML string.
-    pub fn parse(contents: &str) -> Result<ServerConfigList> {
-        let cfg = from_string::<Config>(contents)?;
-        if cfg.servers.is_empty() {
-            return Err(whatever!("No server found"));
-        }
-        Ok(cfg.servers)
-    }
-
-    pub fn get_name(&self) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| self.listen_to.to_string())
-    }
-}
-
-impl ClientConfig {
-    /// Loads client configurations from a TOML file.
-    pub fn from_file(path: &str) -> Result<ClientConfigList> {
-        let content = read_config_file(path)?;
-        Self::parse(&content)
-    }
-    /// Parses client configurations from a TOML string.
-    pub fn parse(contents: &str) -> Result<ClientConfigList> {
-        let cfg = from_string::<Config>(contents)?;
-        if cfg.clients.is_empty() {
-            return Err(whatever!("No client found"));
-        }
-        Ok(cfg.clients)
-    }
-
-    pub fn get_name(&self) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| self.connect_to.to_string())
-    }
-}
-
 pub fn build_tls_example(subject: &str) -> String {
     let cert = SelfSignedCert::new(subject);
 
     let config = Config {
+        admin: None,
         servers: vec![ServerConfig {
             name: None,
             listen_to: ListenTo::TlsTcp(TlsTcpListenerConfig {
@@ -252,6 +234,7 @@ pub fn build_tls_example(subject: &str) -> String {
 
 pub fn build_tcp_example() -> String {
     let config = Config {
+        admin: None,
         servers: vec![ServerConfig {
             name: None,
             listen_to: ListenTo::PlainTcp(PlainTcpListenerConfig {
@@ -281,6 +264,7 @@ pub fn build_quic_example(subject: &str) -> String {
     let cert = SelfSignedCert::new(subject);
 
     let config = Config {
+        admin: None,
         servers: vec![ServerConfig {
             name: None,
             listen_to: ListenTo::Quic(QuicListenerConfig {
@@ -362,14 +346,12 @@ mod tests {
     fn example_tls_config() {
         let cfg = build_tls_example("example.com");
         assert!(!cfg.is_empty());
-        ServerConfig::parse(&cfg).unwrap();
-        ClientConfig::parse(&cfg).unwrap();
+        Config::parse(&cfg).unwrap();
     }
     #[test]
     fn example_tcp_config() {
         let cfg = build_tcp_example();
         assert!(!cfg.is_empty());
-        ServerConfig::parse(&cfg).unwrap();
-        ClientConfig::parse(&cfg).unwrap();
+        Config::parse(&cfg).unwrap();
     }
 }

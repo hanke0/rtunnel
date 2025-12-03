@@ -12,6 +12,7 @@ use tracing::{debug, error, error_span, info, info_span, trace};
 
 use crate::config::{ClientConfig, ConnectTo};
 use crate::errors::{Result, ResultExt as _, whatever};
+use crate::observe::{WatchOne, Watcher};
 use crate::transport::{
     Connector, Context, Message, MessageKind, PlainTcpConnector, QuicConnector, Stream,
     TlsTcpConnector, Transport, relay_bidirectional, tcp_no_delay,
@@ -22,6 +23,7 @@ struct ClientOptions<T: Connector> {
     allows: HashSet<String>,
     idle_connections: usize,
     notify: Sender<i32>,
+    watch: WatchOne,
 }
 
 impl<T: Connector> ClientOptions<T> {
@@ -40,7 +42,9 @@ type ClientOptionsRef<T> = Arc<ClientOptions<T>>;
 /// This function establishes a connection to the tunnel server, performs the
 /// handshake, and begins managing tunnel connections. It spawns a background
 /// task to maintain the connection pool and handle reconnections.
-pub async fn start_client(context: &Context, config: ClientConfig) -> Result<()> {
+pub async fn start_client(context: &Context, config: ClientConfig, watch: &Watcher) -> Result<()> {
+    let name = config.get_name();
+    let watch = watch.watch(name).await;
     match config.connect_to {
         ConnectTo::PlainTcp(cfg) => {
             run_client::<PlainTcpConnector>(
@@ -48,6 +52,7 @@ pub async fn start_client(context: &Context, config: ClientConfig) -> Result<()>
                 config.idle_connections,
                 cfg,
                 config.allowed_addresses,
+                watch,
             )
             .await
         }
@@ -57,6 +62,7 @@ pub async fn start_client(context: &Context, config: ClientConfig) -> Result<()>
                 config.idle_connections,
                 cfg,
                 config.allowed_addresses,
+                watch,
             )
             .await
         }
@@ -66,6 +72,7 @@ pub async fn start_client(context: &Context, config: ClientConfig) -> Result<()>
                 config.idle_connections,
                 cfg,
                 config.allowed_addresses,
+                watch,
             )
             .await
         }
@@ -77,6 +84,7 @@ async fn run_client<T: Connector>(
     idle: usize,
     config: T::Config,
     allows: HashSet<String>,
+    watch: WatchOne,
 ) -> Result<()> {
     let (sender, receiver) = mpsc::channel(idle * 2);
     let connector = T::new(config).await?;
@@ -85,6 +93,7 @@ async fn run_client<T: Connector>(
         allows,
         idle_connections: idle,
         notify: sender,
+        watch,
     };
     let options = Arc::new(options);
     first_connect(context, options.clone()).await?;
@@ -218,6 +227,7 @@ async fn wait_relay<T: Connector>(
     options: &ClientOptionsRef<T>,
 ) -> Result<()> {
     info!("connected to server");
+    let _guard = options.watch.tunnel_guard();
     let mut message = Message::default();
 
     let addr = loop {
@@ -270,6 +280,7 @@ async fn handle_relay<T: Connector>(
     options: &ClientOptionsRef<T>,
     addr: &String,
 ) -> Result<(u64, u64)> {
+    let _guard = options.watch.busy_guard();
     if !options.allows.contains(addr) {
         return Err(whatever!("Address not allowed: {}", addr));
     }
