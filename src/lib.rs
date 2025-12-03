@@ -94,8 +94,9 @@ pub async fn run_client(context: &Context, configs: Vec<ClientConfig>) -> i32 {
 pub async fn run_server(context: &Context, configs: Vec<ServerConfig>) -> i32 {
     warmup_aws_lc_rs();
     debug!("starting {} server", configs.len());
+    let watch = observe::Watcher::new();
     for cfg in configs.iter() {
-        let err = server::start_server(context, cfg.clone()).await;
+        let err = server::start_server(context, cfg.clone(), &watch).await;
         match err {
             Ok(_) => continue,
             Err(e) => {

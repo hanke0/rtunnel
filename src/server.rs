@@ -15,6 +15,8 @@ use tracing::{debug, error, error_span, info, info_span, trace, warn};
 
 use crate::config::{ListenTo, ServerConfig, Service};
 use crate::errors::{Error, Result, ResultExt, whatever};
+use crate::observe::WatchOne;
+use crate::observe::Watcher;
 use crate::transport::Transport;
 use crate::transport::{
     Context, Listener, Message, MessageKind, PlainTcpListener, PlainTcpListenerConfig,
@@ -22,50 +24,53 @@ use crate::transport::{
 };
 
 macro_rules! match_listen_to2 {
-    ($context:ident, $config:ident, $cfg:ident, $typ:ty) => {
+    ($config:ident, $typ1:ty, $($params:ident),+) => {
         match $config.listen_to2 {
             Some(ListenTo::PlainTcp(cfg2)) => {
-                match_listen_to2!($context, $config, $cfg, $typ, Some(cfg2), PlainTcpListener)
+                start_server_impl::<$typ1, PlainTcpListener>($($params),+, Some(cfg2)).await
             }
             Some(ListenTo::TlsTcp(cfg2)) => {
-                match_listen_to2!($context, $config, $cfg, $typ, Some(cfg2), TlsTcpListener)
+                start_server_impl::<$typ1, TlsTcpListener>($($params),+, Some(cfg2)).await
             }
             Some(ListenTo::Quic(cfg2)) => {
-                match_listen_to2!($context, $config, $cfg, $typ, Some(cfg2), QuicListener)
+                start_server_impl::<$typ1, QuicListener>($($params),+, Some(cfg2)).await
             }
             None => {
-                match_listen_to2!($context, $config, $cfg, $typ, None, QuicListener)
+                start_server_impl::<$typ1, QuicListener>($($params),+, None).await
             }
         }
     };
-
-    ($context:ident, $config:ident, $cfg1:ident, $typ1:ty, $cfg2:expr, $typ2:ty) => {
-        start_server_impl::<$typ1, $typ2>($context, $cfg1, $cfg2, $config.services).await
-    };
 }
 
-pub async fn start_server(context: &Context, config: ServerConfig) -> Result<()> {
+pub async fn start_server(context: &Context, config: ServerConfig, watch: &Watcher) -> Result<()> {
+    let name = config.get_name();
+    let services = config.services;
     match config.listen_to {
-        ListenTo::PlainTcp(cfg) => match_listen_to2!(context, config, cfg, PlainTcpListener),
-        ListenTo::TlsTcp(cfg) => match_listen_to2!(context, config, cfg, TlsTcpListener),
-        ListenTo::Quic(cfg) => match_listen_to2!(context, config, cfg, QuicListener),
+        #[rustfmt::skip]
+        ListenTo::PlainTcp(cfg) => {
+            match_listen_to2!(config, PlainTcpListener, context, services, watch, name, cfg)
+        }
+        ListenTo::TlsTcp(cfg) => {
+            match_listen_to2!(config, TlsTcpListener, context, services, watch, name, cfg)
+        }
+        ListenTo::Quic(cfg) => {
+            match_listen_to2!(config, QuicListener, context, services, watch, name, cfg)
+        }
     }
 }
 
 async fn start_server_impl<T: Listener, T2: Listener>(
     context: &Context,
+    services: Vec<Service>,
+    watch: &Watcher,
+    name: String,
     config: T::Config,
     config2: Option<T2::Config>,
-    services: Vec<Service>,
 ) -> Result<()> {
-    let pool = TunnelPool::new();
+    let pool_watch = watch.watch(name.clone()).await;
+    let pool = TunnelPool::new(pool_watch);
     let listener = T::new(config).await?;
     info!("server listening on {}", listener);
-    context.spawn(tunnel_timer(
-        context.clone(),
-        listener.to_string(),
-        pool.clone(),
-    ));
     let listen_to = format!("{}", listener);
     context.spawn(
         serve_tunnel(context.children(), listener, pool.clone())
@@ -74,15 +79,11 @@ async fn start_server_impl<T: Listener, T2: Listener>(
     let mut backup_pool = None;
     if let Some(config2) = config2 {
         let listener2 = T2::new(config2).await?;
-        let pool2 = TunnelPool::new();
+        let watch = watch.watch(name + "_backup").await;
+        let pool2 = TunnelPool::<T2>::new(watch);
         backup_pool = Some(pool2.clone());
         let listen_to2 = format!("{}", listener2);
         info!("server listening on {}", listener2);
-        context.spawn(tunnel_timer(
-            context.clone(),
-            listener2.to_string(),
-            pool2.clone(),
-        ));
         context.spawn(
             serve_tunnel(context.children(), listener2, pool2.clone())
                 .instrument(error_span!("server_tunnel2", listen_to2)),
@@ -115,19 +116,6 @@ async fn start_server_impl<T: Listener, T2: Listener>(
         }
     }
     Ok(())
-}
-
-async fn tunnel_timer<T: Listener>(context: Context, id: String, pool: TunnelPool<T>) {
-    loop {
-        tokio::select! {
-            _ = context.wait_cancel() => {
-                return;
-            },
-            _ = time::sleep(Duration::from_secs(60)) => {
-                info!("{} alive tunnel count: {}", id, pool.len().await);
-            },
-        }
-    }
 }
 
 async fn serve_tunnel<T: Listener>(context: Context, listener: T, pool: TunnelPool<T>) {
@@ -235,9 +223,11 @@ async fn handle_service_stream_impl<T: Listener, U: Listener, V: Listener>(
     connect_to: &str,
 ) -> Result<(u64, u64)> {
     debug!("service received a stream");
+    let start = Instant::now();
     if let Some(pool2) = pool2 {
         match pool.try_pop().await {
             Ok((remote, tunnel_addr)) => {
+                pool.watch().observe_match_spend(start.elapsed());
                 return handle_service_relay::<T, U>(context, stream, remote, connect_to)
                     .instrument(info_span!("service_relay", tunnel_addr))
                     .await;
@@ -246,6 +236,7 @@ async fn handle_service_stream_impl<T: Listener, U: Listener, V: Listener>(
                 info!("no tunnel found in pool, trying backup pool: {:#}", err);
                 match pool2.try_pop().await {
                     Ok((remote, tunnel_addr)) => {
+                        pool2.watch().observe_match_spend(start.elapsed());
                         return handle_service_relay::<T, V>(context, stream, remote, connect_to)
                             .instrument(info_span!("service_relay", tunnel_addr))
                             .await;
@@ -262,6 +253,9 @@ async fn handle_service_stream_impl<T: Listener, U: Listener, V: Listener>(
         .timeout_default(pool.pop())
         .await
         .context("Failed to get a tunnel from pool")?;
+    pool.watch().observe_match_spend(start.elapsed());
+
+    let _guard = pool.watch().busy_tunnel();
     handle_service_relay::<T, U>(context, stream, remote, connect_to)
         .instrument(info_span!("service_relay", tunnel_addr))
         .await
@@ -313,14 +307,20 @@ impl<T: Listener> Clone for TunnelPool<T> {
 }
 
 struct TunnelPoolInner<T: Listener> {
+    pub watch: WatchOne,
     sessions: Mutex<BTreeMap<String, Session<T>>>,
     notify: Notify,
     requires: AtomicI32,
 }
 
 impl<T: Listener> TunnelPool<T> {
-    fn new() -> Self {
+    fn watch(&self) -> &WatchOne {
+        &self.inner.watch
+    }
+
+    fn new(watch: WatchOne) -> Self {
         let inner = Arc::new(TunnelPoolInner {
+            watch,
             sessions: Mutex::new(BTreeMap::new()),
             notify: Notify::new(),
             requires: AtomicI32::new(0),
@@ -340,6 +340,7 @@ impl<T: Listener> TunnelPool<T> {
         self.inner.notify.notify_one();
         let alive_ctx = context.clone();
         context.spawn(async move {
+            let _guard = self.inner.watch.tunnel_guard();
             let r = keep_alive::<T>(alive_ctx, cancel_rx, &id, stream).await;
             match r {
                 Ok(_) => match sender.send(r) {
@@ -361,10 +362,6 @@ impl<T: Listener> TunnelPool<T> {
 
     async fn remove(&self, id: &String) {
         self.inner.sessions.lock().await.remove(id);
-    }
-
-    async fn len(&self) -> usize {
-        self.inner.sessions.lock().await.len()
     }
 
     pub async fn pop(&self) -> Result<(T::Stream, String)> {

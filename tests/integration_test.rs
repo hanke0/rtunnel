@@ -78,6 +78,7 @@ async fn test_client_works_fine_when_one_tunnel_is_not_available() {
     let config = build_tcp_example();
     let cfg = &mut config::Config::parse(&config).unwrap();
     cfg.clients.push(config::ClientConfig {
+        name: None,
         connect_to: config::ConnectTo::PlainTcp(transport::PlainTcpConnectorConfig {
             addr: "127.0.0.1:2336".to_string(),
         }),
@@ -86,9 +87,11 @@ async fn test_client_works_fine_when_one_tunnel_is_not_available() {
     });
     let config = toml::to_string(cfg).unwrap();
     let server_context = Context::new();
+    let watch = observe::Watcher::new();
     server::start_server(
         &server_context,
         config::ServerConfig {
+            name: None,
             listen_to: config::ListenTo::PlainTcp(transport::PlainTcpListenerConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2336").unwrap(),
                 reuse_port: None,
@@ -96,6 +99,7 @@ async fn test_client_works_fine_when_one_tunnel_is_not_available() {
             listen_to2: None,
             services: vec![],
         },
+        &watch,
     )
     .await
     .unwrap();

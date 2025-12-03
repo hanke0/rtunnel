@@ -71,6 +71,7 @@ pub type ClientConfigList = Vec<ClientConfig>;
 /// including the listening address, cryptographic keys, and service definitions.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
+    pub name: Option<String>,
     pub listen_to: ListenTo,
     pub listen_to2: Option<ListenTo>,
     pub services: Vec<Service>,
@@ -82,6 +83,7 @@ pub struct ServerConfig {
 /// including the server address, cryptographic keys, and connection limits.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct ClientConfig {
+    pub name: Option<String>,
     pub connect_to: ConnectTo,
     pub allowed_addresses: HashSet<String>,
     #[serde(default)]
@@ -181,6 +183,12 @@ impl ServerConfig {
         }
         Ok(cfg.servers)
     }
+
+    pub fn get_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.listen_to.to_string())
+    }
 }
 
 impl ClientConfig {
@@ -197,6 +205,12 @@ impl ClientConfig {
         }
         Ok(cfg.clients)
     }
+
+    pub fn get_name(&self) -> String {
+        self.name
+            .clone()
+            .unwrap_or_else(|| self.connect_to.to_string())
+    }
 }
 
 pub fn build_tls_example(subject: &str) -> String {
@@ -204,6 +218,7 @@ pub fn build_tls_example(subject: &str) -> String {
 
     let config = Config {
         servers: vec![ServerConfig {
+            name: None,
             listen_to: ListenTo::TlsTcp(TlsTcpListenerConfig {
                 server_cert: cert.server_cert.clone(),
                 server_key: cert.server_key,
@@ -220,6 +235,7 @@ pub fn build_tls_example(subject: &str) -> String {
             }],
         }],
         clients: vec![ClientConfig {
+            name: None,
             connect_to: ConnectTo::TlsTcp(TlsTcpConnectorConfig {
                 client_cert: cert.client_cert,
                 client_key: cert.client_key,
@@ -237,6 +253,7 @@ pub fn build_tls_example(subject: &str) -> String {
 pub fn build_tcp_example() -> String {
     let config = Config {
         servers: vec![ServerConfig {
+            name: None,
             listen_to: ListenTo::PlainTcp(PlainTcpListenerConfig {
                 addr: SocketAddr::from_str("127.0.0.1:2333").unwrap(),
                 reuse_port: None,
@@ -249,6 +266,7 @@ pub fn build_tcp_example() -> String {
             }],
         }],
         clients: vec![ClientConfig {
+            name: None,
             connect_to: ConnectTo::PlainTcp(PlainTcpConnectorConfig {
                 addr: "127.0.0.1:2333".to_string(),
             }),
@@ -264,6 +282,7 @@ pub fn build_quic_example(subject: &str) -> String {
 
     let config = Config {
         servers: vec![ServerConfig {
+            name: None,
             listen_to: ListenTo::Quic(QuicListenerConfig {
                 server_cert: cert.server_cert.clone(),
                 server_key: cert.server_key,
@@ -279,6 +298,7 @@ pub fn build_quic_example(subject: &str) -> String {
             }],
         }],
         clients: vec![ClientConfig {
+            name: None,
             connect_to: ConnectTo::Quic(QuicConnectorConfig {
                 client_cert: cert.client_cert,
                 client_key: cert.client_key,
