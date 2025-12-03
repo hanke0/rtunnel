@@ -75,6 +75,12 @@ impl FromStr for Config {
     }
 }
 
+impl Display for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        toml::to_string(self).unwrap().fmt(f)
+    }
+}
+
 /// Server configuration for rtunnel.
 ///
 /// This struct contains all the settings needed to run a tunnel server,

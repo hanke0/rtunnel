@@ -9,9 +9,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
+use tokio::time::sleep;
 use tokio::time::{self, Duration};
 use tracing::Instrument;
-use tracing::{debug, error, error_span, info, info_span, trace, warn};
+use tracing::{debug, error, error_span, info, info_span, trace};
 
 use crate::config::{ListenTo, ServerConfig, Service};
 use crate::errors::{Error, Result, ResultExt, whatever};
@@ -223,8 +224,23 @@ async fn handle_service_stream_impl<T: Listener, U: Listener, V: Listener>(
     connect_to: &str,
 ) -> Result<(u64, u64)> {
     debug!("service received a stream");
-    let start = Instant::now();
     if let Some(pool2) = pool2 {
+        handle_service_stream_with_backup::<T, U, V>(context, stream, pool, pool2, connect_to).await
+    } else {
+        handle_service_stream_without_backup::<T, U>(context, stream, pool, connect_to).await
+    }
+}
+
+async fn handle_service_stream_with_backup<T: Listener, U: Listener, V: Listener>(
+    context: &Context,
+    stream: T::Stream,
+    pool: TunnelPool<U>,
+    pool2: TunnelPool<V>,
+    connect_to: &str,
+) -> Result<(u64, u64)> {
+    let start = Instant::now();
+
+    for _ in 0..3 {
         match pool.try_pop().await {
             Ok((remote, tunnel_addr)) => {
                 pool.watch().observe_match_spend(start.elapsed());
@@ -232,28 +248,55 @@ async fn handle_service_stream_impl<T: Listener, U: Listener, V: Listener>(
                     .instrument(info_span!("service_relay", tunnel_addr))
                     .await;
             }
-            Err(err) => {
-                info!("no tunnel found in pool, trying backup pool: {:#}", err);
-                match pool2.try_pop().await {
-                    Ok((remote, tunnel_addr)) => {
-                        pool2.watch().observe_match_spend(start.elapsed());
-                        return handle_service_relay::<T, V>(context, stream, remote, connect_to)
-                            .instrument(info_span!("service_relay", tunnel_addr))
-                            .await;
-                    }
-                    Err(e) => {
-                        info!("no tunnel found in backup pool: {:#}", e);
-                    }
+            Err(e) => {
+                if !e.is_exausted() {
+                    pool.watch().observe_match_spend(start.elapsed());
+                    return Err(e);
                 }
             }
         }
+        match pool2.try_pop().await {
+            Ok((remote, tunnel_addr)) => {
+                pool2.watch().observe_match_spend(start.elapsed());
+                return handle_service_relay::<T, V>(context, stream, remote, connect_to)
+                    .instrument(info_span!("service_relay", tunnel_addr))
+                    .await;
+            }
+            Err(e) => {
+                if !e.is_exausted() {
+                    pool2.watch().observe_match_spend(start.elapsed());
+                    return Err(e);
+                }
+            }
+        }
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let (cancel_tx2, cancel_rx2) = oneshot::channel();
+        tokio::join!(
+            async {
+                pool.wait(cancel_rx).await;
+                let _ = cancel_tx2.send(());
+            },
+            async {
+                pool2.wait(cancel_rx2).await;
+                let _ = cancel_tx.send(());
+            },
+        );
     }
+    Err(Error::exausted())
+}
 
+async fn handle_service_stream_without_backup<T: Listener, U: Listener>(
+    context: &Context,
+    stream: T::Stream,
+    pool: TunnelPool<U>,
+    connect_to: &str,
+) -> Result<(u64, u64)> {
+    let start_guard = pool.watch().match_guard();
     let (remote, tunnel_addr) = context
         .timeout_default(pool.pop())
         .await
         .context("Failed to get a tunnel from pool")?;
-    pool.watch().observe_match_spend(start.elapsed());
+    drop(start_guard);
 
     let _guard = pool.watch().busy_tunnel();
     handle_service_relay::<T, U>(context, stream, remote, connect_to)
@@ -364,27 +407,15 @@ impl<T: Listener> TunnelPool<T> {
         self.inner.sessions.lock().await.remove(id);
     }
 
-    pub async fn pop(&self) -> Result<(T::Stream, String)> {
-        let start = Instant::now();
-        let r = self
-            .pop_impl()
-            .instrument(info_span!("pop", elapsed = %start.elapsed().as_millis()))
-            .await;
-        let elapsed = start.elapsed();
-        if elapsed > Duration::from_millis(5) {
-            warn!("match a tunnel took too long: {:?}", elapsed);
-        }
-        r
-    }
-
-    async fn pop_impl(&self) -> Result<(T::Stream, String)> {
+    async fn pop(&self) -> Result<(T::Stream, String)> {
         loop {
             let r = self.try_pop().await;
             match r {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     if e.is_exausted() {
-                        self.inner.notify.notified().await;
+                        self.inner.requires.fetch_add(1, Ordering::Release);
+                        self.inner.notify.notify_one();
                         continue;
                     }
                     return Err(e);
@@ -393,8 +424,16 @@ impl<T: Listener> TunnelPool<T> {
         }
     }
 
-    async fn wait(&self) {
-        self.inner.notify.notified().await;
+    async fn wait(&self, cacnel_rx: oneshot::Receiver<()>) {
+        self.inner.requires.fetch_add(1, Ordering::Release);
+        tokio::select! {
+            _ = cacnel_rx => {
+                self.inner.requires.fetch_sub(1, Ordering::Release);
+            }
+            // It's ok to lose place in the queue.
+            _ = self.inner.notify.notified() => {}
+            _ = sleep(Duration::from_secs(1)) => {}
+        }
     }
 
     pub async fn try_pop(&self) -> Result<(T::Stream, String)> {
@@ -418,10 +457,7 @@ impl<T: Listener> TunnelPool<T> {
                 }
                 Ok((session, id))
             }
-            None => {
-                self.inner.requires.fetch_add(1, Ordering::Release);
-                Err(Error::exausted())
-            }
+            None => Err(Error::exausted()),
         }
     }
 }

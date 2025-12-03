@@ -21,7 +21,7 @@ pub mod transport;
 pub use crate::config::{AdminConfig, ClientConfig, Config, ServerConfig};
 pub use crate::transport::Context;
 
-use crate::errors::Result;
+use crate::errors::{Result, ResultExt};
 use crate::observe::Watcher;
 
 /// Runs the rtunnel application based on the provided CLI options.
@@ -124,7 +124,7 @@ pub async fn run_server(context: &Context, config: Config) -> Result<()> {
 async fn build_watch(context: &Context, config: Option<AdminConfig>) -> Result<Watcher> {
     let watch = Watcher::new();
     if let Some(config) = config {
-        let listener = TcpListener::bind(config.listen_to).await?;
+        let listener = TcpListener::bind(config.listen_to).await.context("bind admin listener failed")?;
         let watch = watch.clone();
         context.spawn(watch.serve_http(context.clone(), listener, config.get_http_path()));
     }

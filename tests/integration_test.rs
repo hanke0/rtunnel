@@ -32,21 +32,21 @@ use rtunnel::{
 #[serial]
 async fn test_tls() {
     let config = build_tls_example("example.com");
-    test_integration(&config, false).await;
+    test_integration(&config, &config, false).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn test_tcp() {
     let config = build_tcp_example();
-    test_integration(&config, false).await;
+    test_integration(&config, &config, false).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn test_quic() {
     let config = build_quic_example("example.com");
-    test_integration(&config, false).await;
+    test_integration(&config, &config, false).await;
 }
 
 #[tokio::test]
@@ -71,8 +71,13 @@ async fn test_tcp_backup() {
         listen_to: SocketAddr::from_str("127.0.0.1:2337").unwrap(),
         http_path: Some("/status".to_string()),
     });
-    let config = toml::to_string(cfg).unwrap();
-    test_integration(&config, true).await;
+    let sever_config = cfg.to_string();
+    cfg.admin = Some(config::AdminConfig {
+        listen_to: SocketAddr::from_str("127.0.0.1:2338").unwrap(),
+        http_path: Some("/status".to_string()),
+    });
+    let client_config = cfg.to_string();
+    test_integration(&sever_config, &client_config, true).await;
 }
 
 #[tokio::test]
@@ -108,7 +113,7 @@ async fn test_client_works_fine_when_one_tunnel_is_not_available() {
     .await
     .unwrap();
     let context = Context::new();
-    let finish = start_test(&context, &config).await;
+    let finish = start_test(&context, &config, &config).await;
     sleep(Duration::from_secs(1)).await;
     server_context.cancel();
     server_context.wait_finish().await;
@@ -116,21 +121,28 @@ async fn test_client_works_fine_when_one_tunnel_is_not_available() {
     finish.await;
 }
 
-async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()> {
+async fn start_test(
+    context: &Context,
+    server_config: &str,
+    client_config: &str,
+) -> impl Future<Output = ()> {
     observe::setup_testing();
-    let mut file = NamedTempFile::new().unwrap();
-    file.write_all(config.as_bytes()).unwrap();
+    let mut server_file = NamedTempFile::new().unwrap();
+    let mut client_file = NamedTempFile::new().unwrap();
+    server_file.write_all(server_config.as_bytes()).unwrap();
+    client_file.write_all(client_config.as_bytes()).unwrap();
 
     #[cfg(unix)]
     {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
         let perm = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(file.path().display().to_string(), perm).unwrap();
+        fs::set_permissions(server_file.path().display().to_string(), perm.clone()).unwrap();
+        fs::set_permissions(client_file.path().display().to_string(), perm).unwrap();
     }
 
     let server_context = context.children();
-    let file_path = file.path().display().to_string();
+    let file_path = server_file.path().display().to_string();
     let server_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
@@ -144,7 +156,7 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
 
     sleep(Duration::from_secs(1)).await;
     let client_context = context.children();
-    let file_path = file.path().display().to_string();
+    let file_path = client_file.path().display().to_string();
     let client_handle = spawn(async move {
         let args: Vec<String> = vec![
             "rtunnel".into(),
@@ -191,26 +203,32 @@ async fn start_test(context: &Context, config: &str) -> impl Future<Output = ()>
         server_handle.await.unwrap();
         client_handle.await.unwrap();
         context.wait_cancel_and_finish().await;
-        let _ = file.path();
+        let _server = server_file;
+        let _client = client_file;
     }
 }
 
-async fn test_integration(config: &str, admin_check: bool) {
+async fn test_integration(sever_config: &str, client_config: &str, admin_check: bool) {
     let context = Context::new();
-    let finish = start_test(&context, config).await;
+    let finish = start_test(&context, sever_config, client_config).await;
     concurrent_test(&context).await;
     if admin_check {
-        let mut stream = TcpStream::connect("127.0.0.1:2337").await.unwrap();
-        stream
-            .write_all(b"GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buffer = [0; 1024];
-        let n = stream.read(&mut buffer).await.unwrap();
-        let response: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&buffer[0..n]);
-        assert!(response.contains("\"alive_tunnel\":"), "{}", response);
+        check_admin("127.0.0.1:2337").await;
+        check_admin("127.0.0.1:2338").await;
     };
     finish.await;
+}
+
+async fn check_admin(addr: &str) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(b"GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buffer = [0; 1024];
+    let n = stream.read(&mut buffer).await.unwrap();
+    let response: std::borrow::Cow<'_, str> = String::from_utf8_lossy(&buffer[0..n]);
+    assert!(response.contains("\"alive_tunnel\":"), "{}", response)
 }
 
 async fn concurrent_test(context: &Context) {
