@@ -22,8 +22,11 @@ use crate::whatever;
 /// It may contain either server configurations, client configurations, or both.
 #[derive(Deserialize, Serialize)]
 pub struct Config {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub servers: Vec<ServerConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clients: Vec<ClientConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin: Option<AdminConfig>,
 }
 
@@ -367,12 +370,28 @@ mod tests {
     fn example_tls_config() {
         let cfg = build_tls_example("example.com");
         assert!(!cfg.is_empty());
-        Config::parse(&cfg).unwrap();
+        test_config_parse(&cfg);
     }
+
     #[test]
     fn example_tcp_config() {
         let cfg = build_tcp_example();
         assert!(!cfg.is_empty());
-        Config::parse(&cfg).unwrap();
+        test_config_parse(&cfg);
+    }
+
+    fn test_config_parse(s: &str) {
+        let mut cfg = Config::parse(s).unwrap();
+        let servers = cfg.servers.clone();
+        cfg.servers.clear();
+        let client_cfg = cfg.to_string();
+        cfg.clients.clear();
+        cfg.servers = servers;
+        let server_cfg = cfg.to_string();
+        assert!(!server_cfg.contains("clients"), "{}", server_cfg);
+        assert!(!client_cfg.contains("servers"), "{}", client_cfg);
+
+        Config::parse(&server_cfg).unwrap();
+        Config::parse(&client_cfg).unwrap();
     }
 }
