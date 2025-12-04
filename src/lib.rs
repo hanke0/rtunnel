@@ -128,7 +128,7 @@ async fn build_watch(context: &Context, config: Option<AdminConfig>) -> Result<W
             .await
             .context("bind admin listener failed")?;
         let watch = watch.clone();
-        context.spawn(watch.serve_http(context.clone(), listener, config.get_http_path()));
+        tokio::spawn(watch.serve_http(context.clone(), listener, config.get_http_path()));
     }
     Ok(watch)
 }

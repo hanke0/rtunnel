@@ -136,7 +136,7 @@ impl Watcher {
         let service = HyperService { watch: self, path };
         loop {
             let (stream, _) = context.with_cancel(listener.accept()).await?;
-            context.spawn(service.clone().handle(stream));
+            tokio::spawn(service.clone().handle(stream));
         }
     }
 

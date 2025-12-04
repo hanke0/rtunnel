@@ -127,19 +127,8 @@ async fn start_test(
     client_config: &str,
 ) -> impl Future<Output = ()> {
     observe::setup_testing();
-    let mut server_file = NamedTempFile::new().unwrap();
-    let mut client_file = NamedTempFile::new().unwrap();
-    server_file.write_all(server_config.as_bytes()).unwrap();
-    client_file.write_all(client_config.as_bytes()).unwrap();
-
-    #[cfg(unix)]
-    {
-        use std::fs;
-        use std::os::unix::fs::PermissionsExt;
-        let perm = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(server_file.path().display().to_string(), perm.clone()).unwrap();
-        fs::set_permissions(client_file.path().display().to_string(), perm).unwrap();
-    }
+    let server_file = write_config(server_config).await;
+    let client_file = write_config(client_config).await;
 
     let server_context = context.children();
     let file_path = server_file.path().display().to_string();
@@ -281,4 +270,58 @@ async fn connect_to_echo(context: Context) {
     info!("echo client {} read {} bytes", addr, got.len());
     assert_eq!(expect.len(), got.len());
     assert_eq!(expect, got);
+}
+
+async fn write_config(config: &str) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(config.as_bytes()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        let perm = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(file.path().display().to_string(), perm.clone()).unwrap();
+    }
+    file
+}
+
+#[tokio::test]
+#[serial]
+async fn test_client_exit_normal() {
+    observe::setup_testing();
+    let config = build_tcp_example();
+    let file = write_config(&config).await;
+    let server_context = Context::new();
+    let server_context1 = server_context.clone();
+    let file_path = file.path().display().to_string();
+    let join = tokio::spawn(async move {
+        let args: Vec<String> = vec![
+            "rtunnel".into(),
+            "server".into(),
+            "--config".into(),
+            file_path,
+        ];
+        let options = Arguments::parse_from(args);
+        run(&server_context, options).await.expect("server failed");
+    });
+
+    let client_context = Context::new();
+    let file_path = file.path().display().to_string();
+    let join2 = tokio::spawn(async move {
+        let args: Vec<String> = vec![
+            "rtunnel".into(),
+            "client".into(),
+            "--config".into(),
+            file_path,
+        ];
+        let options = Arguments::parse_from(args);
+        run(&client_context, options).await.expect("client failed");
+    });
+    sleep(Duration::from_secs(1)).await;
+    server_context1.cancel();
+    info!("server is cancel, wait finish");
+    join.await.unwrap();
+    info!("server finished");
+    join2.await.unwrap();
+    info!("client finished");
 }

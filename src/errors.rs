@@ -72,7 +72,7 @@ pub enum ErrorKind {
     IoRetryAble,
     Timeout,
     Canceled,
-    Exausted,
+    Exhausted,
     Tls,
     Other,
 }
@@ -104,11 +104,11 @@ impl Error {
         Self::from_string(ErrorKind::Canceled, "context cancelled".to_string())
     }
 
-    pub fn exausted() -> Self {
-        Self::from_string(ErrorKind::Exausted, "pool is exausted".to_string())
+    pub fn exhausted() -> Self {
+        Self::from_string(ErrorKind::Exhausted, "pool is exhausted".to_string())
     }
-    pub fn is_exausted(&self) -> bool {
-        matches!(self.inner.kind, ErrorKind::Exausted)
+    pub fn is_exhausted(&self) -> bool {
+        matches!(self.inner.kind, ErrorKind::Exhausted)
     }
 
     pub fn eof<T: Display>(msg: T) -> Self {
@@ -144,7 +144,7 @@ impl Error {
     }
 
     pub fn is_connect_critical(&self) -> bool {
-        !matches!(
+        matches!(
             self.inner.kind,
             ErrorKind::ConnectionRefused | ErrorKind::Canceled
         )

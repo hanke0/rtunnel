@@ -249,7 +249,7 @@ async fn handle_service_stream_with_backup<T: Listener, U: Listener, V: Listener
                     .await;
             }
             Err(e) => {
-                if !e.is_exausted() {
+                if !e.is_exhausted() {
                     pool.watch().observe_match_spend(start.elapsed());
                     return Err(e);
                 }
@@ -263,7 +263,7 @@ async fn handle_service_stream_with_backup<T: Listener, U: Listener, V: Listener
                     .await;
             }
             Err(e) => {
-                if !e.is_exausted() {
+                if !e.is_exhausted() {
                     pool2.watch().observe_match_spend(start.elapsed());
                     return Err(e);
                 }
@@ -282,7 +282,7 @@ async fn handle_service_stream_with_backup<T: Listener, U: Listener, V: Listener
             },
         );
     }
-    Err(Error::exausted())
+    Err(Error::exhausted())
 }
 
 async fn handle_service_stream_without_backup<T: Listener, U: Listener>(
@@ -413,7 +413,7 @@ impl<T: Listener> TunnelPool<T> {
             match r {
                 Ok(r) => return Ok(r),
                 Err(e) => {
-                    if e.is_exausted() {
+                    if e.is_exhausted() {
                         self.inner.requires.fetch_add(1, Ordering::Release);
                         self.inner.notify.notify_one();
                         continue;
@@ -424,10 +424,10 @@ impl<T: Listener> TunnelPool<T> {
         }
     }
 
-    async fn wait(&self, cacnel_rx: oneshot::Receiver<()>) {
+    async fn wait(&self, cancel_rx: oneshot::Receiver<()>) {
         self.inner.requires.fetch_add(1, Ordering::Release);
         tokio::select! {
-            _ = cacnel_rx => {
+            _ = cancel_rx => {
                 self.inner.requires.fetch_sub(1, Ordering::Release);
             }
             // It's ok to lose place in the queue.
@@ -457,7 +457,7 @@ impl<T: Listener> TunnelPool<T> {
                 }
                 Ok((session, id))
             }
-            None => Err(Error::exausted()),
+            None => Err(Error::exhausted()),
         }
     }
 }
