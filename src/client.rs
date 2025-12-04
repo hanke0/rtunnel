@@ -160,7 +160,7 @@ async fn build_tunnel<T: Connector>(context: Context, options: ClientOptionsRef<
         Ok(_) => {}
         Err(e) => {
             error!("tunnel relay fail: {:#}", e);
-            if e.is_connect_critical() {
+            if e.is_cancel() {
                 context.cancel();
                 return;
             }
@@ -187,12 +187,15 @@ async fn build_tunnel_impl<T: Connector>(
                     }
                     retries += 1;
                     if retries >= 10 {
+                        sleep(duration).await; // backoff for a while
                         return Err(e);
                     }
                 }
             }
             sleep(duration).await;
-            duration *= 2;
+            if duration < Duration::from_secs(1) {
+                duration *= 2;
+            }
         }
     };
     wait_relay(context, stream, options)

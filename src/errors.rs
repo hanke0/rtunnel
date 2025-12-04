@@ -143,11 +143,8 @@ impl Error {
         )
     }
 
-    pub fn is_connect_critical(&self) -> bool {
-        matches!(
-            self.inner.kind,
-            ErrorKind::ConnectionRefused | ErrorKind::Canceled
-        )
+    pub fn is_refused(&self) -> bool {
+        matches!(self.inner.kind, ErrorKind::Canceled)
     }
 
     pub fn is_timeout(&self) -> bool {
