@@ -21,6 +21,7 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::warn;
+use tracing_subscriber::fmt::time;
 
 use crate::errors::{Result, ResultExt as _};
 use crate::transport::Context;
@@ -65,6 +66,7 @@ fn setup_impl(log_level: Level, is_testing: bool) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::new(rust_log);
     let builder = tracing_subscriber::fmt()
         .with_ansi(false)
+        .with_timer(time::LocalTime::rfc_3339())
         .with_env_filter(filter);
     if is_testing {
         builder
