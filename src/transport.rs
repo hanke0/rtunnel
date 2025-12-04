@@ -509,7 +509,8 @@ impl Display for QuicConnectorConfig {
 pub struct QuicConnector {
     #[allow(unused)]
     endpoint: Endpoint,
-    connection: Connection,
+    connection: Mutex<Connection>,
+    server_name: String,
     addr: SocketAddr,
     local_addr: SocketAddr,
 }
@@ -530,21 +531,29 @@ impl QuicConnector {
     const ANY_IP: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
     const ANY_ADDR: SocketAddr = SocketAddr::new(Self::ANY_IP, 0);
 
-    async fn open_stream(&self) -> Result<(QuinStream, String)> {
-        let (mut send, recv) = self
-            .connection
+    async fn open_stream(&self) -> Result<(SendStream, RecvStream)> {
+        let mut guard = self.connection.lock().await;
+
+        match guard
             .open_bi()
             .await
-            .context("failed to open quic bi stream")?;
-        // quic requires client-initiated, send a byte to open stream.
-        send.write_u8(0)
+            .context("failed to open quic bi stream")
+        {
+            Ok((send, recv)) => Ok((send, recv)),
+            Err(e) => {
+                let conn = self.reconnect().await?;
+                *guard = conn;
+                Err(e)
+            }
+        }
+    }
+
+    #[inline]
+    async fn reconnect(&self) -> Result<Connection> {
+        self.endpoint
+            .connect(self.addr, &self.server_name)?
             .await
-            .context("failed to write quic first byte")?;
-        let id = send.id();
-        Ok((
-            QuinStream(send, recv),
-            format!("{}-{}({})", self.local_addr, self.addr, id),
-        ))
+            .context("failed to connect quic server")
     }
 }
 
@@ -578,16 +587,25 @@ impl Connector for QuicConnector {
 
         let c = Self {
             endpoint,
-            connection,
+            connection: Mutex::new(connection),
+            server_name,
             addr,
             local_addr,
         };
         Ok(c)
     }
 
-    #[inline]
     async fn connect(&self) -> Result<(Self::Stream, String)> {
-        self.open_stream().await
+        let (mut send, recv) = self.open_stream().await?;
+        // quic requires client-initiated, send a byte to open stream.
+        send.write_u8(0)
+            .await
+            .context("failed to write quic first byte")?;
+        let id = send.id();
+        Ok((
+            QuinStream(send, recv),
+            format!("{}-{}({})", self.local_addr, self.addr, id),
+        ))
     }
 
     fn address(&self) -> SocketAddr {
