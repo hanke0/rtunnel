@@ -30,7 +30,7 @@ A lightweight, secure tunneling tool written in Rust for exposing local servers 
 
 ## Features
 
-- **🔐 Secure Encryption**: Uses X25519 for key exchange, Ed25519 for authentication, and AES-256-GCM for data encryption
+- **🔐 Secure Encryption**: Uses TLS with client authentication.
 - **⚙️ Simple Configuration**: TOML-based configuration file with example generator
 - **🔌 Multiple Services**: Support for multiple tunnel services in a single configuration
 - **📊 Connection Pooling**: Configurable connection limits and idle connection management
