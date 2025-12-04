@@ -79,8 +79,9 @@ async fn start_server_impl<T: Listener, T2: Listener>(
     );
     let mut backup_pool = None;
     if let Some(config2) = config2 {
+        let backup_name = format!("{}@{}", name, config2);
         let listener2 = T2::new(config2).await?;
-        let watch = watch.watch(name + "_backup").await;
+        let watch = watch.watch(backup_name).await;
         let pool2 = TunnelPool::<T2>::new(watch);
         backup_pool = Some(pool2.clone());
         let listen_to2 = format!("{}", listener2);

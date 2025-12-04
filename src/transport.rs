@@ -61,7 +61,7 @@ impl Stream for QuinStream {}
 
 pub trait Listener: Sized + Send + Sync + Display + Debug + 'static {
     type Stream: Stream;
-    type Config;
+    type Config: Display;
 
     fn new(config: Self::Config) -> impl Future<Output = Result<Self>> + Send + Sync;
     fn accept(&self) -> impl Future<Output = Result<(Self::Stream, String)>> + Send + Sync;
@@ -70,7 +70,7 @@ pub trait Listener: Sized + Send + Sync + Display + Debug + 'static {
 
 pub trait Connector: Sized + Send + Sync + Display + Debug + 'static {
     type Stream: Stream;
-    type Config;
+    type Config: Display;
 
     fn new(config: Self::Config) -> impl Future<Output = Result<Self>> + Send;
     fn connect(&self) -> impl Future<Output = Result<(Self::Stream, String)>> + Send;
@@ -85,6 +85,12 @@ pub struct TlsTcpListenerConfig {
     pub subject: String,
     pub addr: SocketAddr,
     pub reuse_port: Option<bool>,
+}
+
+impl fmt::Display for TlsTcpListenerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.addr)
+    }
 }
 
 pub struct TlsTcpListener {
@@ -147,6 +153,12 @@ pub struct TlsTcpConnectorConfig {
     pub server_cert: String,
     pub subject: String,
     pub addr: String,
+}
+
+impl fmt::Display for TlsTcpConnectorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tls://{}", self.addr)
+    }
 }
 
 pub struct TlsTcpConnector {
@@ -212,6 +224,12 @@ impl Connector for TlsTcpConnector {
 pub struct PlainTcpListenerConfig {
     pub addr: SocketAddr,
     pub reuse_port: Option<bool>,
+}
+
+impl Display for PlainTcpListenerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tcp://{}", self.addr)
+    }
 }
 
 pub struct PlainTcpListener {
@@ -280,6 +298,12 @@ pub struct PlainTcpConnectorConfig {
     pub addr: String,
 }
 
+impl Display for PlainTcpConnectorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "tcp://{}", self.addr)
+    }
+}
+
 pub struct PlainTcpConnector {
     addr: SocketAddr,
 }
@@ -329,6 +353,12 @@ pub struct QuicListenerConfig {
     pub client_cert: String,
     pub subject: String,
     pub addr: SocketAddr,
+}
+
+impl Display for QuicListenerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "quic://{}", self.addr)
+    }
 }
 
 pub struct QuicListener {
@@ -487,6 +517,12 @@ pub struct QuicConnectorConfig {
     pub server_cert: String,
     pub subject: String,
     pub addr: String,
+}
+
+impl Display for QuicConnectorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "quic://{}", self.addr)
+    }
 }
 
 pub struct QuicConnector {
