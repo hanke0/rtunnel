@@ -507,7 +507,6 @@ impl Display for QuicConnectorConfig {
 }
 
 pub struct QuicConnector {
-    #[allow(unused)]
     endpoint: Endpoint,
     connection: Mutex<Connection>,
     server_name: String,
