@@ -16,7 +16,7 @@ use bytes::BytesMut;
 use quinn::Connection;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
-use quinn::{Endpoint, RecvStream, SendStream};
+use quinn::{Endpoint, RecvStream, SendStream, TransportConfig};
 use serde::{Deserialize, Serialize};
 use socket2::TcpKeepalive;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
@@ -368,7 +368,11 @@ pub struct QuicListener {
 }
 
 impl QuicListener {
-    async fn accept_forever(endpoint: Endpoint, sender: mpsc::Sender<(QuinStream, String)>) {
+    async fn accept_forever(
+        local_addr: SocketAddr,
+        endpoint: Endpoint,
+        sender: mpsc::Sender<(QuinStream, String)>,
+    ) {
         loop {
             match endpoint.accept().await {
                 Some(incoming) => match incoming.await.context("failed to accept connection") {
@@ -376,7 +380,7 @@ impl QuicListener {
                         let remote = connection.remote_address().to_string();
                         let sender = sender.clone();
                         tokio::spawn(
-                            Self::handle_connection(sender, connection)
+                            Self::handle_connection(local_addr, sender, connection)
                                 .instrument(info_span!("handle_connection", remote)),
                         );
                         continue;
@@ -391,7 +395,11 @@ impl QuicListener {
         }
     }
 
-    async fn handle_connection(sender: mpsc::Sender<(QuinStream, String)>, connection: Connection) {
+    async fn handle_connection(
+        local_addr: SocketAddr,
+        sender: mpsc::Sender<(QuinStream, String)>,
+        connection: Connection,
+    ) {
         loop {
             let (send, mut recv) = match connection
                 .accept_bi()
@@ -400,21 +408,24 @@ impl QuicListener {
             {
                 Ok((send, recv)) => (send, recv),
                 Err(e) => {
-                    error!("failed to accept bi stream: {:#}", e);
+                    warn!("failed to accept bi stream: {:#}", e);
                     break;
                 }
             };
             // quic requires client-initiated, ignore first byte.
             match recv.read_u8().await {
-                Ok(_) => {
-                    error!("client closed connection");
-                }
+                Ok(_) => {}
                 Err(err) => {
-                    warn!("failed to read first byte: {:#}", err);
+                    warn!("failed to read quic stream first byte: {:#}", err);
                     continue;
                 }
             }
-            let id = format!("{}({})", connection.remote_address(), send.id());
+            let id = format!(
+                "{}-{}({})",
+                local_addr,
+                connection.remote_address(),
+                send.id()
+            );
             match sender
                 .send((QuinStream(send, recv), id))
                 .await
@@ -424,7 +435,7 @@ impl QuicListener {
                     continue;
                 }
                 Err(e) => {
-                    error!("failed to send stream: {:#}", e);
+                    error!("failed to send quic stream: {:#}", e);
                     break;
                 }
             }
@@ -448,7 +459,7 @@ impl Listener for QuicListener {
         let addr = config.addr;
         let endpoint = Endpoint::server(server_config, config.addr)?;
         let (sender, receiver) = mpsc::channel(1024);
-        tokio::spawn(Self::accept_forever(endpoint, sender.clone()));
+        tokio::spawn(Self::accept_forever(addr, endpoint, sender.clone()));
         Ok(Self {
             addr,
             _sender: sender,
@@ -480,6 +491,110 @@ impl Debug for QuicListener {
     }
 }
 
+#[derive(Deserialize, Serialize, Clone)]
+pub struct QuicConnectorConfig {
+    pub client_cert: String,
+    pub client_key: String,
+    pub server_cert: String,
+    pub subject: String,
+    pub addr: String,
+}
+
+impl Display for QuicConnectorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "quic://{}", self.addr)
+    }
+}
+
+pub struct QuicConnector {
+    #[allow(unused)]
+    endpoint: Endpoint,
+    connection: Connection,
+    addr: SocketAddr,
+    local_addr: SocketAddr,
+}
+
+impl fmt::Display for QuicConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "quic://{}", self.addr)
+    }
+}
+
+impl fmt::Debug for QuicConnector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "QuicConnector({})", self.addr)
+    }
+}
+
+impl QuicConnector {
+    const ANY_IP: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
+    const ANY_ADDR: SocketAddr = SocketAddr::new(Self::ANY_IP, 0);
+
+    async fn open_stream(&self) -> Result<(QuinStream, String)> {
+        let (mut send, recv) = self
+            .connection
+            .open_bi()
+            .await
+            .context("failed to open quic bi stream")?;
+        // quic requires client-initiated, send a byte to open stream.
+        send.write_u8(0)
+            .await
+            .context("failed to write quic first byte")?;
+        let id = send.id();
+        Ok((
+            QuinStream(send, recv),
+            format!("{}-{}({})", self.local_addr, self.addr, id),
+        ))
+    }
+}
+
+impl Connector for QuicConnector {
+    type Stream = QuinStream;
+    type Config = QuicConnectorConfig;
+
+    async fn new(config: Self::Config) -> Result<Self> {
+        let addr = config
+            .addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or(whatever!("Invalid address"))?;
+        let server_name = config.subject.clone();
+        let client_config =
+            build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
+        let client_config = QuicClientConfig::try_from(client_config)
+            .context("failed to build quic client config")?;
+        let mut client_config = quinn::ClientConfig::new(Arc::new(client_config));
+        let mut transport_config = TransportConfig::default();
+        transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+        client_config.transport_config(Arc::new(transport_config));
+        let mut endpoint =
+            Endpoint::client(Self::ANY_ADDR).context("Failed to create quic endpoint")?;
+        endpoint.set_default_client_config(client_config);
+        let local_addr = endpoint.local_addr().unwrap();
+        let connection = endpoint
+            .connect(addr, &server_name)?
+            .await
+            .context("failed to make a quic connection")?;
+
+        let c = Self {
+            endpoint,
+            connection,
+            addr,
+            local_addr,
+        };
+        Ok(c)
+    }
+
+    #[inline]
+    async fn connect(&self) -> Result<(Self::Stream, String)> {
+        self.open_stream().await
+    }
+
+    fn address(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
 pub struct QuinStream(SendStream, RecvStream);
 
 impl AsyncRead for QuinStream {
@@ -507,90 +622,6 @@ impl AsyncWrite for QuinStream {
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut FContext<'_>) -> Poll<std::io::Result<()>> {
         pin!(&mut self.0).poll_shutdown(cx)
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-pub struct QuicConnectorConfig {
-    pub client_cert: String,
-    pub client_key: String,
-    pub server_cert: String,
-    pub subject: String,
-    pub addr: String,
-}
-
-impl Display for QuicConnectorConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "quic://{}", self.addr)
-    }
-}
-
-pub struct QuicConnector {
-    _endpoint: Endpoint,
-    connection: Connection,
-    addr: SocketAddr,
-    _server_name: String,
-}
-
-impl fmt::Display for QuicConnector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "quic://{}", self.addr)
-    }
-}
-
-impl fmt::Debug for QuicConnector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "QuicConnector({})", self.addr)
-    }
-}
-
-impl QuicConnector {
-    const ANY_IP: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
-    const ANY_ADDR: SocketAddr = SocketAddr::new(Self::ANY_IP, 0);
-}
-
-impl Connector for QuicConnector {
-    type Stream = QuinStream;
-    type Config = QuicConnectorConfig;
-
-    async fn new(config: Self::Config) -> Result<Self> {
-        let addr = config
-            .addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or(whatever!("Invalid address"))?;
-        let client_config =
-            build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
-        let client_config = QuicClientConfig::try_from(client_config)
-            .context("failed to build quic client config")?;
-        let client_config = quinn::ClientConfig::new(Arc::new(client_config));
-        let mut endpoint =
-            Endpoint::client(Self::ANY_ADDR).context("Failed to create quic endpoint")?;
-        endpoint.set_default_client_config(client_config);
-        let server_name = config.subject.clone();
-        let connection = endpoint
-            .connect(addr, &server_name)?
-            .await
-            .context("failed to make a quic connection")?;
-
-        let c = Self {
-            _endpoint: endpoint,
-            addr,
-            _server_name: server_name,
-            connection,
-        };
-        Ok(c)
-    }
-    async fn connect(&self) -> Result<(Self::Stream, String)> {
-        let (mut send, recv) = self.connection.open_bi().await?;
-        // quic requires client-initiated, send a byte to open stream.
-        send.write_u8(0).await?;
-        let id = send.id();
-        Ok((QuinStream(send, recv), id.to_string()))
-    }
-
-    fn address(&self) -> SocketAddr {
-        self.addr
     }
 }
 

@@ -16,7 +16,8 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::task::{JoinSet, spawn};
 use tokio::time::sleep;
-use tracing::{error, info};
+use tracing::Instrument;
+use tracing::{error, info, info_span};
 
 use rtunnel::config;
 use rtunnel::errors::ResultExt;
@@ -229,15 +230,23 @@ async fn concurrent_test(context: &Context) {
         set.join_all().await;
         info!("It's OK for {n} concurrent connections");
     };
-    concurrent_test(context.clone(), 1).await;
-    concurrent_test(context.clone(), 8).await;
+    concurrent_test(context.clone(), 1)
+        .instrument(info_span!("smoke test"))
+        .await;
+    concurrent_test(context.clone(), 8)
+        .instrument(info_span!("concurrent test"))
+        .await;
 
     // wait for keep alive ping to be sent
     sleep(Duration::from_secs(10)).await;
-    concurrent_test(context.clone(), 1).await;
+    concurrent_test(context.clone(), 1)
+        .instrument(info_span!("keep alive smoke test"))
+        .await;
 
     for _ in 0..1000 {
-        connect_to_echo(context.clone()).await;
+        connect_to_echo(context.clone())
+            .instrument(info_span!("keep alive stress test"))
+            .await;
     }
 }
 

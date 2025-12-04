@@ -389,7 +389,11 @@ impl<T: Listener> TunnelPool<T> {
             match r {
                 Ok(_) => match sender.send(r) {
                     Ok(_) => {}
-                    Err(_) => unreachable!(),
+                    Err(_) => {
+                        error!("{} keep alive receiver dropped", id);
+                        self.remove(&id).await;
+                        debug!("{} removed from pool", id);
+                    }
                 },
                 Err(err) => {
                     if err.is_relay_critical() {
