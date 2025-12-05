@@ -94,6 +94,7 @@ async fn test_client_works_fine_when_one_tunnel_is_not_available() {
         }),
         allowed_addresses: HashSet::new(),
         idle_connections: 20,
+        infinity_try: false,
     });
     let config = toml::to_string(cfg).unwrap();
     let server_context = Context::new();

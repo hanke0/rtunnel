@@ -70,7 +70,7 @@ pub trait Listener: Sized + Send + Sync + Display + Debug + 'static {
 
 pub trait Connector: Sized + Send + Sync + Display + Debug + 'static {
     type Stream: Stream;
-    type Config: Display;
+    type Config: Display + Clone;
 
     fn new(config: Self::Config) -> impl Future<Output = Result<Self>> + Send;
     fn connect(&self) -> impl Future<Output = Result<(Self::Stream, String)>> + Send;

@@ -37,70 +37,66 @@ impl<T: Connector> ClientOptions<T> {
 
 type ClientOptionsRef<T> = Arc<ClientOptions<T>>;
 
+macro_rules! match_client {
+    ($ctx:ident, $config:ident, $watch:ident, $($mat:path => $typ:ty),+) => {
+        match &$config.connect_to {
+            $($mat(cfg) => {
+                run_client::<$typ>($ctx, &$config, $watch, cfg).await
+            })+
+        }
+    };
+}
+
 /// Starts a tunnel client with the given configuration.
 ///
 /// This function establishes a connection to the tunnel server, performs the
 /// handshake, and begins managing tunnel connections. It spawns a background
 /// task to maintain the connection pool and handle reconnections.
 pub async fn start_client(context: &Context, config: ClientConfig, watch: &Watcher) -> Result<()> {
-    let name = config.get_name();
-    let watch = watch.watch(name.clone()).await;
-    match config.connect_to {
-        ConnectTo::PlainTcp(cfg) => {
-            run_client::<PlainTcpConnector>(
-                context,
-                config.idle_connections,
-                cfg,
-                config.allowed_addresses,
-                watch,
-                name,
-            )
-            .await
-        }
-        ConnectTo::TlsTcp(cfg) => {
-            run_client::<TlsTcpConnector>(
-                context,
-                config.idle_connections,
-                cfg,
-                config.allowed_addresses,
-                watch,
-                name,
-            )
-            .await
-        }
-        ConnectTo::Quic(cfg) => {
-            run_client::<QuicConnector>(
-                context,
-                config.idle_connections,
-                cfg,
-                config.allowed_addresses,
-                watch,
-                name,
-            )
-            .await
-        }
-    }
+    let watch = watch.watch(config.get_name()).await;
+    match_client!(
+        context, config, watch,
+        ConnectTo::PlainTcp => PlainTcpConnector,
+        ConnectTo::TlsTcp => TlsTcpConnector,
+        ConnectTo::Quic => QuicConnector
+    )
 }
 
 async fn run_client<T: Connector>(
     context: &Context,
-    idle: usize,
-    config: T::Config,
-    allows: HashSet<String>,
+    client_config: &ClientConfig,
     watch: WatchOne,
-    name: String,
+    config: &T::Config,
 ) -> Result<()> {
-    let (sender, receiver) = mpsc::channel(idle * 2);
-    let connector = T::new(config).await?;
+    let (sender, receiver) = mpsc::channel(client_config.idle_connections * 2);
+    let connector = T::new(config.clone()).await?;
+    let name = client_config.get_name();
     let options = ClientOptions {
         connector,
-        allows,
-        idle_connections: idle,
+        idle_connections: client_config.idle_connections,
+        allows: client_config.allowed_addresses.clone(),
         notify: sender,
         watch,
     };
     let options = Arc::new(options);
-    first_connect(context, options.clone()).await?;
+    match first_connect(context, options.clone()).await {
+        Ok(_) => {}
+        Err(e) => {
+            if e.is_cancel() {
+                context.cancel();
+                return Err(e);
+            }
+            if client_config.infinity_try {
+                error!(
+                    "client {}(connect_to={}) first connect failed, but infinity try is enabled, retrying...",
+                    client_config.get_name(),
+                    client_config.connect_to
+                );
+            } else {
+                return Err(e);
+            }
+        }
+    };
     let connect_to = format!("{}", options.connector);
     context.spawn(
         start_client_sentry(context.children(), options, receiver).instrument(error_span!(

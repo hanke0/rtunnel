@@ -126,6 +126,8 @@ pub struct ClientConfig {
     pub allowed_addresses: HashSet<String>,
     #[serde(default)]
     pub idle_connections: usize,
+    #[serde(default)]
+    pub infinity_try: bool,
 }
 
 impl ClientConfig {
@@ -251,6 +253,7 @@ pub fn build_tls_example(subject: &str) -> String {
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
+            infinity_try: false,
         }],
     };
     toml::to_string(&config).unwrap()
@@ -279,6 +282,7 @@ pub fn build_tcp_example() -> String {
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from(["tcp://127.0.0.1:2335".to_string()]),
+            infinity_try: false,
         }],
     };
     toml::to_string(&config).unwrap()
@@ -316,6 +320,7 @@ pub fn build_quic_example(subject: &str) -> String {
             }),
             idle_connections: 20,
             allowed_addresses: HashSet::from_iter(vec!["tcp://127.0.0.1:2335".to_string()]),
+            infinity_try: false,
         }],
     };
     toml::to_string(&config).unwrap()
