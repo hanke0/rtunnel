@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 use tokio::select;
 use tokio::time::sleep;
 use tokio_rustls::rustls::crypto::aws_lc_rs;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub mod client;
 pub mod config;
@@ -75,7 +75,12 @@ pub async fn run_client(context: &Context, config: Config) -> Result<()> {
         match err {
             Ok(_) => continue,
             Err(e) => {
-                error!("connect to {} failed, exiting: {:#}", cfg.connect_to, e);
+                error!(
+                    "client {}(connect_to={}) start failed, exiting: {:#}",
+                    cfg.get_name(),
+                    cfg.connect_to,
+                    e
+                );
                 graceful_exit(context, "client").await;
                 return Err(e);
             }
@@ -105,7 +110,12 @@ pub async fn run_server(context: &Context, config: Config) -> Result<()> {
         match err {
             Ok(_) => continue,
             Err(e) => {
-                error!("start server {} failed, exiting: {:#}", cfg.listen_to, e);
+                error!(
+                    "start server {}(listen_to={}) failed, exiting: {:#}",
+                    cfg.get_name(),
+                    cfg.listen_to,
+                    e
+                );
                 graceful_exit(context, "server").await;
                 return Err(e);
             }
@@ -181,8 +191,8 @@ async fn graceful_exit(context: &Context, side: &str) {
             _ = context.wait_cancel_and_finish() => {
                 break;
             }
-            _ = sleep(Duration::from_millis(1000)) => {
-                debug!("{side} is still shutting down, task count {}", context.task_count());
+            _ = sleep(Duration::from_millis(5000)) => {
+                warn!("{side} is still shutting down, task count {}", context.task_count());
             }
         }
     }

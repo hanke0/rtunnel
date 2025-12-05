@@ -849,7 +849,6 @@ impl Context {
         };
         let child = children.clone();
         self.spawn(async move {
-            child.wait_cancel().await;
             child.wait_cancel_and_finish().await;
         });
         children

@@ -44,7 +44,7 @@ type ClientOptionsRef<T> = Arc<ClientOptions<T>>;
 /// task to maintain the connection pool and handle reconnections.
 pub async fn start_client(context: &Context, config: ClientConfig, watch: &Watcher) -> Result<()> {
     let name = config.get_name();
-    let watch = watch.watch(name).await;
+    let watch = watch.watch(name.clone()).await;
     match config.connect_to {
         ConnectTo::PlainTcp(cfg) => {
             run_client::<PlainTcpConnector>(
@@ -53,6 +53,7 @@ pub async fn start_client(context: &Context, config: ClientConfig, watch: &Watch
                 cfg,
                 config.allowed_addresses,
                 watch,
+                name,
             )
             .await
         }
@@ -63,6 +64,7 @@ pub async fn start_client(context: &Context, config: ClientConfig, watch: &Watch
                 cfg,
                 config.allowed_addresses,
                 watch,
+                name,
             )
             .await
         }
@@ -73,6 +75,7 @@ pub async fn start_client(context: &Context, config: ClientConfig, watch: &Watch
                 cfg,
                 config.allowed_addresses,
                 watch,
+                name,
             )
             .await
         }
@@ -85,6 +88,7 @@ async fn run_client<T: Connector>(
     config: T::Config,
     allows: HashSet<String>,
     watch: WatchOne,
+    name: String,
 ) -> Result<()> {
     let (sender, receiver) = mpsc::channel(idle * 2);
     let connector = T::new(config).await?;
@@ -99,8 +103,11 @@ async fn run_client<T: Connector>(
     first_connect(context, options.clone()).await?;
     let connect_to = format!("{}", options.connector);
     context.spawn(
-        start_client_sentry(context.children(), options, receiver)
-            .instrument(error_span!("client_sentry", connect_to)),
+        start_client_sentry(context.children(), options, receiver).instrument(error_span!(
+            "client_sentry",
+            name,
+            connect_to
+        )),
     );
     Ok(())
 }

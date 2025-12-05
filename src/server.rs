@@ -74,21 +74,27 @@ async fn start_server_impl<T: Listener, T2: Listener>(
     info!("server listening on {}", listener);
     let listen_to = format!("{}", listener);
     context.spawn(
-        serve_tunnel(context.children(), listener, pool.clone())
-            .instrument(error_span!("server_tunnel", listen_to)),
+        serve_tunnel(context.children(), listener, pool.clone()).instrument(error_span!(
+            "server_tunnel",
+            name,
+            listen_to
+        )),
     );
     let mut backup_pool = None;
     if let Some(config2) = config2 {
         let backup_name = format!("{}@{}", name, config2);
         let listener2 = T2::new(config2).await?;
-        let watch = watch.watch(backup_name).await;
+        let watch = watch.watch(backup_name.clone()).await;
         let pool2 = TunnelPool::<T2>::new(watch);
         backup_pool = Some(pool2.clone());
         let listen_to2 = format!("{}", listener2);
         info!("server listening on {}", listener2);
         context.spawn(
-            serve_tunnel(context.children(), listener2, pool2.clone())
-                .instrument(error_span!("server_tunnel2", listen_to2)),
+            serve_tunnel(context.children(), listener2, pool2.clone()).instrument(error_span!(
+                "server_tunnel2",
+                backup_name,
+                listen_to2
+            )),
         );
     }
 
