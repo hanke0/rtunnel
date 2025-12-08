@@ -234,7 +234,7 @@ async fn concurrent_test(context: &Context) {
     concurrent_test(context.clone(), 1)
         .instrument(info_span!("smoke test"))
         .await;
-    concurrent_test(context.clone(), 8)
+    concurrent_test(context.clone(), 30)
         .instrument(info_span!("concurrent test"))
         .await;
 

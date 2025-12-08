@@ -8,6 +8,8 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::{Pin, pin};
 use std::result::Result as StdResult;
 use std::sync::Arc;
+use std::sync::atomic::AtomicI32;
+use std::sync::atomic::Ordering;
 use std::task::Context as FContext;
 use std::task::Poll;
 use std::time::Duration;
@@ -22,6 +24,7 @@ use socket2::TcpKeepalive;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpSocket;
 use tokio::net::TcpStream;
+use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -37,7 +40,7 @@ use tokio_rustls::{TlsAcceptor, rustls};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use tracing::Instrument;
-use tracing::{error, info_span, warn};
+use tracing::{error, info, info_span, warn};
 
 use crate::errors::{Error, Result, ResultExt as _, whatever};
 
@@ -512,6 +515,7 @@ pub struct QuicConnector {
     server_name: String,
     addr: SocketAddr,
     local_addr: SocketAddr,
+    reconnect_failed: AtomicI32,
 }
 
 impl fmt::Display for QuicConnector {
@@ -549,10 +553,36 @@ impl QuicConnector {
 
     #[inline]
     async fn reconnect(&self) -> Result<Connection> {
-        self.endpoint
+        match self
+            .endpoint
             .connect(self.addr, &self.server_name)?
             .await
             .context("failed to connect quic server")
+        {
+            Ok(conn) => Ok(conn),
+            Err(e) => {
+                let n = self.reconnect_failed.fetch_add(1, Ordering::Release);
+                if n > 3 {
+                    self.reconnect_failed.store(0, Ordering::Release);
+                    match self.rebind().await {
+                        Ok(_) => {
+                            info!("connect failed, rebind udp socket");
+                        }
+                        Err(e) => {
+                            error!("rebind udp socket failed: {}", e);
+                        }
+                    };
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn rebind(&self) -> Result<()> {
+        let socket = UdpSocket::bind(QuicConnector::ANY_ADDR).await?;
+        self.endpoint
+            .rebind(socket.into_std().context("failed to into std udp socket")?)
+            .context("failed to rebind socket")
     }
 }
 
@@ -590,6 +620,7 @@ impl Connector for QuicConnector {
             server_name,
             addr,
             local_addr,
+            reconnect_failed: AtomicI32::new(0),
         };
         Ok(c)
     }

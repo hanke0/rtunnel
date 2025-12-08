@@ -426,7 +426,7 @@ impl<T: Listener> TunnelPool<T> {
                 Err(e) => {
                     if e.is_exhausted() {
                         self.inner.requires.fetch_add(1, Ordering::Release);
-                        self.inner.notify.notify_one();
+                        self.inner.notify.notified().await;
                         continue;
                     }
                     return Err(e);
