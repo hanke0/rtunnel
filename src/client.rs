@@ -79,9 +79,24 @@ async fn run_client<T: Connector>(
         watch,
     };
     let options = Arc::new(options);
-    if !client_config.infinity_try {
-        first_connect(context, options.clone()).await?;
-    }
+    match first_connect(context, options.clone()).await {
+        Ok(_) => {}
+        Err(e) => {
+            if e.is_cancel() {
+                context.cancel();
+                return Err(e);
+            }
+            if client_config.infinity_try {
+                error!(
+                    "client {}(connect_to={}) first connect failed, but infinity try is enabled, retrying...",
+                    client_config.get_name(),
+                    client_config.connect_to
+                );
+            } else {
+                return Err(e);
+            }
+        }
+    };
     let connect_to = format!("{}", options.connector);
     context.spawn(
         start_client_sentry(context.children(), options, receiver).instrument(error_span!(
@@ -120,7 +135,7 @@ async fn keep_client_connections<T: Connector>(
         index += 1;
         trace!("spawning initial tunnel {}", index);
         context.spawn(
-            build_tunnel(context.clone(), options.clone(), NotifyType::durable(0))
+            build_tunnel(context.clone(), options.clone(), NotifyType::Durable(0))
                 .instrument(error_span!("tunnel", index)),
         );
     }
