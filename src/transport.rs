@@ -511,7 +511,7 @@ impl Display for QuicConnectorConfig {
 
 pub struct QuicConnector {
     endpoint: Endpoint,
-    connection: Mutex<Connection>,
+    connection: Mutex<Option<Connection>>,
     server_name: String,
     addr: SocketAddr,
     local_addr: SocketAddr,
@@ -536,8 +536,15 @@ impl QuicConnector {
 
     async fn open_stream(&self) -> Result<(SendStream, RecvStream)> {
         let mut guard = self.connection.lock().await;
-
-        match guard
+        match guard.as_ref() {
+            Some(_) => {}
+            None => {
+                let conn = self.reconnect().await?;
+                *guard = Some(conn);
+            }
+        };
+        let conn = guard.as_ref().unwrap();
+        match conn
             .open_bi()
             .await
             .context("failed to open quic bi stream")
@@ -545,7 +552,7 @@ impl QuicConnector {
             Ok((send, recv)) => Ok((send, recv)),
             Err(e) => {
                 let conn = self.reconnect().await?;
-                *guard = conn;
+                *guard = Some(conn);
                 Err(e)
             }
         }
@@ -609,14 +616,9 @@ impl Connector for QuicConnector {
             Endpoint::client(Self::ANY_ADDR).context("Failed to create quic endpoint")?;
         endpoint.set_default_client_config(client_config);
         let local_addr = endpoint.local_addr().unwrap();
-        let connection = endpoint
-            .connect(addr, &server_name)?
-            .await
-            .context("failed to make a quic connection")?;
-
         let c = Self {
             endpoint,
-            connection: Mutex::new(connection),
+            connection: Mutex::new(None),
             server_name,
             addr,
             local_addr,
