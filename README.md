@@ -7,26 +7,7 @@
 [![Rust](https://github.com/hanke0/rtunnel/actions/workflows/rust.yaml/badge.svg)](https://github.com/hanke0/rtunnel/actions/workflows/rust.yaml)
 
 
-A lightweight, secure tunneling tool written in Rust for exposing local servers behind NATs and firewalls to the public internet.
-
-## Table of Contents
-
-- [rtunnel](#rtunnel)
-  - [Table of Contents](#table-of-contents)
-  - [Features](#features)
-  - [Installation](#installation)
-    - [Download Pre-built Binaries](#download-pre-built-binaries)
-    - [Build from Source](#build-from-source)
-  - [Quick Start](#quick-start)
-    - [Step 1: Generate Key Pairs](#step-1-generate-key-pairs)
-    - [Step 2: Create Configuration File](#step-2-create-configuration-file)
-    - [Step 3: Configure Server and Client](#step-3-configure-server-and-client)
-    - [Step 4: Run the Server](#step-4-run-the-server)
-    - [Step 5: Run the Client](#step-5-run-the-client)
-  - [How It Works](#how-it-works)
-  - [Use Cases](#use-cases)
-  - [Testing](#testing)
-  - [License](#license)
+A lightweight, secure tunneling tool written in Rust for exposing local servers behind NATs and firewalls to the public internet. Rtunnel was designed with a focus on simplicity, lightweight performance, and security.
 
 ## Features
 
@@ -130,7 +111,7 @@ rtunnel client --config rtunnel.toml
 
 ## How It Works
 
-1. **Client-Server Connection**: The client establishes an encrypted connection to the server using X25519 key exchange and Ed25519 authentication.
+1. **Client-Server Connection**: The client establishes an encrypted connection to the server.
 
 2. **Service Mapping**: The server binds to public addresses (e.g., `0.0.0.0:8001`) and forwards traffic through the encrypted tunnel.
 
@@ -140,7 +121,7 @@ rtunnel client --config rtunnel.toml
    - The client connects to the configured local service
    - Data is bidirectionally relayed through the encrypted tunnel
 
-4. **Security**: All traffic is encrypted using AES-256-GCM, and clients can only connect to addresses specified in `allowed_addresses`.
+4. **Security**: All traffic is encrypted by tls v1.3, and clients can only connect to addresses specified in `allowed_addresses`.
 
 ## Use Cases
 
@@ -163,6 +144,10 @@ For verbose test output:
 ```bash
 RUST_LOG=debug cargo test -- --nocapture
 ```
+
+# Related Works
+- [frp](https://github.com/fatedier/frp)：While frp is a full-featured reverse proxy offering advanced capabilities like HTTP routing and built-in P2P modes, rtunnel​ takes a different approach. It focuses exclusively on providing a simple and reliable relay tunnel. For a complete solution, it can be seamlessly integrated with dedicated tools—such as Nginx for HTTP proxy and Tailscale or ZeroTier for P2P connections.
+- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/): Cloudflare Tunnel is an excellent and comprehensive product.
 
 ## License
 
