@@ -22,12 +22,12 @@ struct ClientOptions<T: Connector> {
     connector: T,
     allows: HashSet<String>,
     idle_connections: usize,
-    notify: Sender<i32>,
+    notify: Sender<NotifyType>,
     watch: WatchOne,
 }
 
 impl<T: Connector> ClientOptions<T> {
-    async fn notify_for_new_tunnel(&self, n: i32) {
+    async fn notify_for_new_tunnel(&self, n: NotifyType) {
         match self.notify.send(n).await {
             Ok(_) => {}
             Err(e) => error!("failed to notify for new tunnel: {}", e),
@@ -111,7 +111,7 @@ async fn run_client<T: Connector>(
 async fn start_client_sentry<T: Connector>(
     context: Context,
     options: ClientOptionsRef<T>,
-    receiver: Receiver<i32>,
+    receiver: Receiver<NotifyType>,
 ) {
     keep_client_connections(&context, &options, receiver).await;
     context.cancel();
@@ -123,7 +123,7 @@ async fn start_client_sentry<T: Connector>(
 async fn keep_client_connections<T: Connector>(
     context: &Context,
     options: &ClientOptionsRef<T>,
-    mut receiver: Receiver<i32>,
+    mut receiver: Receiver<NotifyType>,
 ) {
     let max_idle = options.idle_connections;
     let mut index: u64 = 0;
@@ -135,19 +135,24 @@ async fn keep_client_connections<T: Connector>(
         index += 1;
         trace!("spawning initial tunnel {}", index);
         context.spawn(
-            build_tunnel(context.clone(), options.clone()).instrument(error_span!("tunnel", index)),
+            build_tunnel(context.clone(), options.clone(), NotifyType::Durable(0))
+                .instrument(error_span!("tunnel", index)),
         );
     }
     while !context.has_cancel() {
         select! {
             n = receiver.recv() => {
-                for _ in 0..n.unwrap_or(0) {
+                let n = match n {
+                    None => break,
+                    Some(n) => {
+                        n
+                    }
+                };
+                for _ in 0..n.num() {
                     index += 1;
                     trace!("spawning new tunnel {}", index);
-                    context.spawn(build_tunnel(context.clone(), options.clone()).instrument(error_span!(
-                        "tunnel",
-                        index
-                    )));
+                    context.spawn(build_tunnel(context.clone(), options.clone(), n)
+                    .instrument(error_span!("tunnel", index)));
                 }
             },
             _ = context.wait_cancel() => break,
@@ -155,11 +160,15 @@ async fn keep_client_connections<T: Connector>(
     }
 }
 
-async fn build_tunnel<T: Connector>(context: Context, options: ClientOptionsRef<T>) {
+async fn build_tunnel<T: Connector>(
+    context: Context,
+    options: ClientOptionsRef<T>,
+    typ: NotifyType,
+) {
     if context.has_cancel() {
         return;
     }
-    match build_tunnel_impl(&context, &options).await {
+    match build_tunnel_impl(&context, &options, typ).await {
         Ok(_) => {}
         Err(e) => {
             error!("tunnel relay fail: {:#}", e);
@@ -167,7 +176,9 @@ async fn build_tunnel<T: Connector>(context: Context, options: ClientOptionsRef<
                 context.cancel();
                 return;
             }
-            options.notify_for_new_tunnel(1).await;
+            if typ.is_durable() {
+                options.notify_for_new_tunnel(NotifyType::durable(1)).await;
+            }
         }
     }
 }
@@ -175,6 +186,7 @@ async fn build_tunnel<T: Connector>(context: Context, options: ClientOptionsRef<
 async fn build_tunnel_impl<T: Connector>(
     context: &Context,
     options: &ClientOptionsRef<T>,
+    typ: NotifyType,
 ) -> Result<()> {
     let (stream, server_addr) = {
         let mut duration = Duration::from_millis(100);
@@ -201,7 +213,7 @@ async fn build_tunnel_impl<T: Connector>(
             }
         }
     };
-    wait_relay(context, stream, options)
+    wait_relay(context, stream, options, typ)
         .instrument(info_span!("relay", server_addr))
         .await
 }
@@ -214,7 +226,7 @@ async fn first_connect<T: Connector>(
     let new_ctx = context.clone();
     context.spawn(async move {
         let options = options;
-        match wait_relay(&new_ctx, stream, &options)
+        match wait_relay(&new_ctx, stream, &options, NotifyType::Disposable(0))
             .instrument(info_span!("wait_relay", server_addr = id, first = true))
             .await
         {
@@ -231,6 +243,7 @@ async fn wait_relay<T: Connector>(
     context: &Context,
     mut stream: T::Stream,
     options: &ClientOptionsRef<T>,
+    typ: NotifyType,
 ) -> Result<()> {
     info!("connected to server");
     let _guard = options.watch.tunnel_guard();
@@ -252,13 +265,17 @@ async fn wait_relay<T: Connector>(
             }
             MessageKind::Require => {
                 let n = message.parse_require()?;
-                options.notify_for_new_tunnel(n).await;
+                options
+                    .notify_for_new_tunnel(NotifyType::disposable(n))
+                    .await;
                 continue;
             }
         }
     };
     trace!("tunnel connect message has received: {}", addr);
-    options.notify_for_new_tunnel(1).await;
+    if typ.is_durable() {
+        options.notify_for_new_tunnel(NotifyType::durable(1)).await;
+    }
     match handle_relay::<T>(context, stream, options, &addr)
         .instrument(info_span!("connect_local", client_addr = addr))
         .await
@@ -314,4 +331,50 @@ async fn handle_relay_impl<T: Connector, S: Stream>(
 ) -> Result<(u64, u64)> {
     debug!("start copy_bidirectional");
     relay_bidirectional(remote, local).await
+}
+
+#[derive(Copy, Clone)]
+enum NotifyType {
+    Disposable(i32),
+    Durable(i32),
+}
+
+impl NotifyType {
+    pub fn is_durable(self) -> bool {
+        matches!(self, NotifyType::Durable(_))
+    }
+
+    pub fn num(self) -> i32 {
+        match self {
+            NotifyType::Disposable(n) => n,
+            NotifyType::Durable(n) => n,
+        }
+    }
+    pub fn disposable(n: i32) -> Self {
+        Self::Disposable(n)
+    }
+    pub fn durable(n: i32) -> Self {
+        Self::Durable(n)
+    }
+}
+
+#[cfg(test)]
+mod notify_test {
+    use super::NotifyType;
+    #[test]
+    fn test_notify_num() {
+        let test = |n: i32, is_durable: bool| {
+            let num = if is_durable {
+                NotifyType::durable(n)
+            } else {
+                NotifyType::disposable(n)
+            };
+            assert_eq!(num.is_durable(), is_durable, "input({}, {})", n, is_durable);
+            assert_eq!(num.num(), n, "input({}, {})", n, is_durable);
+        };
+        test(1, true);
+        test(1, false);
+        test(i32::MAX, true);
+        test(i32::MAX, false);
+    }
 }
