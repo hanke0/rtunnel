@@ -119,9 +119,13 @@ cleanup() {
 trap 'cleanup' EXIT
 mkdir -p tmp
 cargo build --quiet --release --bin echo-bench || exit 1
+RTUNNEL_BIN="${RTUNNEL_BIN:-}"
 case "$runmode" in
 rtunnel*)
-	cargo build "${extra_options[@]}" --quiet --release --bin rtunnel || exit 1
+    if [ -z "$RTUNNEL_BIN" ]; then
+	    cargo build "${extra_options[@]}" --quiet --release --bin rtunnel || exit 1
+        RTUNNEL_BIN=target/release/rtunnel
+    fi
 	;;
 esac
 
@@ -142,7 +146,7 @@ run_server() {
 		;;
 	*)
 		echo >&2 "rtunnel config: ${config}"
-		target/release/rtunnel -l warn server -c "$config" >"${serverlog}" 2>&1 &
+		"$RTUNNEL_BIN" -l warn server -c "$config" >"${serverlog}" 2>&1 &
 		;;
 	esac
 	serverpid=$!
@@ -163,7 +167,7 @@ run_client() {
 		;;
 	*)
 		echo >&2 "rtunnel config: ${config}"
-		target/release/rtunnel -l warn client -c "${config}" >${clientlog} 2>&1 &
+		"$RTUNNEL_BIN" -l warn client -c "${config}" >${clientlog} 2>&1 &
 		;;
 	esac
 	clientpid=$!
@@ -185,7 +189,7 @@ get_version() {
 		grep_version tmp/rathole/rathole --version
 		;;
 	*)
-		grep_version target/release/rtunnel --version
+		grep_version "$RTUNNEL_BIN" --version
 		;;
 	esac
 }
