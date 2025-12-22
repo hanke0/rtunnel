@@ -17,7 +17,7 @@ socket2 = "0.6.1"
 clap = { version = "4.5.52", features = ["derive"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs"] }
 rcgen = { version = "0.14.5", default-features = false, features = ["aws_lc_rs","crypto","pem"]}
-tracing = "0.1.41"
+tracing = "0.1.44"
 tracing-subscriber = {version = "0.3.20", features = ["env-filter","fmt","std","local-time"]}
 quinn = { version = "0.11.9", default-features = false, features = ["rustls-aws-lc-rs", "runtime-tokio"]}
 hyper = { version = "1.8.1", features = ["http1", "server"] }
