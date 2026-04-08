@@ -1,6 +1,6 @@
 [package]
 name = "rtunnel"
-version = "0.13.3"
+version = "0.13.4"
 edition = "2024"
 default-run = "rtunnel"
 
@@ -8,24 +8,24 @@ default-run = "rtunnel"
 debug = []
 
 [dependencies]
-tokio = { version = "1.49.0", features = ["full"] }
-toml = "0.9.8"
+tokio = { version = "1.51.1", features = ["full"] }
+toml = "1.1.2"
 serde = { version = "1.0", features = ["derive"] }
 bytes = "1.11.1"
-tokio-util = { version = "0.7.17", features = ["rt"] }
-socket2 = "0.6.1"
-clap = { version = "4.5.52", features = ["derive"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
+socket2 = "0.6.3"
+clap = { version = "4.6.0", features = ["derive"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws-lc-rs"] }
-rcgen = { version = "0.14.6", default-features = false, features = ["aws_lc_rs","crypto","pem"]}
-tracing = "0.1.41"
-tracing-subscriber = {version = "0.3.20", features = ["env-filter","fmt","std","local-time"]}
+rcgen = { version = "0.14.7", default-features = false, features = ["aws_lc_rs","crypto","pem"]}
+tracing = "0.1.44"
+tracing-subscriber = {version = "0.3.23", features = ["env-filter","fmt","std","local-time"]}
 quinn = { version = "0.11.9", default-features = false, features = ["rustls-aws-lc-rs", "runtime-tokio"]}
-hyper = { version = "1.8.1", features = ["http1", "server"] }
-hyper-util = { version = "0.1.18", features = ["http1", "server", "tokio"] }
+hyper = { version = "1.9.0", features = ["http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["http1", "server", "tokio"] }
 
 [dev-dependencies]
-serial_test = "3.2.0"
-tempfile = "3.24.0"
+serial_test = "3.4.0"
+tempfile = "3.27.0"
 
 [[bin]]
 name = "echo-bench"
