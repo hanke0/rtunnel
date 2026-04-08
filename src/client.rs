@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::str;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -259,8 +260,9 @@ async fn wait_relay<T: Connector>(
                 continue;
             }
             MessageKind::Connect => {
-                let addr =
-                    String::from_utf8(message.get_payload().to_vec()).context("Invalid address")?;
+                let addr = str::from_utf8(message.get_payload())
+                    .map_err(|_| whatever!("Invalid address"))?
+                    .to_owned();
                 break addr;
             }
             MessageKind::Require => {

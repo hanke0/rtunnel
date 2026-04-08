@@ -341,8 +341,7 @@ impl WatchOne {
 
 #[derive(Debug)]
 pub struct Average {
-    count: AtomicI32,
-    average: AtomicI32,
+    inner: std::sync::Mutex<(i32, i32)>,
 }
 
 impl Default for Average {
@@ -354,50 +353,28 @@ impl Default for Average {
 impl Average {
     pub fn new() -> Self {
         Self {
-            count: AtomicI32::new(0),
-            average: AtomicI32::new(0),
+            inner: std::sync::Mutex::new((0, 0)),
         }
     }
 
     pub fn add_value(&self, value: i32) {
-        loop {
-            let current_count = self.count.load(Ordering::Acquire);
-            let current_avg = self.average.load(Ordering::Acquire);
-            let new_count = current_count + 1;
-            let new_avg_scaled = if current_count == 0 {
-                value
-            } else {
-                current_avg + (value - current_avg) / new_count
-            };
-
-            let count_success = self.count.compare_exchange_weak(
-                current_count,
-                new_count,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            );
-
-            if count_success.is_ok() {
-                let avg_success = self.average.compare_exchange_weak(
-                    current_avg,
-                    new_avg_scaled,
-                    Ordering::SeqCst,
-                    Ordering::Relaxed,
-                );
-
-                if avg_success.is_ok() {
-                    break;
-                }
-            }
-        }
+        let mut inner = self.inner.lock().unwrap();
+        let (count, avg) = *inner;
+        let new_count = count + 1;
+        let new_avg = if count == 0 {
+            value
+        } else {
+            avg + (value - avg) / new_count
+        };
+        *inner = (new_count, new_avg);
     }
 
     pub fn get_average(&self) -> i32 {
-        self.average.load(Ordering::Acquire)
+        self.inner.lock().unwrap().1
     }
 
     pub fn get_count(&self) -> i32 {
-        self.count.load(Ordering::Acquire)
+        self.inner.lock().unwrap().0
     }
 }
 

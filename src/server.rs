@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
@@ -278,16 +278,18 @@ async fn handle_service_stream_with_backup<T: Listener, U: Listener, V: Listener
         }
         let (cancel_tx, cancel_rx) = oneshot::channel();
         let (cancel_tx2, cancel_rx2) = oneshot::channel();
-        tokio::join!(
-            async {
+        tokio::select! {
+            _ = async {
                 pool.wait(cancel_rx).await;
+            } => {
                 let _ = cancel_tx2.send(());
             },
-            async {
+            _ = async {
                 pool2.wait(cancel_rx2).await;
+            } => {
                 let _ = cancel_tx.send(());
             },
-        );
+        }
     }
     Err(Error::exhausted())
 }
@@ -358,7 +360,8 @@ impl<T: Listener> Clone for TunnelPool<T> {
 
 struct TunnelPoolInner<T: Listener> {
     pub watch: WatchOne,
-    sessions: Mutex<BTreeMap<String, Session<T>>>,
+    sessions: Mutex<HashMap<String, Session<T>>>,
+    queue: Mutex<VecDeque<String>>,
     notify: Notify,
     requires: AtomicI32,
 }
@@ -371,7 +374,8 @@ impl<T: Listener> TunnelPool<T> {
     fn new(watch: WatchOne) -> Self {
         let inner = Arc::new(TunnelPoolInner {
             watch,
-            sessions: Mutex::new(BTreeMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            queue: Mutex::new(VecDeque::new()),
             notify: Notify::new(),
             requires: AtomicI32::new(0),
         });
@@ -387,6 +391,7 @@ impl<T: Listener> TunnelPool<T> {
             receiver,
         };
         self.inner.sessions.lock().await.insert(id.clone(), session);
+        self.inner.queue.lock().await.push_back(id.clone());
         self.inner.notify.notify_one();
         let alive_ctx = context.clone();
         context.spawn(async move {
@@ -448,27 +453,40 @@ impl<T: Listener> TunnelPool<T> {
     }
 
     pub async fn try_pop(&self) -> Result<(T::Stream, String)> {
-        let mut sessions = self.inner.sessions.lock().await;
-        let result = sessions.pop_first();
-        let is_empty = sessions.is_empty();
-        drop(sessions);
-
-        match result {
-            Some((id, session)) => {
-                trace!("match a tunnel: {}", id);
-                let mut session = session.join().await?;
-                let n = self.inner.requires.load(Ordering::Acquire);
-                if n > 0 || is_empty {
-                    self.inner.requires.fetch_sub(n, Ordering::Release);
-                    if is_empty {
-                        Message::require(n + 1).write_to(&mut session).await?;
-                    } else {
-                        Message::require(n).write_to(&mut session).await?;
+        loop {
+            let id = {
+                let mut queue = self.inner.queue.lock().await;
+                queue.pop_front()
+            };
+            let id = match id {
+                Some(id) => id,
+                None => return Err(Error::exhausted()),
+            };
+            let session = {
+                let mut sessions = self.inner.sessions.lock().await;
+                sessions.remove(&id)
+            };
+            let is_empty = { self.inner.sessions.lock().await.is_empty() };
+            match session {
+                Some(session) => {
+                    trace!("match a tunnel: {}", id);
+                    let mut session = session.join().await?;
+                    let n = self.inner.requires.load(Ordering::Acquire);
+                    if n > 0 || is_empty {
+                        self.inner.requires.fetch_sub(n, Ordering::Release);
+                        if is_empty {
+                            Message::require(n + 1).write_to(&mut session).await?;
+                        } else {
+                            Message::require(n).write_to(&mut session).await?;
+                        }
                     }
+                    return Ok((session, id));
                 }
-                Ok((session, id))
+                None => {
+                    // This id was removed by keep-alive timeout/error; continue to the next one.
+                    continue;
+                }
             }
-            None => Err(Error::exhausted()),
         }
     }
 }

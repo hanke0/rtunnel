@@ -2,6 +2,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::future::Future;
+use std::str;
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
 use std::net::{SocketAddr, ToSocketAddrs};
@@ -458,6 +459,10 @@ impl Listener for QuicListener {
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(server_config));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
         transport_config.max_concurrent_uni_streams(0_u8.into());
+        transport_config.max_concurrent_bidi_streams(4096_u32.into());
+        transport_config.stream_receive_window((2u32 * 1024 * 1024).into());
+        transport_config.receive_window((8u32 * 1024 * 1024).into());
+        transport_config.send_window(8 * 1024 * 1024);
 
         let addr = config.addr;
         let endpoint = Endpoint::server(server_config, config.addr)?;
@@ -535,25 +540,25 @@ impl QuicConnector {
     const ANY_ADDR: SocketAddr = SocketAddr::new(Self::ANY_IP, 0);
 
     async fn open_stream(&self) -> Result<(SendStream, RecvStream)> {
-        let mut guard = self.connection.lock().await;
-        match guard.as_ref() {
-            Some(_) => {}
-            None => {
-                let conn = self.reconnect().await?;
-                *guard = Some(conn);
+        let conn = {
+            let mut guard = self.connection.lock().await;
+            if guard.is_none() {
+                *guard = Some(self.reconnect().await?);
             }
+            guard.as_ref().cloned().unwrap()
         };
-        let conn = guard.as_ref().unwrap();
-        match conn
-            .open_bi()
-            .await
-            .context("failed to open quic bi stream")
-        {
+        match conn.open_bi().await {
             Ok((send, recv)) => Ok((send, recv)),
             Err(e) => {
+                warn!("failed to open quic bi stream, reconnecting: {:#}", e);
                 let conn = self.reconnect().await?;
-                *guard = Some(conn);
-                Err(e)
+                {
+                    let mut guard = self.connection.lock().await;
+                    *guard = Some(conn.clone());
+                }
+                conn.open_bi()
+                    .await
+                    .context("failed to open quic bi stream after reconnect")
             }
         }
     }
@@ -611,6 +616,10 @@ impl Connector for QuicConnector {
         let mut client_config = quinn::ClientConfig::new(Arc::new(client_config));
         let mut transport_config = TransportConfig::default();
         transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+        transport_config.max_concurrent_bidi_streams(4096_u32.into());
+        transport_config.stream_receive_window((2u32 * 1024 * 1024).into());
+        transport_config.receive_window((8u32 * 1024 * 1024).into());
+        transport_config.send_window(8 * 1024 * 1024);
         client_config.transport_config(Arc::new(transport_config));
         let mut endpoint =
             Endpoint::client(Self::ANY_ADDR).context("Failed to create quic endpoint")?;
@@ -1159,8 +1168,9 @@ impl Message {
                     continue;
                 }
                 MessageKind::Connect => {
-                    let addr = String::from_utf8(self.get_payload().to_vec())
-                        .context("Invalid address")?;
+                    let addr = str::from_utf8(self.get_payload())
+                        .map_err(|_| whatever!("Invalid address"))?
+                        .to_owned();
                     return Ok(addr);
                 }
                 MessageKind::Require => {
