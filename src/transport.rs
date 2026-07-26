@@ -593,9 +593,10 @@ impl QuicConnector {
         let addr = resolve_and_cache(&self.host, &self.addr).await?;
         // DNS may flip between IPv4/IPv6; rebind so the UDP socket matches.
         if let Ok(local) = self.endpoint.local_addr()
-            && local.is_ipv4() != addr.is_ipv4() {
-                self.rebind_to(addr).await?;
-            }
+            && local.is_ipv4() != addr.is_ipv4()
+        {
+            self.rebind_to(addr).await?;
+        }
         match self
             .endpoint
             .connect(addr, &self.server_name)?
