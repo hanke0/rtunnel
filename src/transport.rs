@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::fmt::Display;
 use std::future::Future;
 use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::pin::{Pin, pin};
@@ -18,6 +19,7 @@ use std::time::Duration;
 
 use bytes::BytesMut;
 use quinn::Connection;
+use quinn::IdleTimeout;
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Endpoint, RecvStream, SendStream, TransportConfig};
@@ -467,6 +469,7 @@ impl Listener for QuicListener {
             .context("failed to build quic server config")?;
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(server_config));
         let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+        transport_config.max_idle_timeout(Some(quic_max_idle_timeout()));
         transport_config.max_concurrent_uni_streams(0_u8.into());
         transport_config.max_concurrent_bidi_streams(4096_u32.into());
         transport_config.stream_receive_window((2u32 * 1024 * 1024).into());
@@ -532,7 +535,6 @@ pub struct QuicConnector {
     server_name: String,
     host: String,
     addr: RwLock<SocketAddr>,
-    local_addr: SocketAddr,
     reconnect_failed: AtomicI32,
 }
 
@@ -549,26 +551,36 @@ impl fmt::Debug for QuicConnector {
 }
 
 impl QuicConnector {
-    const ANY_IP: IpAddr = IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 0));
-    const ANY_ADDR: SocketAddr = SocketAddr::new(Self::ANY_IP, 0);
+    async fn ensure_connection(&self) -> Result<Connection> {
+        let mut guard = self.connection.lock().await;
+        let dead = guard
+            .as_ref()
+            .map(|c| c.close_reason().is_some())
+            .unwrap_or(true);
+        if dead {
+            *guard = Some(self.reconnect().await?);
+        }
+        Ok(guard.as_ref().cloned().unwrap())
+    }
 
     async fn open_stream(&self) -> Result<(SendStream, RecvStream)> {
-        let conn = {
-            let mut guard = self.connection.lock().await;
-            if guard.is_none() {
-                *guard = Some(self.reconnect().await?);
-            }
-            guard.as_ref().cloned().unwrap()
-        };
+        let conn = self.ensure_connection().await?;
         match conn.open_bi().await {
             Ok((send, recv)) => Ok((send, recv)),
             Err(e) => {
                 warn!("failed to open quic bi stream, reconnecting: {:#}", e);
-                let conn = self.reconnect().await?;
-                {
-                    let mut guard = self.connection.lock().await;
-                    *guard = Some(conn.clone());
+                let mut guard = self.connection.lock().await;
+                // Only reconnect if the stored connection is still the one that failed
+                // (or already dead). Another task may have already replaced it.
+                let need_reconnect = match guard.as_ref() {
+                    None => true,
+                    Some(c) => c.close_reason().is_some() || c.stable_id() == conn.stable_id(),
+                };
+                if need_reconnect {
+                    *guard = Some(self.reconnect().await?);
                 }
+                let conn = guard.as_ref().cloned().unwrap();
+                drop(guard);
                 conn.open_bi()
                     .await
                     .context("failed to open quic bi stream after reconnect")
@@ -579,18 +591,27 @@ impl QuicConnector {
     #[inline]
     async fn reconnect(&self) -> Result<Connection> {
         let addr = resolve_and_cache(&self.host, &self.addr).await?;
+        // DNS may flip between IPv4/IPv6; rebind so the UDP socket matches.
+        if let Ok(local) = self.endpoint.local_addr() {
+            if local.is_ipv4() != addr.is_ipv4() {
+                self.rebind_to(addr).await?;
+            }
+        }
         match self
             .endpoint
             .connect(addr, &self.server_name)?
             .await
             .context("failed to connect quic server")
         {
-            Ok(conn) => Ok(conn),
+            Ok(conn) => {
+                self.reconnect_failed.store(0, Ordering::Relaxed);
+                Ok(conn)
+            }
             Err(e) => {
-                let n = self.reconnect_failed.fetch_add(1, Ordering::Release);
+                let n = self.reconnect_failed.fetch_add(1, Ordering::Relaxed);
                 if n > 3 {
-                    self.reconnect_failed.store(0, Ordering::Release);
-                    match self.rebind().await {
+                    self.reconnect_failed.store(0, Ordering::Relaxed);
+                    match self.rebind_to(addr).await {
                         Ok(_) => {
                             info!("connect failed, rebind udp socket");
                         }
@@ -604,8 +625,8 @@ impl QuicConnector {
         }
     }
 
-    async fn rebind(&self) -> Result<()> {
-        let socket = UdpSocket::bind(QuicConnector::ANY_ADDR).await?;
+    async fn rebind_to(&self, peer: SocketAddr) -> Result<()> {
+        let socket = UdpSocket::bind(quic_any_addr_for(peer)).await?;
         self.endpoint
             .rebind(socket.into_std().context("failed to into std udp socket")?)
             .context("failed to rebind socket")
@@ -625,23 +646,22 @@ impl Connector for QuicConnector {
             .context("failed to build quic client config")?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(client_config));
         let mut transport_config = TransportConfig::default();
-        transport_config.keep_alive_interval(Some(Duration::from_secs(5)));
+        transport_config.max_idle_timeout(Some(quic_max_idle_timeout()));
+        transport_config.keep_alive_interval(Some(QUIC_KEEP_ALIVE));
         transport_config.max_concurrent_bidi_streams(4096_u32.into());
         transport_config.stream_receive_window((2u32 * 1024 * 1024).into());
         transport_config.receive_window((8u32 * 1024 * 1024).into());
         transport_config.send_window(8 * 1024 * 1024);
         client_config.transport_config(Arc::new(transport_config));
-        let mut endpoint =
-            Endpoint::client(Self::ANY_ADDR).context("Failed to create quic endpoint")?;
+        let mut endpoint = Endpoint::client(quic_any_addr_for(addr))
+            .context("Failed to create quic endpoint")?;
         endpoint.set_default_client_config(client_config);
-        let local_addr = endpoint.local_addr().unwrap();
         let c = Self {
             endpoint,
             connection: Mutex::new(None),
             server_name,
             host: config.addr,
             addr: RwLock::new(addr),
-            local_addr,
             reconnect_failed: AtomicI32::new(0),
         };
         Ok(c)
@@ -655,9 +675,13 @@ impl Connector for QuicConnector {
             .context("failed to write quic first byte")?;
         let id = send.id();
         let addr = *self.addr.read().unwrap();
+        let local_addr = self
+            .endpoint
+            .local_addr()
+            .unwrap_or_else(|_| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0));
         Ok((
             QuinStream(send, recv),
-            format!("{}-{}({})", self.local_addr, addr, id),
+            format!("{}-{}({})", local_addr, addr, id),
         ))
     }
 
@@ -754,6 +778,21 @@ fn socket_hint_impl(stream: &TcpStream, no_delay: bool, keep_alive: bool) {
         socket_ref.set_tcp_keepalive(&KEEP_ALIVE).suppress(|err| {
             warn!("set_tcp_keepalive failed: {}", err);
         });
+    }
+}
+
+const QUIC_KEEP_ALIVE: Duration = Duration::from_secs(5);
+const QUIC_MAX_IDLE: Duration = Duration::from_secs(30);
+
+fn quic_max_idle_timeout() -> IdleTimeout {
+    IdleTimeout::try_from(QUIC_MAX_IDLE).expect("QUIC_MAX_IDLE fits in IdleTimeout")
+}
+
+fn quic_any_addr_for(peer: SocketAddr) -> SocketAddr {
+    if peer.is_ipv4() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+    } else {
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
     }
 }
 
