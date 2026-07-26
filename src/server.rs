@@ -301,8 +301,9 @@ async fn handle_service_stream_without_backup<T: Listener, U: Listener>(
     connect_to: &str,
 ) -> Result<(u64, u64)> {
     let start_guard = pool.watch().match_guard();
+    // Allow time for the client to rebuild durable tunnels after a blip.
     let (remote, tunnel_addr) = context
-        .timeout_default(pool.pop())
+        .timeout(Duration::from_secs(30), pool.pop())
         .await
         .context("Failed to get a tunnel from pool")?;
     drop(start_guard);
@@ -338,7 +339,8 @@ struct Session<T: Listener> {
 impl<T: Listener> Session<T> {
     #[tracing::instrument(skip_all)]
     async fn join(self) -> Result<T::Stream> {
-        self.cancel_tx.send(()).unwrap();
+        // Keepalive may have already exited (e.g. ping I/O error); ignore send failure.
+        let _ = self.cancel_tx.send(());
         match self.receiver.await {
             Ok(r) => r,
             Err(e) => Err(e.into()),
@@ -421,6 +423,10 @@ impl<T: Listener> TunnelPool<T> {
 
     async fn remove(&self, id: &String) {
         self.inner.sessions.lock().await.remove(id);
+        let mut queue = self.inner.queue.lock().await;
+        if let Some(pos) = queue.iter().position(|x| x == id) {
+            queue.remove(pos);
+        }
     }
 
     async fn pop(&self) -> Result<(T::Stream, String)> {
@@ -446,9 +452,11 @@ impl<T: Listener> TunnelPool<T> {
             _ = cancel_rx => {
                 self.inner.requires.fetch_sub(1, Ordering::Release);
             }
-            // It's ok to lose place in the queue.
+            // Keep require count; try_pop will take it via swap.
             _ = self.inner.notify.notified() => {}
-            _ = sleep(Duration::from_secs(1)) => {}
+            _ = sleep(Duration::from_secs(1)) => {
+                self.inner.requires.fetch_sub(1, Ordering::Release);
+            }
         }
     }
 
@@ -471,14 +479,11 @@ impl<T: Listener> TunnelPool<T> {
                 Some(session) => {
                     trace!("match a tunnel: {}", id);
                     let mut session = session.join().await?;
-                    let n = self.inner.requires.load(Ordering::Acquire);
+                    // Atomically take outstanding demand so concurrent pops cannot double-subtract.
+                    let n = self.inner.requires.swap(0, Ordering::AcqRel).max(0);
                     if n > 0 || is_empty {
-                        self.inner.requires.fetch_sub(n, Ordering::Release);
-                        if is_empty {
-                            Message::require(n + 1).write_to(&mut session).await?;
-                        } else {
-                            Message::require(n).write_to(&mut session).await?;
-                        }
+                        let require_n = if is_empty { n + 1 } else { n };
+                        Message::require(require_n).write_to(&mut session).await?;
                     }
                     return Ok((session, id));
                 }
@@ -497,6 +502,8 @@ async fn keep_alive<T: Listener>(
     id: &String,
     mut stream: T::Stream,
 ) -> Result<T::Stream> {
+    // Bound half-open detection; do not interrupt an in-flight ping (would desync the protocol).
+    const PING_IO_TIMEOUT: Duration = Duration::from_secs(5);
     let interval = &mut time::interval(Duration::from_secs(5));
     interval.reset();
     let mut message = Message::ping();
@@ -507,8 +514,16 @@ async fn keep_alive<T: Listener>(
             }
             _ = interval.tick() => {
                 trace!("keep alive ping: {}", id);
-                stream.write_all(message.as_ref()).await?;
-                message.read_from_inplace(&mut stream).await?;
+                let ping = async {
+                    stream.write_all(message.as_ref()).await?;
+                    message.read_from_inplace(&mut stream).await?;
+                    Result::Ok(())
+                };
+                match time::timeout(PING_IO_TIMEOUT, ping).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return Err(e),
+                    Err(_) => return Err(Error::from_timeout(PING_IO_TIMEOUT)),
+                }
                 if message.get_type() != MessageKind::Ping {
                     error!("keep alive ping received invalid message type: {:?}", message.get_type());
                     return Err(whatever!("Invalid message type: {:?}", message.get_type()));

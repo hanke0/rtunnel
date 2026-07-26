@@ -9,6 +9,7 @@ use std::pin::{Pin, pin};
 use std::result::Result as StdResult;
 use std::str;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicI32;
 use std::sync::atomic::Ordering;
 use std::task::Context as FContext;
@@ -167,19 +168,20 @@ impl fmt::Display for TlsTcpConnectorConfig {
 
 pub struct TlsTcpConnector {
     connector: TokioTlsConnector,
-    addr: SocketAddr,
+    host: String,
+    addr: RwLock<SocketAddr>,
     server_name: ServerName<'static>,
 }
 
 impl fmt::Display for TlsTcpConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tls://{}", self.addr)
+        write!(f, "tls://{}", self.host)
     }
 }
 
 impl fmt::Debug for TlsTcpConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TlsConnector({})", self.addr)
+        write!(f, "TlsConnector({})", self.host)
     }
 }
 
@@ -188,11 +190,7 @@ impl Connector for TlsTcpConnector {
     type Config = TlsTcpConnectorConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
-        let addr = config
-            .addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or(whatever!("Invalid address"))?;
+        let addr = resolve_host(&config.addr).await?;
         let client_config =
             build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
         let server_name =
@@ -200,13 +198,15 @@ impl Connector for TlsTcpConnector {
         let connector = TokioTlsConnector::from(Arc::new(client_config));
         Ok(Self {
             connector,
-            addr,
+            host: config.addr,
+            addr: RwLock::new(addr),
             server_name,
         })
     }
 
     async fn connect(&self) -> Result<(Self::Stream, String)> {
-        let stream = TcpStream::connect(self.addr).await?;
+        let addr = resolve_and_cache(&self.host, &self.addr).await?;
+        let stream = TcpStream::connect(addr).await?;
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
         socket_hint(&stream);
@@ -220,7 +220,7 @@ impl Connector for TlsTcpConnector {
     }
 
     fn address(&self) -> SocketAddr {
-        self.addr
+        *self.addr.read().unwrap()
     }
 }
 
@@ -309,18 +309,19 @@ impl Display for PlainTcpConnectorConfig {
 }
 
 pub struct PlainTcpConnector {
-    addr: SocketAddr,
+    host: String,
+    addr: RwLock<SocketAddr>,
 }
 
 impl fmt::Display for PlainTcpConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "tcp://{}", self.addr)
+        write!(f, "tcp://{}", self.host)
     }
 }
 
 impl fmt::Debug for PlainTcpConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PlainTcpConnector({})", self.addr)
+        write!(f, "PlainTcpConnector({})", self.host)
     }
 }
 
@@ -329,16 +330,16 @@ impl Connector for PlainTcpConnector {
     type Config = PlainTcpConnectorConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
-        let addr = config
-            .addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or(whatever!("Invalid address"))?;
-        Ok(Self { addr })
+        let addr = resolve_host(&config.addr).await?;
+        Ok(Self {
+            host: config.addr,
+            addr: RwLock::new(addr),
+        })
     }
 
     async fn connect(&self) -> Result<(Self::Stream, String)> {
-        let stream = TcpStream::connect(self.addr).await?;
+        let addr = resolve_and_cache(&self.host, &self.addr).await?;
+        let stream = TcpStream::connect(addr).await?;
         let local_addr = stream.local_addr()?.to_string();
         let peer_addr = stream.peer_addr()?.to_string();
         socket_hint(&stream);
@@ -346,7 +347,7 @@ impl Connector for PlainTcpConnector {
     }
 
     fn address(&self) -> SocketAddr {
-        self.addr
+        *self.addr.read().unwrap()
     }
 }
 
@@ -367,6 +368,7 @@ impl Display for QuicListenerConfig {
 
 pub struct QuicListener {
     addr: SocketAddr,
+    endpoint: Endpoint,
     receiver: Mutex<mpsc::Receiver<(QuinStream, String)>>,
     _sender: mpsc::Sender<(QuinStream, String)>,
 }
@@ -390,8 +392,9 @@ impl QuicListener {
                         continue;
                     }
                     Err(e) => {
+                        // A single failed handshake must not kill the accept loop permanently.
                         error!("failed to accept connection: {:#}", e);
-                        break;
+                        continue;
                     }
                 },
                 None => return,
@@ -447,6 +450,12 @@ impl QuicListener {
     }
 }
 
+impl Drop for QuicListener {
+    fn drop(&mut self) {
+        self.endpoint.close(0u32.into(), b"listener closed");
+    }
+}
+
 impl Listener for QuicListener {
     type Stream = QuinStream;
     type Config = QuicListenerConfig;
@@ -464,12 +473,15 @@ impl Listener for QuicListener {
         transport_config.receive_window((8u32 * 1024 * 1024).into());
         transport_config.send_window(8 * 1024 * 1024);
 
-        let addr = config.addr;
         let endpoint = Endpoint::server(server_config, config.addr)?;
+        let addr = endpoint
+            .local_addr()
+            .context("failed to get quic local addr")?;
         let (sender, receiver) = mpsc::channel(1024);
-        tokio::spawn(Self::accept_forever(addr, endpoint, sender.clone()));
+        tokio::spawn(Self::accept_forever(addr, endpoint.clone(), sender.clone()));
         Ok(Self {
             addr,
+            endpoint,
             _sender: sender,
             receiver: Mutex::new(receiver),
         })
@@ -518,20 +530,21 @@ pub struct QuicConnector {
     endpoint: Endpoint,
     connection: Mutex<Option<Connection>>,
     server_name: String,
-    addr: SocketAddr,
+    host: String,
+    addr: RwLock<SocketAddr>,
     local_addr: SocketAddr,
     reconnect_failed: AtomicI32,
 }
 
 impl fmt::Display for QuicConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "quic://{}", self.addr)
+        write!(f, "quic://{}", self.host)
     }
 }
 
 impl fmt::Debug for QuicConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "QuicConnector({})", self.addr)
+        write!(f, "QuicConnector({})", self.host)
     }
 }
 
@@ -565,9 +578,10 @@ impl QuicConnector {
 
     #[inline]
     async fn reconnect(&self) -> Result<Connection> {
+        let addr = resolve_and_cache(&self.host, &self.addr).await?;
         match self
             .endpoint
-            .connect(self.addr, &self.server_name)?
+            .connect(addr, &self.server_name)?
             .await
             .context("failed to connect quic server")
         {
@@ -603,11 +617,7 @@ impl Connector for QuicConnector {
     type Config = QuicConnectorConfig;
 
     async fn new(config: Self::Config) -> Result<Self> {
-        let addr = config
-            .addr
-            .to_socket_addrs()?
-            .next()
-            .ok_or(whatever!("Invalid address"))?;
+        let addr = resolve_host(&config.addr).await?;
         let server_name = config.subject.clone();
         let client_config =
             build_tls_client_config(&config.client_cert, &config.client_key, &config.server_cert)?;
@@ -629,7 +639,8 @@ impl Connector for QuicConnector {
             endpoint,
             connection: Mutex::new(None),
             server_name,
-            addr,
+            host: config.addr,
+            addr: RwLock::new(addr),
             local_addr,
             reconnect_failed: AtomicI32::new(0),
         };
@@ -643,14 +654,15 @@ impl Connector for QuicConnector {
             .await
             .context("failed to write quic first byte")?;
         let id = send.id();
+        let addr = *self.addr.read().unwrap();
         Ok((
             QuinStream(send, recv),
-            format!("{}-{}({})", self.local_addr, self.addr, id),
+            format!("{}-{}({})", self.local_addr, addr, id),
         ))
     }
 
     fn address(&self) -> SocketAddr {
-        self.addr
+        *self.addr.read().unwrap()
     }
 }
 
@@ -717,6 +729,11 @@ pub fn tcp_no_delay(stream: &TcpStream) {
     socket_hint_impl(stream, true, false);
 }
 
+/// Enable TCP_NODELAY and TCP keepalive (for tunnel and local service sockets).
+pub fn tcp_stream_hint(stream: &TcpStream) {
+    socket_hint(stream);
+}
+
 fn socket_hint(stream: &TcpStream) {
     socket_hint_impl(stream, true, true);
 }
@@ -729,13 +746,33 @@ fn socket_hint_impl(stream: &TcpStream, no_delay: bool, keep_alive: bool) {
         });
     }
     if keep_alive {
+        // ~10s idle + 3 probes @ 1s ≈ 13s dead-peer detection on Linux.
         static KEEP_ALIVE: TcpKeepalive = TcpKeepalive::new()
             .with_time(Duration::from_secs(10))
-            .with_interval(Duration::from_secs(1));
+            .with_interval(Duration::from_secs(1))
+            .with_retries(3);
         socket_ref.set_tcp_keepalive(&KEEP_ALIVE).suppress(|err| {
             warn!("set_tcp_keepalive failed: {}", err);
         });
     }
+}
+
+async fn resolve_host(host: &str) -> Result<SocketAddr> {
+    tokio::net::lookup_host(host)
+        .await
+        .with_context(|| format!("DNS resolve failed for {host}"))?
+        .next()
+        .ok_or_else(|| whatever!("Invalid address: no addresses for {host}"))
+}
+
+async fn resolve_and_cache(host: &str, cached: &RwLock<SocketAddr>) -> Result<SocketAddr> {
+    let addr = resolve_host(host).await?;
+    let prev = *cached.read().unwrap();
+    if prev != addr {
+        info!("resolved {host} -> {addr} (was {prev})");
+        *cached.write().unwrap() = addr;
+    }
+    Ok(addr)
 }
 
 fn build_tls_server_config(
@@ -1324,57 +1361,54 @@ mod tests {
     async fn test_tls_stream() {
         observe::setup_testing();
         let cert = config::SelfSignedCert::new("example.com");
-        const ADDR: &str = "127.0.0.1:4445";
-        test_stream::<TlsTcpListener, TlsTcpConnector>(
-            TlsTcpListenerConfig {
-                server_cert: cert.server_cert.clone(),
-                server_key: cert.server_key,
-                client_cert: cert.client_cert.clone(),
-                subject: cert.subject.clone(),
-                addr: SocketAddr::from_str(ADDR).unwrap(),
-                reuse_port: None,
-            },
-            TlsTcpConnectorConfig {
-                subject: cert.subject,
-                addr: ADDR.to_string(),
-                client_cert: cert.client_cert,
-                client_key: cert.client_key,
-                server_cert: cert.server_cert,
-            },
-        )
-        .await;
+        let listener = TlsTcpListener::new(TlsTcpListenerConfig {
+            server_cert: cert.server_cert.clone(),
+            server_key: cert.server_key,
+            client_cert: cert.client_cert.clone(),
+            subject: cert.subject.clone(),
+            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+            reuse_port: None,
+        })
+        .await
+        .unwrap();
+        let connector = TlsTcpConnector::new(TlsTcpConnectorConfig {
+            subject: cert.subject,
+            addr: listener.address().to_string(),
+            client_cert: cert.client_cert,
+            client_key: cert.client_key,
+            server_cert: cert.server_cert,
+        })
+        .await
+        .unwrap();
+        test_stream(listener, connector).await;
     }
 
     #[tokio::test]
     async fn test_quic_stream() {
         observe::setup_testing();
         let cert = config::SelfSignedCert::new("example.com");
-        const ADDR: &str = "127.0.0.1:4446";
-        test_stream::<QuicListener, QuicConnector>(
-            QuicListenerConfig {
-                server_cert: cert.server_cert.clone(),
-                server_key: cert.server_key,
-                client_cert: cert.client_cert.clone(),
-                subject: cert.subject.clone(),
-                addr: SocketAddr::from_str(ADDR).unwrap(),
-            },
-            QuicConnectorConfig {
-                client_cert: cert.client_cert,
-                client_key: cert.client_key,
-                server_cert: cert.server_cert,
-                subject: cert.subject,
-                addr: ADDR.to_string(),
-            },
-        )
-        .await;
+        let listener = QuicListener::new(QuicListenerConfig {
+            server_cert: cert.server_cert.clone(),
+            server_key: cert.server_key,
+            client_cert: cert.client_cert.clone(),
+            subject: cert.subject.clone(),
+            addr: SocketAddr::from_str("127.0.0.1:0").unwrap(),
+        })
+        .await
+        .unwrap();
+        let connector = QuicConnector::new(QuicConnectorConfig {
+            client_cert: cert.client_cert,
+            client_key: cert.client_key,
+            server_cert: cert.server_cert,
+            subject: cert.subject,
+            addr: listener.address().to_string(),
+        })
+        .await
+        .unwrap();
+        test_stream(listener, connector).await;
     }
 
-    async fn test_stream<T: Listener, C: Connector>(
-        listen_config: T::Config,
-        connect_config: C::Config,
-    ) {
-        let listener = T::new(listen_config).await.unwrap();
-        let connector = C::new(connect_config).await.unwrap();
+    async fn test_stream<T: Listener, C: Connector>(listener: T, connector: C) {
         trace!("listener: {:?}", listener);
         trace!("connector: {:?}", connector);
         let (client, server) = tokio::join!(connector.connect(), listener.accept(),);

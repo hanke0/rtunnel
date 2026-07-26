@@ -144,7 +144,7 @@ impl Error {
     }
 
     pub fn is_refused(&self) -> bool {
-        matches!(self.inner.kind, ErrorKind::Canceled)
+        matches!(self.inner.kind, ErrorKind::ConnectionRefused)
     }
 
     pub fn is_timeout(&self) -> bool {
