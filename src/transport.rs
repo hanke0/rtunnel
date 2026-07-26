@@ -592,11 +592,10 @@ impl QuicConnector {
     async fn reconnect(&self) -> Result<Connection> {
         let addr = resolve_and_cache(&self.host, &self.addr).await?;
         // DNS may flip between IPv4/IPv6; rebind so the UDP socket matches.
-        if let Ok(local) = self.endpoint.local_addr() {
-            if local.is_ipv4() != addr.is_ipv4() {
+        if let Ok(local) = self.endpoint.local_addr()
+            && local.is_ipv4() != addr.is_ipv4() {
                 self.rebind_to(addr).await?;
             }
-        }
         match self
             .endpoint
             .connect(addr, &self.server_name)?
@@ -653,8 +652,8 @@ impl Connector for QuicConnector {
         transport_config.receive_window((8u32 * 1024 * 1024).into());
         transport_config.send_window(8 * 1024 * 1024);
         client_config.transport_config(Arc::new(transport_config));
-        let mut endpoint = Endpoint::client(quic_any_addr_for(addr))
-            .context("Failed to create quic endpoint")?;
+        let mut endpoint =
+            Endpoint::client(quic_any_addr_for(addr)).context("Failed to create quic endpoint")?;
         endpoint.set_default_client_config(client_config);
         let c = Self {
             endpoint,
